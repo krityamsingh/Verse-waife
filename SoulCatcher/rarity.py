@@ -9,7 +9,7 @@
 ║   4 🔥 Infernal     high-activity groups only, announced                    ║
 ║   5 💎 Crystal    + sub: 🌸 Seasonal   (holiday/event chars)                ║
 ║   6 🔴 Mythic     + sub: 🔮 Limited Edition (time-limited)                  ║
-║   7 ✨ Eternal    + sub: 🎠 Cartoon  (western cartoon chars · VIDEO ONLY)   ║
+║   7 ✨ Eternal    + sub: 🎠 Verse    (video chars only · VIDEO ONLY)        ║
 ║                                                                              ║
 ║  HOW TO CUSTOMISE:                                                           ║
 ║   • Add/edit main tier  → RARITIES dict                                     ║
@@ -140,7 +140,7 @@ RARITIES: dict[str, RarityTier] = {
         description="Cannot be traded/gifted. Has 🔮 Limited Edition sub. Max 3 per user.",
     ),
 
-    # ── TIER 7 ─ Eternal  (has sub-rarity: Cartoon · VIDEO ONLY) ─────────────
+    # ── TIER 7 ─ Eternal  (has sub-rarity: Verse · VIDEO ONLY) ──────────────
     "eternal": RarityTier(
         id=7, name="eternal",
         display_name="✦ ETERNAL ✦", emoji="✨", color_hex="#FFD700",
@@ -149,7 +149,7 @@ RARITIES: dict[str, RarityTier] = {
         spawn_requires_activity=True, announce_spawn=True,
         sell_price_min=60000, sell_price_max=120000, kakera_reward=4000,
         wishlist_ping=True, trade_allowed=False, gift_allowed=False, max_per_user=1,
-        description="Ultra-rare. Has 🎠 Cartoon sub (VIDEO ONLY). Max 1 per user.",
+        description="Ultra-rare. Has 🎠 Verse sub (VIDEO ONLY). Max 1 per user.",
     ),
 }
 
@@ -184,17 +184,17 @@ SUB_RARITIES: dict[str, RarityTier] = {
         description="Drops only during limited-time events. 1 per user. NOT tradeable.",
     ),
 
-    # ── Eternal → 🎠 Cartoon (VIDEO ONLY) ────────────────────────────────────
+    # ── Eternal → 🎠 Verse (VIDEO ONLY · only chars with video_url spawn) ────
     "cartoon": RarityTier(
         id=71, name="cartoon",
-        display_name="Cartoon", emoji="🎠", color_hex="#FF9800",
+        display_name="Verse", emoji="🎠", color_hex="#FF9800",
         weight=0.04, drop_limit_per_day=1,
         group_spawn_chance=0.0004, claim_window_seconds=10,
         spawn_requires_activity=True, announce_spawn=True,
-        video_only=True,           # ← WESTERN CARTOON CHARS, VIDEO FORMAT ONLY
+        video_only=True,           # ← VERSE CHARS · VIDEO FORMAT ONLY (must have video_url)
         sell_price_min=100000, sell_price_max=250000, kakera_reward=8000,
         wishlist_ping=True, trade_allowed=False, gift_allowed=False, max_per_user=1,
-        description="Western cartoon characters. VIDEO ONLY. 1 per user. The rarest drop in existence.",
+        description="Verse characters. VIDEO ONLY — only characters with a video will spawn. 1 per user. The rarest drop in existence.",
     ),
 }
 
