@@ -47,7 +47,8 @@ CATBOX_API = "https://catbox.moe/user/api.php"
 def _build_upload_help() -> str:
     lines = [
         "📸 **Reply to a photo or video, then:**",
-        "`/upload <anime> | <char_name> | <rarity_id>`",
+        "`/upload <name> | <anime> | <rarity_id>` — main rarities",
+        "`/upload <name> | <anime> | <rarity_id> | <sub_tag>` — sub-rarities",
         "",
         "━━━━ **MAIN RARITIES** ━━━━",
     ]
@@ -80,12 +81,14 @@ def _build_upload_help() -> str:
     lines += [
         "",
         "━━━━ **EXAMPLES** ━━━━",
-        "`/upload Naruto | Sasuke | 2`  → 🔵 Rare",
-        "`/upload One Piece | Luffy | 6`  → 🔴 Mythic",
-        "`/upload Bleach | Rukia | 51`  → 🌸 Festival  _(then `/uchar season <id> diwali`)_",
-        "`/upload JJK | Gojo | 62`  → 🏆 Sports  _(then `/uchar sport <id> football`)_",
-        "`/upload FMA | Winry | 63`  → 🧝 Fantasy  _(then `/uchar fantasy <id> witch`)_",
-        "`/upload SAO | Asuna | 71`  → 🎠 Verse  _(VIDEO ONLY — reply to video)_",
+        "`/upload Sasuke | Naruto | 2`  → 🔵 Rare",
+        "`/upload Luffy | One Piece | 6`  → 🔴 Mythic",
+        "`/upload Rukia | Bleach | 51 | diwali`  → 🌸 Festival (Diwali)",
+        "`/upload Gojo | JJK | 51 | christmas`  → 🌸 Festival (Christmas)",
+        "`/upload Oliver | Captain Tsubasa | 62 | football`  → 🏆 Sports (Football)",
+        "`/upload Miku | Vocaloid | 63 | fairy`  → 🧝 Fantasy (Fairy)",
+        "`/upload Asuna | SAO | 71`  → 🎠 Verse  _(VIDEO ONLY — reply to video)_",
+        "`/upload Rem | Re:Zero | 61`  → 🔮 Limited Edition",
     ]
     return "\n".join(lines)
 
@@ -137,13 +140,73 @@ def _sub_meta_from_tier(tier) -> dict:
 
 
 def _parse_upload_args(text: str):
-    """Returns (anime, char_name, rarity_id) or raises ValueError."""
-    for sep in ["|", "-"]:
-        parts = [p.strip() for p in text.split(sep, 2)]
-        if len(parts) == 3:
-            anime, char_name, rid = parts
-            return anime, char_name, int(rid)
-    raise ValueError("Bad format — use: `anime | name | rarity_id`")
+    """
+    Supports both:
+      name | anime | rarity_id
+      name | anime | rarity_id | sub_tag
+    Returns (char_name, anime, rarity_id, sub_tag_or_None).
+    """
+    parts = [p.strip() for p in text.split("|")]
+    if len(parts) == 3:
+        char_name, anime, rid = parts
+        return char_name, anime, int(rid), None
+    if len(parts) == 4:
+        char_name, anime, rid, sub_tag = parts
+        return char_name, anime, int(rid), sub_tag.lower() or None
+    raise ValueError("Bad format — use: `name | anime | rarity_id` or `name | anime | rarity_id | sub_tag`")
+
+
+def _resolve_sub_meta(rarity_id: int, sub_tag: Optional[str]) -> dict:
+    """
+    Given a rarity_id and an optional sub_tag string entered by the uploader,
+    return the correct extra_meta dict for DB storage and caption display.
+
+    For sub-rarities that don't need a tag (Limited Edition, Verse):
+      sub_tag can be omitted — meta is built from the tier itself.
+    For sub-rarities that need a tag (Festival, Sports, Fantasy):
+      sub_tag must match a key in the relevant lookup table.
+    """
+    tier = get_rarity_by_id(rarity_id)
+    if not tier:
+        return {}
+
+    # Not a sub-rarity — no meta needed
+    if rarity_id not in {51, 61, 62, 63, 71}:
+        return {}
+
+    # Base meta always present for any sub-rarity
+    base = {"sub_tag": tier.name, "sub_label": tier.display_name, "sub_emoji": tier.emoji}
+
+    if rarity_id == 51:   # Festival — needs season key
+        if sub_tag and sub_tag in FESTIVAL_SEASONS:
+            s = FESTIVAL_SEASONS[sub_tag]
+            return {**base,
+                "festival_season": sub_tag,
+                "festival_label":  s["label"],
+                "festival_emoji":  s["emoji"],
+                "active_months":   s["active_months"],
+            }
+
+    elif rarity_id == 62:  # Sports — needs sport key
+        if sub_tag and sub_tag in MYTHIC_SPORTS:
+            s = MYTHIC_SPORTS[sub_tag]
+            return {**base,
+                "sport_type":  sub_tag,
+                "sport_label": s["label"],
+                "sport_emoji": s["emoji"],
+            }
+
+    elif rarity_id == 63:  # Fantasy — needs archetype key
+        if sub_tag and sub_tag in MYTHIC_FANTASY:
+            f = MYTHIC_FANTASY[sub_tag]
+            return {**base,
+                "archetype":       sub_tag,
+                "archetype_label": f["label"],
+                "archetype_emoji": f["emoji"],
+            }
+
+    # For ID 61 (Limited Edition) and 71 (Verse), or when tag is missing/invalid
+    return base
 
 
 def _sub_line(char: dict) -> str:
@@ -317,13 +380,28 @@ async def cmd_upload(client, message: Message):
         return await message.reply_text(UPLOAD_HELP_TEXT)
 
     try:
-        anime, char_name, rid = _parse_upload_args(args_text)
+        char_name, anime, rid, sub_tag = _parse_upload_args(args_text)
     except (ValueError, IndexError) as e:
         return await message.reply_text(f"❌ {e}\n\n" + UPLOAD_HELP_TEXT)
 
     tier = get_rarity_by_id(rid)
     if not tier:
         return await message.reply_text(f"❌ Unknown rarity ID `{rid}`\n\n" + UPLOAD_HELP_TEXT)
+
+    # Validate sub_tag if provided
+    if sub_tag:
+        _valid_tags = {
+            51: set(FESTIVAL_SEASONS),
+            62: set(MYTHIC_SPORTS),
+            63: set(MYTHIC_FANTASY),
+        }
+        allowed = _valid_tags.get(rid)
+        if allowed is not None and sub_tag not in allowed:
+            valid_list = "`, `".join(sorted(allowed))
+            return await message.reply_text(
+                f"❌ Invalid sub-tag `{sub_tag}` for {tier.emoji} **{tier.display_name}**\n"
+                f"Valid: `{valid_list}`"
+            )
 
     reply  = message.reply_to_message
     is_vid = bool(reply.video or reply.animation)
@@ -347,7 +425,7 @@ async def cmd_upload(client, message: Message):
         anime=anime,
         rarity_id=rid,
         mention=mention,
-        extra_meta=_sub_meta_from_tier(tier),
+        extra_meta=_resolve_sub_meta(rid, sub_tag),
     )
     _cleanup(file_path)
 
