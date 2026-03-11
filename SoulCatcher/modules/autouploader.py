@@ -37,7 +37,7 @@ from pyrogram.types import Message
 from pyrogram.errors import FloodWait, MessageNotModified
 
 from .. import app, uploader_filter
-from ..config import UPLOAD_CHANNEL_ID, UPLOAD_GC_ID
+from ..config import UPLOAD_GC_ID
 from ..rarity import RARITY_ID_MAP, RARITY_LIST_TEXT, is_video_only, get_rarity_by_id
 from ..database import (
     insert_character, get_character, update_character, is_uploader,
@@ -48,6 +48,13 @@ try:
     HAS_REQUESTS = True
 except ImportError:
     HAS_REQUESTS = False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HARDCODED UPLOAD CHANNEL  →  @SoulUploads  |  log_id = -1003888855632
+# ─────────────────────────────────────────────────────────────────────────────
+
+UPLOAD_CHANNEL_ID: int = -1003888855632   # @SoulUploads
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,7 +169,7 @@ async def _process(client, job: UploadJob):
     }
     char_id = await insert_character(doc)
 
-    # Post to upload channel
+    # Post to @SoulUploads (-1003888855632)
     caption = (
         f"✅ **Character Added!**\n\n"
         f"🆔 `{char_id}`\n"
@@ -173,15 +180,16 @@ async def _process(client, job: UploadJob):
         + (" _(VIDEO)_" if job.is_video else "")
     )
 
-    if UPLOAD_CHANNEL_ID:
+    try:
+        if job.is_video:
+            await client.send_video(UPLOAD_CHANNEL_ID, url, caption=caption)
+        else:
+            await client.send_photo(UPLOAD_CHANNEL_ID, url, caption=caption)
+    except Exception:
         try:
-            if job.is_video:
-                await client.send_video(UPLOAD_CHANNEL_ID, url, caption=caption)
-            else:
-                await client.send_photo(UPLOAD_CHANNEL_ID, url, caption=caption)
+            await client.send_message(UPLOAD_CHANNEL_ID, caption)
         except Exception:
-            try: await client.send_message(UPLOAD_CHANNEL_ID, caption)
-            except Exception: pass
+            pass
 
     await job.notify_msg.reply_text(caption)
 
