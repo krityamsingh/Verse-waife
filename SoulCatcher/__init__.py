@@ -1,7 +1,6 @@
-"""SoulCatcher/__init__.py — Pyrogram client + permission filters + auto module loader."""
+"""SoulCatcher/__init__.py — Pyrogram client + permission filters."""
 from __future__ import annotations
-import logging, importlib
-from pathlib import Path
+import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from .config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, SUDO_IDS
@@ -40,24 +39,3 @@ def capsify(text: str) -> str:
 
 gban_watcher  = 1
 gmute_watcher = 2
-
-# ── Auto-load all modules ─────────────────────────────────────────────────────
-def load_modules():
-    modules_dir = Path(__file__).parent / "modules"
-    loaded, failed = [], []
-
-    for f in sorted(modules_dir.glob("*.py")):
-        if f.name.startswith("_"):
-            continue
-        mod_path = f"SoulCatcher.modules.{f.stem}"
-        try:
-            importlib.import_module(mod_path)
-            loaded.append(f.stem)
-            log.info(f"  ✅ {f.stem}")
-        except Exception as e:
-            failed.append(f.stem)
-            log.error(f"  ❌ {f.stem}: {e}")
-
-    log.info(f"Modules loaded: {len(loaded)} ✅  |  failed: {len(failed)} ❌")
-    if failed:
-        log.warning(f"Failed modules: {', '.join(failed)}")
