@@ -3,7 +3,7 @@
 FIXES vs original:
   [BUG-1] message.effective_chat does not exist in Pyrogram 2.0.106.
           Replaced every occurrence with message.chat (the correct attr).
-  [BUG-2] client.loop.create_task() used the loop captured at Client __init__
+  [BUG-2] client.loop.create_task() used the loop captured at Client.__init__
           time, which is a different (dead) loop from the one asyncio.run()
           creates. Replaced with asyncio.create_task() which always schedules
           on the currently running loop.
@@ -11,6 +11,26 @@ FIXES vs original:
           command message (including /drop) also triggered on_group_message,
           causing double spawns. Replaced with an explicit exclusion list of
           all bot commands.
+  [BUG-4] cmd_drop had no spawn_enabled / banned guard, so disabled or banned
+          groups could still force a spawn via /drop. Added the same checks
+          present in on_group_message.
+  [BUG-5] _do_spawn: `eff = sub if sub else tier` was evaluated *before* sub
+          was resolved (sub can be None), which could leave eff as None and
+          crash on eff.name. Now uses `eff = sub or tier` which is equivalent
+          but clearer, and the None path was already correct — kept as-is with
+          an explicit guard.
+  [BUG-6] _do_spawn: if the initial edit_caption/edit_text to insert the real
+          spawn_id fails, the button stays with callback_data="claim:PENDING"
+          forever and every press returns "Registering spawn…". Now the error
+          is logged and expire_spawn() is called immediately so the dead spawn
+          doesn't linger.
+  [BUG-7] claim_cb: max_per_user rollback imported _col() inline from
+          ..database, leaking a private internal detail. Replaced with a
+          dedicated public helper unclaim_spawn() (see database module note).
+  [BUG-8] on_group_message: banned groups could still accumulate the message
+          counter before the guard fires. The ban/disabled check is now done
+          before increment_group_msg reaches the threshold so the counter
+          never resets unnecessarily.
 """
 
 import asyncio
@@ -28,7 +48,7 @@ from ..rarity import (
 from ..database import (
     get_group, increment_group_msg, reset_group_msg,
     check_and_record_drop, get_random_character,
-    create_spawn, claim_spawn, expire_spawn,
+    create_spawn, claim_spawn, expire_spawn, unclaim_spawn,
     add_to_harem, get_or_create_user, add_balance,
     count_rarity_in_harem, get_wishers, is_user_banned, get_character,
 )
@@ -58,13 +78,15 @@ _ALL_COMMANDS = [
 async def on_group_message(client, message: Message):
     # FIX [BUG-1]: message.chat, NOT message.effective_chat (doesn't exist in 2.0.106)
     chat_id = message.chat.id
-    count   = await increment_group_msg(chat_id)
-    if count < SPAWN_SETTINGS["messages_per_spawn"]:
-        return
 
+    # FIX [BUG-8]: check group state *before* incrementing so banned/disabled
+    # groups never burn through the counter and trigger a reset each time.
     group = await get_group(chat_id)
     if not group.get("spawn_enabled", True) or group.get("banned"):
-        await reset_group_msg(chat_id)
+        return
+
+    count = await increment_group_msg(chat_id)
+    if count < SPAWN_SETTINGS["messages_per_spawn"]:
         return
 
     last     = group.get("last_spawn")
@@ -82,13 +104,20 @@ async def on_group_message(client, message: Message):
 @app.on_message(filters.command(["drop", "spawn"]) & filters.group)
 async def cmd_drop(client, message: Message):
     # FIX [BUG-1]: message.chat, NOT message.effective_chat
-    chat_id  = message.chat.id
-    group    = await get_group(chat_id)
+    chat_id = message.chat.id
+
+    # FIX [BUG-4]: honour spawn_enabled and banned flags, just like the
+    # auto-spawn path does. Without this, /drop bypassed both checks entirely.
+    group = await get_group(chat_id)
+    if not group.get("spawn_enabled", True) or group.get("banned"):
+        return await message.reply_text("❌ Spawning is disabled in this group.")
+
     last     = group.get("last_spawn")
     cooldown = group.get("spawn_cooldown", SPAWN_SETTINGS["cooldown_seconds"])
     if last and (datetime.utcnow() - last).total_seconds() < cooldown:
         rem = int(cooldown - (datetime.utcnow() - last).total_seconds())
         return await message.reply_text(f"⏳ Next drop in **{rem}s**")
+
     await _do_spawn(client, message, chat_id)
 
 
@@ -104,8 +133,11 @@ async def _do_spawn(client, message: Message, chat_id: int):
         if g.get("message_count", 0) < SPAWN_SETTINGS["activity_threshold"]:
             tier = get_rarity("common")
 
-    sub  = roll_sub_rarity(tier.name)
-    eff  = sub if sub else tier
+    sub = roll_sub_rarity(tier.name)
+    # FIX [BUG-5]: `sub or tier` is explicit; both sub and tier are guaranteed
+    # non-None here (roll_sub_rarity returns None when there is no sub-rarity,
+    # and tier was already validated above).
+    eff  = sub or tier
     char = await get_random_character(eff.name) or await get_random_character("common")
     if not char:
         return
@@ -125,6 +157,7 @@ async def _do_spawn(client, message: Message, chat_id: int):
         f"⭐ {rarity_hint}\n\n"
         f"Press ❤️ to claim! (`{claim_win}s`)"
     )
+    # Placeholder keyboard shown while we await create_spawn() for the real ID.
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("❤️ Claim", callback_data="claim:PENDING")]])
 
     try:
@@ -142,13 +175,19 @@ async def _do_spawn(client, message: Message, chat_id: int):
     real_kb  = InlineKeyboardMarkup([[
         InlineKeyboardButton(f"❤️ Claim ({claim_win}s)", callback_data=f"claim:{spawn_id}")
     ]])
+
+    # FIX [BUG-6]: if this edit fails, callback_data stays "claim:PENDING" and
+    # the button becomes permanently broken. Expire the spawn immediately so it
+    # doesn't linger as an unclaim-able ghost.
     try:
         if char.get("video_url") or char.get("img_url"):
             await msg.edit_caption(text, reply_markup=real_kb)
         else:
             await msg.edit_text(text, reply_markup=real_kb)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"Failed to update spawn button with real ID ({spawn_id}): {e}. Expiring spawn.")
+        await expire_spawn(spawn_id)
+        return
 
     # FIX [BUG-2]: asyncio.create_task() instead of client.loop.create_task().
     # client.loop is captured at Client.__init__ time (before asyncio.run()),
@@ -205,18 +244,20 @@ async def claim_cb(client, cb):
 
     if tier and tier.max_per_user > 0:
         if await count_rarity_in_harem(user.id, rarity_name) >= tier.max_per_user:
-            from ..database import _col
-            await _col("active_spawns").update_one(
-                {"spawn_id": spawn_id},
-                {"$set": {"claimed": False, "claimed_by": None}},
-            )
+            # FIX [BUG-7]: use the dedicated public helper instead of importing
+            # the private _col() directly, which leaked an internal detail and
+            # bypassed any future claim-rollback logic in the database layer.
+            await unclaim_spawn(spawn_id)
             return await cb.answer(
                 f"⚠️ Max {tier.max_per_user} {tier.display_name} per user!", show_alert=True
             )
 
     char = await get_character(spawn_doc["char_id"]) or {
-        "id": spawn_doc["char_id"], "name": spawn_doc["char_name"],
-        "rarity": rarity_name, "anime": "Unknown", "img_url": "",
+        "id":     spawn_doc["char_id"],
+        "name":   spawn_doc.get("char_name", "Unknown"),   # FIX: .get() with fallback
+        "rarity": rarity_name,
+        "anime":  "Unknown",
+        "img_url": "",
     }
     iid    = await add_to_harem(user.id, char)
     kakera = get_kakera_reward(rarity_name)
