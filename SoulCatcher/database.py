@@ -151,8 +151,14 @@ async def count_characters(enabled=True):
     return await _col("characters").count_documents({"enabled": True} if enabled else {})
 
 async def get_random_character(rarity_name):
+    from .rarity import is_video_only
+    # For video_only rarities (e.g. Verse/cartoon), ONLY pick characters
+    # that actually have a video_url — images would silently break the spawn.
+    match_filter: dict = {"rarity": rarity_name, "enabled": True}
+    if is_video_only(rarity_name):
+        match_filter["video_url"] = {"$nin": [None, ""]}
     res = await _col("characters").aggregate([
-        {"$match": {"rarity": rarity_name, "enabled": True}},
+        {"$match": match_filter},
         {"$sample": {"size": 1}},
     ]).to_list(1)
     return res[0] if res else None
