@@ -95,7 +95,7 @@ RARITIES: dict[str, RarityTier] = {
     ),
 
     # ── TIER 3 ─ Cosmos ───────────────────────────────────────────────────────
-    "cosmos": RarityTier(
+    "Legendry": RarityTier(
         id=3, name="cosmos",
         display_name="Cosmos", emoji="🌌", color_hex="#3F51B5",
         weight=10.0, drop_limit_per_day=30,
@@ -107,7 +107,7 @@ RARITIES: dict[str, RarityTier] = {
     ),
 
     # ── TIER 4 ─ Infernal ─────────────────────────────────────────────────────
-    "infernal": RarityTier(
+    "Epic": RarityTier(
         id=4, name="infernal",
         display_name="Infernal", emoji="🔥", color_hex="#FF5722",
         weight=5.0, drop_limit_per_day=15,
