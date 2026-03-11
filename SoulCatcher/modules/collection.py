@@ -13,6 +13,14 @@ FIX: Added validation in trade_cb() accept handler
 # ────────────────────────────────────────────────────────────────────────────────
 
 import logging
+from pyrogram import filters
+from .. import app
+from ..database import (
+    get_trade, update_trade,
+    get_harem_char, transfer_harem_char, deduct_balance,
+    _col,
+)
+
 log = logging.getLogger("SoulCatcher.collection")
 
 @app.on_callback_query(filters.regex(r"^trade:"))
@@ -122,8 +130,7 @@ async def trade_cb(_, cb):
 # ────────────────────────────────────────────────────────────────────────────────
 
 async def get_col(name: str):
-    """Get MongoDB collection - assumes you have this in database.py"""
-    from ..database import _col
+    """Get MongoDB collection - wraps _col from database.py"""
     return _col(name)
 
 
