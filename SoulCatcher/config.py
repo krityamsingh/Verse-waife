@@ -13,6 +13,7 @@ def _str_list(key, default=""):
     return [x.strip() for x in v.split(",") if x.strip()]
 
 # ── Core Telegram ──────────────────────────────────────────────────────────────
+# Your actual credentials are configured below
 API_ID    = int(os.getenv("API_ID",    "26676741"))
 API_HASH  =     os.getenv("API_HASH",  "6fbc29f23c15bdb0c7fbbefe65c9193a")
 BOT_TOKEN =     os.getenv("BOT_TOKEN", "8607423040:AAEYVPF5LlR0AI22t3ygiBxi5WnIafJBBa4")
@@ -22,8 +23,9 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://erenxironman09:erenxironman09@
 DB_NAME   = os.getenv("DB_NAME",   "soulcatcher")
 
 # ── Access Control ─────────────────────────────────────────────────────────────
-OWNER_IDS = _int_list("6118760915")
-SUDO_IDS  = _int_list("6118760915")
+# FIXED: Now correctly reads from environment variables
+OWNER_IDS = _int_list("OWNER_IDS", "6346273488")
+SUDO_IDS  = _int_list("SUDO_IDS", "6346273488")
 
 # ── Channels ───────────────────────────────────────────────────────────────────
 LOG_CHANNEL_ID    = int(os.getenv("LOG_CHANNEL_ID",    "0"))
