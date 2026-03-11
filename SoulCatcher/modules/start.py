@@ -53,19 +53,48 @@ def _dm_kb(bot_username):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_dm(client, message: Message):
-    user = message.from_user
-    await get_or_create_user(user.id, user.username or "", user.first_name or "", user.last_name or "")
-    bot_me = await client.get_me()
-    text   = DM_TEXT.format(mention=user.mention, bot=BOT_NAME)
-    kb     = _dm_kb(bot_me.username)
-    try: await message.reply_sticker(START_STICKER_ID)
-    except Exception: pass
-    try:                await client.send_photo(message.chat.id, START_IMAGE_URL, caption=text, reply_markup=kb)
-    except Exception:
-        try:            await client.send_video(message.chat.id, random.choice(START_VIDEO_URLS), caption=text, reply_markup=kb)
-        except Exception: await message.reply_text(text, reply_markup=kb)
-    if LOG_CHANNEL_ID:
-        try: await client.send_message(LOG_CHANNEL_ID, f"🟢 **/start DM**\n{user.mention} `{user.id}`\n{_now()}")
+    try:
+        user = message.from_user
+        try:
+            await get_or_create_user(user.id, user.username or "", user.first_name or "", user.last_name or "")
+        except Exception:
+            pass  # DB failure should not block the welcome message
+
+        bot_me = await client.get_me()
+        mention = user.mention if user.first_name else f"User#{user.id}"
+        text    = DM_TEXT.format(mention=mention, bot=BOT_NAME)
+        kb      = _dm_kb(bot_me.username)
+
+        if START_STICKER_ID:
+            try: await message.reply_sticker(START_STICKER_ID)
+            except Exception: pass
+
+        sent = False
+        if START_IMAGE_URL:
+            try:
+                await client.send_photo(message.chat.id, START_IMAGE_URL, caption=text, reply_markup=kb)
+                sent = True
+            except Exception:
+                pass
+
+        if not sent and START_VIDEO_URLS:
+            try:
+                await client.send_video(message.chat.id, random.choice(START_VIDEO_URLS), caption=text, reply_markup=kb)
+                sent = True
+            except Exception:
+                pass
+
+        if not sent:
+            await message.reply_text(text, reply_markup=kb)
+
+        if LOG_CHANNEL_ID:
+            try: await client.send_message(LOG_CHANNEL_ID, f"🟢 **/start DM**\n{mention} `{user.id}`\n{_now()}")
+            except Exception: pass
+
+    except Exception as e:
+        import logging
+        logging.getLogger("SoulCatcher.start").exception(f"start_dm crashed: {e}")
+        try: await message.reply_text("Something went wrong. Please try /start again!")
         except Exception: pass
 
 
