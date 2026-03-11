@@ -74,22 +74,7 @@ def _safe_mention(user) -> str:
 DM_TEXT = """\
 🌸 **Welcome to {bot}, {mention}!**
 ━━━━━━━━━━━━━━━━━━━━
-
 I'm your anime soul-collecting bot!
-
-**⚡ How to play:**
-✦ Characters **auto-spawn** in groups every ~15 messages
-✦ Press ❤️ to **claim** before the timer runs out
-✦ Build your **collection**, trade, duel & dominate the leaderboard!
-
-**7 Rarity Tiers:**
-⚫ Common → 🔵 Rare → 🌌 Cosmos → 🔥 Infernal
-💎 Crystal → 🔴 Mythic → ✨ **ETERNAL**
-
-✦ Tier 5 Crystal  → 🌸 **Seasonal** sub-rarity
-✦ Tier 6 Mythic   → 🔮 **Limited Edition** sub-rarity
-✦ Tier 7 Eternal  → 🎠 **Cartoon** sub-rarity _(video-only, rarest ever!)_
-
 ━━━━━━━━━━━━━━━━━━━━
 You've been registered! Start exploring 👇\
 """
