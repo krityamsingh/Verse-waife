@@ -7,8 +7,10 @@
 ║   2 🔵 Rare         noticeably better, limited daily drops                  ║
 ║   3 🌌 Cosmos       group must be somewhat active                            ║
 ║   4 🔥 Infernal     high-activity groups only, announced                    ║
-║   5 💎 Crystal    + sub: 🌸 Seasonal   (holiday/event chars)                ║
-║   6 🔴 Mythic     + sub: 🔮 Limited Edition (time-limited)                  ║
+║   5 💎 Seasonal   + sub: 🌸 Festival   (holiday/event chars)                ║
+║   6 🔴 Mythic     + subs: 🔮 Limited Edition (time-limited)                 ║
+║                           ⚽🏏🏀🏐🏸🎾🏓🥊🥋♟️ Sports                     ║
+║                           🧜‍♀️🧚👑🧙‍♀️🧝‍♀️🦸‍♀️🦹‍♀️🧛🐺🧟🪽🩺 Fantasy/Archetype ║
 ║   7 ✨ Eternal    + sub: 🎠 Verse    (video chars only · VIDEO ONLY)        ║
 ║                                                                              ║
 ║  HOW TO CUSTOMISE:                                                           ║
@@ -116,19 +118,19 @@ RARITIES: dict[str, RarityTier] = {
         description="Announced on spawn. Needs active chat.",
     ),
 
-    # ── TIER 5 ─ Crystal  (has sub-rarity: Seasonal) ──────────────────────────
-    "crystal": RarityTier(
-        id=5, name="crystal",
-        display_name="Crystal", emoji="💎", color_hex="#00BCD4",
+    # ── TIER 5 ─ Seasonal  (renamed from Crystal; has sub-rarity: Festival) ──
+    "seasonal": RarityTier(
+        id=5, name="seasonal",
+        display_name="Seasonal", emoji="💎", color_hex="#00BCD4",
         weight=2.5, drop_limit_per_day=8,
         group_spawn_chance=0.022, claim_window_seconds=30,
         spawn_requires_activity=True, announce_spawn=True,
         sell_price_min=6000,  sell_price_max=15000, kakera_reward=400,
         wishlist_ping=True, trade_allowed=True, gift_allowed=True, max_per_user=5,
-        description="Has 🌸 Seasonal sub-rarity. Max 5 per user.",
+        description="Has 🌸 Festival sub-rarity for holiday & seasonal event characters. Max 5 per user.",
     ),
 
-    # ── TIER 6 ─ Mythic  (has sub-rarity: Limited Edition) ────────────────────
+    # ── TIER 6 ─ Mythic  (has sub-rarities: Limited Edition, Sports, Fantasy) ─
     "mythic": RarityTier(
         id=6, name="mythic",
         display_name="Mythic", emoji="🔴", color_hex="#F44336",
@@ -137,7 +139,7 @@ RARITIES: dict[str, RarityTier] = {
         spawn_requires_activity=True, announce_spawn=True,
         sell_price_min=18000, sell_price_max=45000, kakera_reward=1000,
         wishlist_ping=True, trade_allowed=False, gift_allowed=False, max_per_user=3,
-        description="Cannot be traded/gifted. Has 🔮 Limited Edition sub. Max 3 per user.",
+        description="Cannot be traded/gifted. Has 🔮 Limited Edition, 🏆 Sports, and 🧝‍♀️ Fantasy/Archetype subs. Max 3 per user.",
     ),
 
     # ── TIER 7 ─ Eternal  (has sub-rarity: Verse · VIDEO ONLY) ──────────────
@@ -155,24 +157,32 @@ RARITIES: dict[str, RarityTier] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SUB-RARITIES  (1 per high tier: Crystal / Mythic / Eternal)
+# SUB-RARITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 SUB_RARITIES: dict[str, RarityTier] = {
 
-    # ── Crystal → 🌸 Seasonal ─────────────────────────────────────────────────
-    "seasonal": RarityTier(
-        id=51, name="seasonal",
-        display_name="Seasonal", emoji="🌸", color_hex="#EC407A",
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── Seasonal (Tier 5) → 🌸 Festival ──────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    "festival": RarityTier(
+        id=51, name="festival",
+        display_name="Festival", emoji="🌸", color_hex="#EC407A",
         weight=1.2, drop_limit_per_day=3,
         group_spawn_chance=0.012, claim_window_seconds=25,
         spawn_requires_activity=True, announce_spawn=True,
         sell_price_min=10000, sell_price_max=28000, kakera_reward=650,
         wishlist_ping=True, trade_allowed=True, gift_allowed=True, max_per_user=2,
-        description="Holiday & seasonal event characters only. Spring / Summer / Winter / Autumn.",
+        description=(
+            "Holiday & seasonal event characters only. Includes:\n"
+            "🪔 Diwali · 🎨 Holi · 🎆 New Year · 🎄 Christmas\n"
+            "☀️ Summer · 🍂 Autumn · ❄️ Winter · 🌧️ Monsoon · 🌠 Night"
+        ),
     ),
 
-    # ── Mythic → 🔮 Limited Edition ───────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── Mythic (Tier 6) → 🔮 Limited Edition ─────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
     "limited_edition": RarityTier(
         id=61, name="limited_edition",
         display_name="Limited Edition", emoji="🔮", color_hex="#7E57C2",
@@ -184,7 +194,43 @@ SUB_RARITIES: dict[str, RarityTier] = {
         description="Drops only during limited-time events. 1 per user. NOT tradeable.",
     ),
 
-    # ── Eternal → 🎠 Verse (VIDEO ONLY · only chars with video_url spawn) ────
+    # ── Mythic (Tier 6) → 🏆 Sports ──────────────────────────────────────────
+    "sports": RarityTier(
+        id=62, name="sports",
+        display_name="Sports", emoji="🏆", color_hex="#43A047",
+        weight=0.30, drop_limit_per_day=2,
+        group_spawn_chance=0.003, claim_window_seconds=18,
+        spawn_requires_activity=True, announce_spawn=True,
+        sell_price_min=20000, sell_price_max=50000, kakera_reward=1200,
+        wishlist_ping=True, trade_allowed=False, gift_allowed=False, max_per_user=2,
+        description=(
+            "Sport-themed characters only. Includes:\n"
+            "⚽ Football · 🏏 Cricket · 🏀 Basketball · 🏐 Volleyball\n"
+            "🏸 Badminton · 🎾 Tennis · 🏓 Table Tennis · 🥊 Boxing\n"
+            "🥋 Karate · ♟️ Chess"
+        ),
+    ),
+
+    # ── Mythic (Tier 6) → 🧝‍♀️ Fantasy / Archetype ────────────────────────────
+    "fantasy": RarityTier(
+        id=63, name="fantasy",
+        display_name="Fantasy", emoji="🧝‍♀️", color_hex="#AB47BC",
+        weight=0.28, drop_limit_per_day=2,
+        group_spawn_chance=0.003, claim_window_seconds=18,
+        spawn_requires_activity=True, announce_spawn=True,
+        sell_price_min=22000, sell_price_max=55000, kakera_reward=1300,
+        wishlist_ping=True, trade_allowed=False, gift_allowed=False, max_per_user=2,
+        description=(
+            "Fantasy & archetype characters only. Includes:\n"
+            "🧜‍♀️ Mermaid · 🧚 Fairy · 👑 Princess · 🧙‍♀️ Witch · 🧝‍♀️ Elf\n"
+            "🦸‍♀️ Superhero · 🦹‍♀️ Supervillain · 🧛 Vampire · 🐺 Werewolf\n"
+            "🧟 Zombie · 🪽 Angel · 🩺 Nurse/Doctor"
+        ),
+    ),
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── Eternal (Tier 7) → 🎠 Verse (VIDEO ONLY) ─────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
     "cartoon": RarityTier(
         id=71, name="cartoon",
         display_name="Verse", emoji="🎠", color_hex="#FF9800",
@@ -198,10 +244,68 @@ SUB_RARITIES: dict[str, RarityTier] = {
     ),
 }
 
-# Attach sub-rarities to parents
-RARITIES["crystal"].sub_rarities = [SUB_RARITIES["seasonal"]]
-RARITIES["mythic"].sub_rarities   = [SUB_RARITIES["limited_edition"]]
+# ── Attach sub-rarities to parents ────────────────────────────────────────────
+RARITIES["seasonal"].sub_rarities = [SUB_RARITIES["festival"]]
+RARITIES["mythic"].sub_rarities   = [
+    SUB_RARITIES["limited_edition"],
+    SUB_RARITIES["sports"],
+    SUB_RARITIES["fantasy"],
+]
 RARITIES["eternal"].sub_rarities  = [SUB_RARITIES["cartoon"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FESTIVAL SEASONS  (lookup table for Tier-5 sub: Festival)
+# Characters should be tagged with one or more of these season keys.
+# ─────────────────────────────────────────────────────────────────────────────
+
+FESTIVAL_SEASONS: dict[str, dict] = {
+    "diwali":     {"emoji": "🪔", "label": "Diwali",    "active_months": [10, 11]},
+    "holi":       {"emoji": "🎨", "label": "Holi",      "active_months": [3]},
+    "new_year":   {"emoji": "🎆", "label": "New Year",  "active_months": [1, 12]},
+    "christmas":  {"emoji": "🎄", "label": "Christmas", "active_months": [12]},
+    "summer":     {"emoji": "☀️",  "label": "Summer",    "active_months": [5, 6, 7, 8]},
+    "autumn":     {"emoji": "🍂", "label": "Autumn",    "active_months": [9, 10, 11]},
+    "winter":     {"emoji": "❄️",  "label": "Winter",    "active_months": [12, 1, 2]},
+    "monsoon":    {"emoji": "🌧️", "label": "Monsoon",   "active_months": [6, 7, 8, 9]},
+    "night":      {"emoji": "🌠", "label": "Night",     "active_months": list(range(1, 13))},  # year-round
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MYTHIC SPORTS ROSTER  (lookup — tag characters with one of these sport keys)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MYTHIC_SPORTS: dict[str, dict] = {
+    "football":     {"emoji": "⚽", "label": "Football"},
+    "cricket":      {"emoji": "🏏", "label": "Cricket"},
+    "basketball":   {"emoji": "🏀", "label": "Basketball"},
+    "volleyball":   {"emoji": "🏐", "label": "Volleyball"},
+    "badminton":    {"emoji": "🏸", "label": "Badminton"},
+    "tennis":       {"emoji": "🎾", "label": "Tennis"},
+    "table_tennis": {"emoji": "🏓", "label": "Table Tennis"},
+    "boxing":       {"emoji": "🥊", "label": "Boxing"},
+    "karate":       {"emoji": "🥋", "label": "Karate"},
+    "chess":        {"emoji": "♟️", "label": "Chess"},
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MYTHIC FANTASY ARCHETYPES  (lookup — tag characters with one of these keys)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MYTHIC_FANTASY: dict[str, dict] = {
+    "mermaid":      {"emoji": "🧜‍♀️", "label": "Mermaid"},
+    "fairy":        {"emoji": "🧚",  "label": "Fairy"},
+    "princess":     {"emoji": "👑",  "label": "Princess"},
+    "witch":        {"emoji": "🧙‍♀️", "label": "Witch"},
+    "elf":          {"emoji": "🧝‍♀️", "label": "Elf"},
+    "superhero":    {"emoji": "🦸‍♀️", "label": "Superhero"},
+    "supervillain": {"emoji": "🦹‍♀️", "label": "Supervillain"},
+    "vampire":      {"emoji": "🧛",  "label": "Vampire"},
+    "werewolf":     {"emoji": "🐺",  "label": "Werewolf"},
+    "zombie":       {"emoji": "🧟",  "label": "Zombie"},
+    "angel":        {"emoji": "🪽",  "label": "Angel"},
+    "nurse_doctor": {"emoji": "🩺",  "label": "Nurse/Doctor"},
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
