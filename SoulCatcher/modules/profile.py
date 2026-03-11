@@ -181,7 +181,8 @@ async def cmd_richest(_, message: Message):
     results = await top_richest(10); medals = ["🥇","🥈","🥉"]+["🏅"]*7
     text = "💰 **Top 10 Richest**\n\n"
     for i, r in enumerate(results):
-        text += f"{medals[i]} **{r.get('first_name',f'User#{r[\"user_id\"]}')}** — `{_fmt(r.get('balance',0))}` 🪙\n"
+        uid_key = r["user_id"]
+        text += f"{medals[i]} **{r.get('first_name', f'User#{uid_key}')}** — `{_fmt(r.get('balance',0))}` 🪙\n"
     await message.reply_text(text)
 
 
