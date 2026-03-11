@@ -107,7 +107,7 @@ RARITIES: dict[str, RarityTier] = {
     ),
 
     # ── TIER 4 ─ Infernal ─────────────────────────────────────────────────────
-    "Epic": RarityTier(
+    "Elite": RarityTier(
         id=4, name="infernal",
         display_name="Infernal", emoji="🔥", color_hex="#FF5722",
         weight=5.0, drop_limit_per_day=15,
