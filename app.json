@@ -1,0 +1,27 @@
+{
+  "name": "SoulCatcher",
+  "description": "🌸 SoulCatcher — Anime Character Collecting Telegram Bot",
+  "keywords": ["telegram", "bot", "anime", "pyrogram"],
+  "repository": "https://github.com/youruser/SoulCatcher",
+  "logo": "https://files.catbox.moe/43vfsu.jpg",
+  "formation": {
+    "worker": { "quantity": 1, "size": "eco" }
+  },
+  "env": {
+    "API_ID":           { "description": "Telegram API ID (my.telegram.org)", "required": true },
+    "API_HASH":         { "description": "Telegram API Hash",                  "required": true },
+    "BOT_TOKEN":        { "description": "Bot token from @BotFather",          "required": true },
+    "MONGO_URI":        { "description": "MongoDB Atlas connection string",    "required": true },
+    "OWNER_IDS":        { "description": "Your Telegram user ID(s)",           "required": true },
+    "LOG_CHANNEL_ID":   { "description": "Log channel ID (-100...)",           "required": false },
+    "UPLOAD_CHANNEL_ID":{ "description": "Character upload channel ID",        "required": false },
+    "DB_NAME":          { "description": "MongoDB database name",              "value": "soulcatcher" },
+    "BOT_NAME":         { "description": "Bot display name",                  "value": "SoulCatcher" },
+    "SUPPORT_GROUP":    { "description": "Support group username",             "value": "soulcatcher_support" },
+    "UPDATE_CHANNEL":   { "description": "Update channel username",            "value": "soulcatcher_updates" },
+    "GIT_BRANCH":       { "description": "Git branch for /gitpull",            "value": "main" }
+  },
+  "buildpacks": [
+    { "url": "heroku/python" }
+  ]
+}
