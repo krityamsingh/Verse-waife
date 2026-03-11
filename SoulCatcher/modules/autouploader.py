@@ -40,6 +40,59 @@ UPLOAD_CHANNEL_ID: int = -1003888855632   # @SoulUploads
 
 CATBOX_API = "https://catbox.moe/user/api.php"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UPLOAD HELP TEXT  — shown whenever /upload is used without proper args
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_upload_help() -> str:
+    lines = [
+        "📸 **Reply to a photo or video, then:**",
+        "`/upload <anime> | <char_name> | <rarity_id>`",
+        "",
+        "━━━━ **MAIN RARITIES** ━━━━",
+    ]
+    for r in sorted(RARITIES.values(), key=lambda x: x.id):
+        lines.append(f"`{r.id:>2}` {r.emoji} **{r.display_name}**")
+
+    lines += ["", "━━━━ **SUB-RARITIES** ━━━━"]
+    _parent_map = {51: "Seasonal", 61: "Mythic", 62: "Mythic", 63: "Mythic", 71: "Eternal"}
+    for r in sorted(SUB_RARITIES.values(), key=lambda x: x.id):
+        parent = _parent_map.get(r.id, "?")
+        lines.append(
+            f"`{r.id:>2}` {r.emoji} **{r.display_name}**"
+            f" _(sub of {parent})_"
+            + (" ⚠️ VIDEO ONLY" if r.video_only else "")
+        )
+
+    lines += ["", "━━━━ **🌸 FESTIVAL SEASONS** _(use after upload: `/uchar season <id> <key>`)_ ━━━━"]
+    for k, v in FESTIVAL_SEASONS.items():
+        months = ", ".join(str(m) for m in v["active_months"])
+        lines.append(f"  `{k}` {v['emoji']} {v['label']}  — months: {months}")
+
+    lines += ["", "━━━━ **🏆 MYTHIC SPORTS** _(use after upload: `/uchar sport <id> <key>`)_ ━━━━"]
+    for k, v in MYTHIC_SPORTS.items():
+        lines.append(f"  `{k}` {v['emoji']} {v['label']}")
+
+    lines += ["", "━━━━ **🧝 MYTHIC FANTASY** _(use after upload: `/uchar fantasy <id> <key>`)_ ━━━━"]
+    for k, v in MYTHIC_FANTASY.items():
+        lines.append(f"  `{k}` {v['emoji']} {v['label']}")
+
+    lines += [
+        "",
+        "━━━━ **EXAMPLES** ━━━━",
+        "`/upload Naruto | Sasuke | 2`  → 🔵 Rare",
+        "`/upload One Piece | Luffy | 6`  → 🔴 Mythic",
+        "`/upload Bleach | Rukia | 51`  → 🌸 Festival  _(then `/uchar season <id> diwali`)_",
+        "`/upload JJK | Gojo | 62`  → 🏆 Sports  _(then `/uchar sport <id> football`)_",
+        "`/upload FMA | Winry | 63`  → 🧝 Fantasy  _(then `/uchar fantasy <id> witch`)_",
+        "`/upload SAO | Asuna | 71`  → 🎠 Verse  _(VIDEO ONLY — reply to video)_",
+    ]
+    return "\n".join(lines)
+
+
+UPLOAD_HELP_TEXT: str = _build_upload_help()
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CATBOX — anonymous upload
@@ -73,6 +126,14 @@ async def _upload_to_catbox(file_path: str) -> Optional[str]:
 
 def _get_parent_name(rarity_id: int) -> Optional[str]:
     return {51: "seasonal", 61: "mythic", 62: "mythic", 63: "mythic", 71: "eternal"}.get(rarity_id)
+
+
+def _sub_meta_from_tier(tier) -> dict:
+    """Auto-build extra_meta for sub-rarity tiers so caption shows it immediately."""
+    if tier.id not in {51, 61, 62, 63, 71}:
+        return {}
+    return {"sub_tag": tier.name, "sub_label": tier.display_name, "sub_emoji": tier.emoji}
+
 
 
 def _parse_upload_args(text: str):
@@ -195,12 +256,29 @@ async def _do_upload_and_save(
     if not tier.gift_allowed:  restrictions.append("🚫 No Gift")
     if tier.max_per_user:      restrictions.append(f"👤 Max {tier.max_per_user}/user")
 
+    # Sub-rarity line — built from extra_meta if present
+    sub_rarity_line = ""
+    meta = extra_meta or {}
+    if meta.get("sub_tag"):
+        sub_label = (
+            meta.get("festival_label") or meta.get("sport_label")
+            or meta.get("archetype_label") or meta.get("sub_label")
+            or meta["sub_tag"]
+        )
+        sub_emoji = (
+            meta.get("festival_emoji") or meta.get("sport_emoji")
+            or meta.get("archetype_emoji") or meta.get("sub_emoji")
+            or "🏷"
+        )
+        sub_rarity_line = f"\n{sub_emoji} **{sub_label}** _(sub-rarity)_"
+
     caption = (
         f"✅ **Character Added!**\n\n"
         f"🆔 `{char_id}`\n"
         f"👤 **{char_name}**\n"
         f"📖 _{anime}_\n"
-        f"{tier.emoji} **{tier.display_name}**\n"
+        f"{tier.emoji} **{tier.display_name}**"
+        f"{sub_rarity_line}\n"
         f"💰 Sell: `{tier.sell_price_min:,}–{tier.sell_price_max:,}` "
         f"| 🌸 Kakera: `{tier.kakera_reward}`\n"
         + (f"⚠️ {' | '.join(restrictions)}\n" if restrictions else "")
@@ -232,28 +310,20 @@ async def _do_upload_and_save(
 @app.on_message(filters.command("upload") & uploader_filter)
 async def cmd_upload(client, message: Message):
     if not message.reply_to_message:
-        return await message.reply_text(
-            "📸 Reply to a photo or video:\n"
-            "`/upload <anime> | <char_name> | <rarity_id>`\n\n"
-            f"{RARITY_LIST_TEXT}"
-        )
+        return await message.reply_text(UPLOAD_HELP_TEXT)
 
     args_text = " ".join(message.command[1:]).strip()
     if not args_text:
-        return await message.reply_text(
-            f"Usage: `/upload anime | char | rarity_id`\n\n{RARITY_LIST_TEXT}"
-        )
+        return await message.reply_text(UPLOAD_HELP_TEXT)
 
     try:
         anime, char_name, rid = _parse_upload_args(args_text)
     except (ValueError, IndexError) as e:
-        return await message.reply_text(
-            f"❌ {e}\n\n{RARITY_LIST_TEXT}"
-        )
+        return await message.reply_text(f"❌ {e}\n\n" + UPLOAD_HELP_TEXT)
 
     tier = get_rarity_by_id(rid)
     if not tier:
-        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`.\n\n{RARITY_LIST_TEXT}")
+        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`\n\n" + UPLOAD_HELP_TEXT)
 
     reply  = message.reply_to_message
     is_vid = bool(reply.video or reply.animation)
@@ -277,6 +347,7 @@ async def cmd_upload(client, message: Message):
         anime=anime,
         rarity_id=rid,
         mention=mention,
+        extra_meta=_sub_meta_from_tier(tier),
     )
     _cleanup(file_path)
 
