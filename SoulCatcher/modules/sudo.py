@@ -7,7 +7,6 @@ from ..database import (
     add_sudo, remove_sudo, get_sudo_ids, is_sudo,
     add_dev, remove_dev, get_dev_ids, is_dev,
     add_uploader as _add_uploader, remove_uploader, get_uploader_ids, is_uploader,
-    refresh_sudo as _rs, refresh_dev as _rd, refresh_uploader as _ru,
 )
 from .. import refresh_sudo, refresh_dev, refresh_uploader
 
