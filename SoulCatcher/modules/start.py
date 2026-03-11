@@ -1,4 +1,3 @@
-"""SoulCatcher/modules/start.py"""
 import random, logging
 from pyrogram import filters, enums
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
