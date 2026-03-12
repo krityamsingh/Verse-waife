@@ -257,17 +257,26 @@ async def gift_cb(client, cb):
                 pass
             return await cb.answer()
 
-        # Strip lock fields before transferring
+        # Ensure receiver exists BEFORE transfer so total_claimed upsert works
+        await get_or_create_user(receiver_id)
+
+        # Strip lock fields, MongoDB _id, and sender-personal metadata before transferring
         char.pop("locked", None)
         char.pop("gift_temp_lock", None)
+        char.pop("_id", None)           # FIX: prevent DuplicateKeyError on insert_one
+        char.pop("is_favorite", None)   # FIX: reset sender personal flags
+        char.pop("note", None)          # FIX: reset sender personal notes
 
-        # Atomic transfer: $pull by instance_id+locked=True, then $push to receiver
+        # FIX: delete sender copy then insert fresh doc for receiver
         await _col("user_characters").delete_one({"user_id": sender_id, "instance_id": iid, "locked": True})
-        char["user_id"] = receiver_id
+        char["user_id"]     = receiver_id
+        char["is_favorite"] = False       # reset to default for receiver
+        char["note"]        = ""          # reset to default for receiver
+        char["obtained_at"] = __import__("datetime").datetime.utcnow()  # FIX: set receiver's own timestamp
         await _col("user_characters").insert_one(char)
 
-        # Ensure receiver exists in users collection
-        await get_or_create_user(receiver_id)
+        # FIX: increment receiver's total_claimed counter (bypassed because we skip add_to_harem)
+        await _col("users").update_one({"user_id": receiver_id}, {"$inc": {"total_claimed": 1}}, upsert=True)
 
     _drop_lock(sender_id, iid)
     log.info("Gift complete  sender=%d  receiver=%d  iid=%s (%s)",
