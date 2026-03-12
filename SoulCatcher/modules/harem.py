@@ -106,7 +106,11 @@ def get_join_buttons(user_id: int, context: str = "harem") -> IKM:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _fetch_user_characters(user_id: int):
-    """Return (unique_chars, counts, user_doc) filtered by user's collection_mode."""
+    """Return (unique_chars, counts, user_doc) filtered by user's collection_mode.
+
+    Always returns user_doc when the user exists, even if their harem is empty.
+    Returns (None, None, None) only when the user is not found in DB at all.
+    """
     user_doc = await _col("users").find_one({"user_id": user_id})
     if not user_doc:
         return None, None, None
@@ -117,9 +121,13 @@ async def _fetch_user_characters(user_id: int):
     ).to_list(None)
 
     if not all_instances:
-        return None, None, None
+        # FIX: return user_doc so callers can show the actual cmode in empty msg
+        return [], {}, user_doc
 
     cmode = (user_doc.get("collection_mode", "all") or "all").lower()
+
+    # FIX: respect the user's harem_sort field for default ordering
+    sort_field = (user_doc.get("harem_sort") or "rarity").lower()
 
     if cmode == "all":
         filtered = all_instances
@@ -128,11 +136,23 @@ async def _fetch_user_characters(user_id: int):
     elif cmode in ("characters", "characters sorted"):
         filtered = sorted(all_instances, key=lambda x: x.get("name", "").lower())
     else:
-        # filter by rarity name
-        filtered = [c for c in all_instances if (c.get("rarity") or "").lower() == cmode]
+        # FIX: case-insensitive rarity filter
+        filtered = [c for c in all_instances if (c.get("rarity") or "").lower() == cmode.lower()]
 
     if not filtered:
-        return None, None, None
+        return [], {}, user_doc
+
+    # FIX: Apply harem_sort when cmode did not already impose its own sort
+    if cmode == "all":
+        if sort_field == "name":
+            filtered = sorted(filtered, key=lambda x: x.get("name", "").lower())
+        elif sort_field == "anime":
+            filtered = sorted(filtered, key=lambda x: x.get("anime", "").lower())
+        elif sort_field == "recent":
+            filtered = sorted(filtered, key=lambda x: x.get("obtained_at") or "", reverse=True)
+        else:  # default: rarity
+            RARITY_ORDER = {r.name: i for i, r in enumerate({**RARITIES, **SUB_RARITIES}.values())}
+            filtered = sorted(filtered, key=lambda x: RARITY_ORDER.get(x.get("rarity", ""), 99))
 
     # Deduplicate by char_id, count occurrences
     counts: dict[str, int] = {}
@@ -363,6 +383,7 @@ async def cmd_harem(client, message: Message):
         user_id,
         message.from_user.username or "",
         message.from_user.first_name or "",
+        getattr(message.from_user, "last_name", "") or "",
     )
 
     if not await check_membership(user_id, client):
