@@ -5,6 +5,7 @@ from pyrogram import filters
 from pyrogram.types import Message
 from .. import app
 from ..database import (
+    _col,
     get_or_create_user, get_user, get_balance,
     get_harem, get_harem_rarity_counts,
     count_user_rank, top_collectors, top_by_rarity, top_richest,
@@ -153,41 +154,87 @@ async def cmd_rank(_, message: Message):
 
 @app.on_message(filters.command("top"))
 async def cmd_top(client, message: Message):
-    results = await top_collectors(10); medals = ["🥇","🥈","🥉"]+["🏅"]*7
-    text = "🏆 **Top 10 Soul Collectors**\n\n"
-    for i, r in enumerate(results):
-        doc  = await get_user(r["_id"]) or {}
-        uid = r["_id"]
-        name = doc.get('first_name') or doc.get('username') or f'User#{uid}'
-        text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}` chars\n"
-    await message.reply_text(text)
+    wait = await message.reply_text("⏳ Loading...")
+    try:
+        results = await top_collectors(10)
+        if not results:
+            return await wait.edit_text("📊 No collectors yet.")
+        # Batch-fetch all names in one DB query
+        uid_list = [r["_id"] for r in results]
+        user_docs = await _col("users").find(
+            {"user_id": {"$in": uid_list}},
+            {"user_id": 1, "first_name": 1, "username": 1},
+        ).to_list(10)
+        name_map = {
+            d["user_id"]: (d.get("first_name") or d.get("username") or None)
+            for d in user_docs
+        }
+        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
+        text = "🏆 **Top 10 Soul Collectors**\n\n"
+        for i, r in enumerate(results):
+            uid  = r["_id"]
+            name = name_map.get(uid) or f"User {uid}"
+            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}` chars\n"
+        await wait.edit_text(text)
+    except Exception as e:
+        import logging; logging.getLogger("SoulCatcher.profile").error("/top error: %s", e)
+        await wait.edit_text("❌ Failed to load leaderboard.")
 
 
 @app.on_message(filters.command("toprarity"))
 async def cmd_toprarity(client, message: Message):
     args = message.command
-    if len(args) < 2: return await message.reply_text("Usage: `/toprarity <rarity_name>`")
+    if len(args) < 2:
+        return await message.reply_text("Usage: `/toprarity <rarity_name>`")
     tier = get_rarity(args[1].lower())
-    if not tier: return await message.reply_text("❌ Unknown rarity.")
-    results = await top_by_rarity(args[1].lower(), 10)
-    if not results: return await message.reply_text(f"No {tier.display_name} collectors yet.")
-    text = f"{tier.emoji} **Top 10 {tier.display_name} Collectors**\n\n"
-    for i, r in enumerate(results, 1):
-        doc  = await get_user(r["_id"]) or {}
-        uid = r["_id"]
-        name = doc.get('first_name') or doc.get('username') or f'User#{uid}'
-        text += f"`{i}.` [{name}](tg://user?id={uid}) — `{r['count']}`\n"
-    await message.reply_text(text)
+    if not tier:
+        return await message.reply_text("❌ Unknown rarity. Try: common, rare, cosmos, infernal, seasonal, mythic, eternal")
+    wait = await message.reply_text(f"⏳ Loading {tier.display_name} leaderboard...")
+    try:
+        results = await top_by_rarity(args[1].lower(), 10)
+        if not results:
+            return await wait.edit_text(f"📊 No {tier.display_name} collectors yet.")
+        uid_list = [r["_id"] for r in results]
+        user_docs = await _col("users").find(
+            {"user_id": {"$in": uid_list}},
+            {"user_id": 1, "first_name": 1, "username": 1},
+        ).to_list(10)
+        name_map = {
+            d["user_id"]: (d.get("first_name") or d.get("username") or None)
+            for d in user_docs
+        }
+        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
+        text = f"{tier.emoji} **Top 10 {tier.display_name} Collectors**\n\n"
+        for i, r in enumerate(results):
+            uid  = r["_id"]
+            name = name_map.get(uid) or f"User {uid}"
+            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}`\n"
+        await wait.edit_text(text)
+    except Exception as e:
+        import logging; logging.getLogger("SoulCatcher.profile").error("/toprarity error: %s", e)
+        await wait.edit_text("❌ Failed to load leaderboard.")
 
 
 @app.on_message(filters.command("richest"))
 async def cmd_richest(_, message: Message):
-    results = await top_richest(10); medals = ["🥇","🥈","🥉"]+["🏅"]*7
-    text = "💰 **Top 10 Richest**\n\n"
-    for i, r in enumerate(results):
-        uid_key = r["user_id"]
-        text += f"{medals[i]} **{r.get('first_name', f'User#{uid_key}')}** — `{_fmt(r.get('balance',0))}` 🪙\n"
-    await message.reply_text(text)
+    wait = await message.reply_text("⏳ Loading richest players...")
+    try:
+        results = await top_richest(10)
+        # Filter out users with 0 balance
+        results = [r for r in results if r.get("balance", 0) > 0]
+        if not results:
+            return await wait.edit_text("📊 No wealthy players yet.")
+        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
+        text = "💰 **Top 10 Richest Players**\n\n"
+        for i, r in enumerate(results):
+            uid  = r.get("user_id", "?")
+            name = r.get("first_name") or r.get("username") or f"User {uid}"
+            bal  = r.get("balance", 0)
+            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{_fmt(bal)}` 🌸\n"
+        await wait.edit_text(text)
+    except Exception as e:
+        import logging; logging.getLogger("SoulCatcher.profile").error("/richest error: %s", e)
+        await wait.edit_text("❌ Failed to load leaderboard.")
 
 
 @app.on_message(filters.command("rarityinfo"))
