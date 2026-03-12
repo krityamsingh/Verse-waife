@@ -4,12 +4,12 @@ Callbacks: trade:
 """
 
 from __future__ import annotations
-import re
 import uuid
 import logging
 from datetime import datetime
+from html import escape as he
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import Message, InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB
 
 from .. import app
@@ -23,6 +23,8 @@ from ..database import (
 
 log = logging.getLogger("SoulCatcher.trade")
 
+PM = enums.ParseMode.HTML   # use HTML everywhere — no markdown entity issues
+
 
 def _fmt(n) -> str:
     try:
@@ -31,9 +33,8 @@ def _fmt(n) -> str:
         return str(n)
 
 
-def _esc(text: str) -> str:
-    """Escape markdown special chars in user-supplied strings (names, char names)."""
-    return re.sub(r"([_*`\[\]()])", r"\\\1", str(text))
+def _mention(name: str, uid: int) -> str:
+    return f'<a href="tg://user?id={uid}">{he(name)}</a>'
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,23 +43,25 @@ def _esc(text: str) -> str:
 
 @app.on_message(filters.command("trade"))
 async def cmd_trade(_, message: Message):
-    """Reply to target user: /trade <your_instance_id> <their_instance_id>"""
     if not message.reply_to_message:
         return await message.reply_text(
             "Reply to the user you want to trade with:\n"
-            "`/trade <your_instance_id> <their_instance_id>`"
+            "<code>/trade &lt;your_iid&gt; &lt;their_iid&gt;</code>",
+            parse_mode=PM,
         )
+
     args = message.command
     if len(args) < 3:
         return await message.reply_text(
-            "Usage: `/trade <your_instance_id> <their_instance_id>`"
+            "Usage: <code>/trade &lt;your_iid&gt; &lt;their_iid&gt;</code>",
+            parse_mode=PM,
         )
 
     proposer = message.from_user
     receiver = message.reply_to_message.from_user
 
     if receiver.is_bot or receiver.id == proposer.id:
-        return await message.reply_text("❌ Can't trade with bots or yourself!")
+        return await message.reply_text("❌ Can't trade with bots or yourself!", parse_mode=PM)
 
     my_iid    = args[1].upper()
     their_iid = args[2].upper()
@@ -67,16 +70,26 @@ async def cmd_trade(_, message: Message):
     their_char = await get_harem_char(receiver.id, their_iid)
 
     if not my_char:
-        return await message.reply_text(f"❌ `{my_iid}` not found in your harem.")
+        return await message.reply_text(
+            f"❌ <code>{he(my_iid)}</code> not found in your harem.",
+            parse_mode=PM,
+        )
     if not their_char:
         return await message.reply_text(
-            f"❌ `{their_iid}` not found in {_esc(receiver.first_name)}'s harem."
+            f"❌ <code>{he(their_iid)}</code> not found in {he(receiver.first_name)}'s harem.",
+            parse_mode=PM,
         )
 
     if not can_trade(my_char.get("rarity", "")):
-        return await message.reply_text(f"❌ **{_esc(my_char['name'])}** cannot be traded!")
+        return await message.reply_text(
+            f"❌ <b>{he(my_char['name'])}</b> cannot be traded!",
+            parse_mode=PM,
+        )
     if not can_trade(their_char.get("rarity", "")):
-        return await message.reply_text(f"❌ **{_esc(their_char['name'])}** cannot be traded!")
+        return await message.reply_text(
+            f"❌ <b>{he(their_char['name'])}</b> cannot be traded!",
+            parse_mode=PM,
+        )
 
     fee      = 500
     trade_id = str(uuid.uuid4())[:8].upper()
@@ -95,24 +108,21 @@ async def cmd_trade(_, message: Message):
     my_tier    = get_rarity(my_char.get("rarity", ""))
     their_tier = get_rarity(their_char.get("rarity", ""))
 
-    p_name = _esc(proposer.first_name)
-    r_name = _esc(receiver.first_name)
-    r_link = f"[{r_name}](tg://user?id={receiver.id})"
-
     kb = IKM([[
         IKB("✅ Accept",  callback_data=f"trade:accept:{trade_id}"),
         IKB("❌ Decline", callback_data=f"trade:decline:{trade_id}"),
     ]])
 
     await message.reply_text(
-        f"🔄 **Trade Proposal** (`{trade_id}`)\n\n"
-        f"**{p_name}** offers:\n"
-        f"  {my_tier.emoji if my_tier else '?'} **{_esc(my_char['name'])}** `{my_iid}`\n\n"
-        f"For {r_link}'s:\n"
-        f"  {their_tier.emoji if their_tier else '?'} **{_esc(their_char['name'])}** `{their_iid}`\n\n"
-        f"Fee: `{_fmt(fee)}` kakera each\n\n"
-        f"{r_link} — accept or decline?",
+        f"🔄 <b>Trade Proposal</b> (<code>{trade_id}</code>)\n\n"
+        f"<b>{he(proposer.first_name)}</b> offers:\n"
+        f"  {my_tier.emoji if my_tier else '?'} <b>{he(my_char['name'])}</b> <code>{my_iid}</code>\n\n"
+        f"For {_mention(receiver.first_name, receiver.id)}'s:\n"
+        f"  {their_tier.emoji if their_tier else '?'} <b>{he(their_char['name'])}</b> <code>{their_iid}</code>\n\n"
+        f"Fee: <code>{_fmt(fee)}</code> kakera each\n\n"
+        f"{_mention(receiver.first_name, receiver.id)} — accept or decline?",
         reply_markup=kb,
+        parse_mode=PM,
     )
 
 
@@ -128,13 +138,13 @@ async def trade_cb(_, cb):
     trade = await get_trade(trade_id)
 
     if not trade or trade["status"] != "pending":
-        return await cb.message.edit_text("❌ Trade no longer active.")
+        return await cb.message.edit_text("❌ Trade no longer active.", parse_mode=PM)
 
     if action == "decline":
         if uid not in (trade["proposer_id"], trade["receiver_id"]):
             return await cb.answer("Not your trade.", show_alert=True)
         await update_trade(trade_id, {"$set": {"status": "declined"}})
-        return await cb.message.edit_text("❌ Trade declined.")
+        return await cb.message.edit_text("❌ Trade declined.", parse_mode=PM)
 
     if action == "accept":
         if uid != trade["receiver_id"]:
@@ -144,7 +154,7 @@ async def trade_cb(_, cb):
         proposer_char = await get_harem_char(trade["proposer_id"], trade["proposer_char"])
 
         if not receiver_char or not proposer_char:
-            return await cb.message.edit_text("❌ One or both characters were deleted.")
+            return await cb.message.edit_text("❌ One or both characters were deleted.", parse_mode=PM)
 
         receiver_gets_rarity = get_rarity(proposer_char["rarity"])
         proposer_gets_rarity = get_rarity(receiver_char["rarity"])
@@ -186,8 +196,9 @@ async def trade_cb(_, cb):
                 trade["proposer_char"], trade["receiver_char"],
             )
             await cb.message.edit_text(
-                f"✅ **Trade Complete!** Fee: `{_fmt(trade['fee'])}` kakera each."
+                f"✅ <b>Trade Complete!</b> Fee: <code>{_fmt(trade['fee'])}</code> kakera each.",
+                parse_mode=PM,
             )
         else:
-            await cb.message.edit_text("❌ Trade failed — characters may have moved.")
+            await cb.message.edit_text("❌ Trade failed — characters may have moved.", parse_mode=PM)
             log.warning("TRADE FAILED: %s", trade_id)
