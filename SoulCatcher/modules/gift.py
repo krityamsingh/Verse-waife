@@ -31,7 +31,7 @@ import random
 import tempfile
 from datetime import datetime
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup as IKM,
@@ -262,14 +262,14 @@ async def cmd_gift(client, message: Message):
         if video_url:
             tmp = await _download(video_url, ".mp4")
             with open(tmp, "rb") as fh:
-                await message.reply_video(fh, caption=caption, parse_mode="html", reply_markup=keyboard)
+                await message.reply_video(fh, caption=caption, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
         elif img_url:
             tmp = await _download(img_url, ".jpg")
             with open(tmp, "rb") as fh:
-                await message.reply_photo(fh, caption=caption, parse_mode="html", reply_markup=keyboard)
+                await message.reply_photo(fh, caption=caption, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
         else:
             # No media — text confirmation is fine
-            await message.reply_text(caption, parse_mode="html", reply_markup=keyboard)
+            await message.reply_text(caption, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
     except Exception:
         log.exception("Gift confirmation send failed  sender=%d  iid=%s", sender.id, iid)
         # Always unlock on failure so the character isn't stuck
@@ -398,7 +398,7 @@ async def gift_cb(client, cb):
             f"📖 {new_doc.get('anime', 'Unknown')}\n"
             f"🆔 <code>{iid}</code>"
             f"</blockquote>",
-            parse_mode="html",
+            parse_mode=enums.ParseMode.HTML,
         )
     except Exception as exc:
         log.warning("Could not edit gift confirmation: %s", exc)
@@ -423,13 +423,13 @@ async def gift_cb(client, cb):
         if video_url:
             tmp = await _download(video_url, ".mp4")
             with open(tmp, "rb") as fh:
-                await client.send_video(receiver_id, fh, caption=dm_text, parse_mode="html")
+                await client.send_video(receiver_id, fh, caption=dm_text, parse_mode=enums.ParseMode.HTML)
         elif img_url:
             tmp = await _download(img_url, ".jpg")
             with open(tmp, "rb") as fh:
-                await client.send_photo(receiver_id, fh, caption=dm_text, parse_mode="html")
+                await client.send_photo(receiver_id, fh, caption=dm_text, parse_mode=enums.ParseMode.HTML)
         else:
-            await client.send_message(receiver_id, dm_text, parse_mode="html")
+            await client.send_message(receiver_id, dm_text, parse_mode=enums.ParseMode.HTML)
     except Exception as exc:
         log.warning("Receiver DM failed  receiver=%d: %s", receiver_id, exc)
     finally:
