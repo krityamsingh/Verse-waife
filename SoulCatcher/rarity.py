@@ -5,10 +5,10 @@
 ║  7 MAIN TIERS:                                                               ║
 ║   1 ⚫ Common       most frequent, unlimited                                 ║
 ║   2 🔵 Rare         noticeably better, limited daily drops                  ║
-║   3 🌌 Cosmos       group must be somewhat active                            ║
-║   4 🔥 Infernal     high-activity groups only, announced                    ║
+║   3 🌌 Legendry     group must be somewhat active                            ║
+║   4 🔥 Elite        high-activity groups only, announced                    ║
 ║   5 💎 Seasonal   + sub: 🌸 Festival   (holiday/event chars)                ║
-║   6 🔴 Mythic     + subs: 🔮 Limited Edition (time-limited)                 ║
+║   6 💀 Mythic     + subs: 🔮 Limited Edition (time-limited)                 ║
 ║                           ⚽🏏🏀🏐🏸🎾🏓🥊🥋♟️ Sports                     ║
 ║                           🧜‍♀️🧚👑🧙‍♀️🧝‍♀️🦸‍♀️🦹‍♀️🧛🐺🧟🪽🩺 Fantasy/Archetype ║
 ║   7 ✨ Eternal    + sub: 🎠 Verse    (video chars only · VIDEO ONLY)        ║
@@ -94,10 +94,10 @@ RARITIES: dict[str, RarityTier] = {
         description="Noticeably better than Common. Still no daily limit.",
     ),
 
-    # ── TIER 3 ─ Cosmos ───────────────────────────────────────────────────────
+    # ── TIER 3 ─ Legendry ─────────────────────────────────────────────────────
     "Legendry": RarityTier(
         id=3, name="cosmos",
-        display_name="Cosmos", emoji="🌌", color_hex="#3F51B5",
+        display_name="Legendry", emoji="🌌", color_hex="#3F51B5",
         weight=10.0, drop_limit_per_day=30,
         group_spawn_chance=0.10, claim_window_seconds=48,
         spawn_requires_activity=False, announce_spawn=False,
@@ -106,10 +106,10 @@ RARITIES: dict[str, RarityTier] = {
         description="Wishlist pings activate. Limited to 30/day/group.",
     ),
 
-    # ── TIER 4 ─ Infernal ─────────────────────────────────────────────────────
+    # ── TIER 4 ─ Elite ────────────────────────────────────────────────────────
     "Elite": RarityTier(
         id=4, name="infernal",
-        display_name="Infernal", emoji="🔥", color_hex="#FF5722",
+        display_name="Elite", emoji="🔥", color_hex="#FF5722",
         weight=5.0, drop_limit_per_day=15,
         group_spawn_chance=0.05, claim_window_seconds=40,
         spawn_requires_activity=True, announce_spawn=True,
@@ -118,7 +118,7 @@ RARITIES: dict[str, RarityTier] = {
         description="Announced on spawn. Needs active chat.",
     ),
 
-    # ── TIER 5 ─ Seasonal  (renamed from Crystal; has sub-rarity: Festival) ──
+    # ── TIER 5 ─ Seasonal  (has sub-rarity: Festival) ─────────────────────────
     "seasonal": RarityTier(
         id=5, name="seasonal",
         display_name="Seasonal", emoji="💎", color_hex="#00BCD4",
@@ -133,7 +133,7 @@ RARITIES: dict[str, RarityTier] = {
     # ── TIER 6 ─ Mythic  (has sub-rarities: Limited Edition, Sports, Fantasy) ─
     "mythic": RarityTier(
         id=6, name="mythic",
-        display_name="Mythic", emoji="🔴", color_hex="#F44336",
+        display_name="Mythic", emoji="💀", color_hex="#F44336",
         weight=0.8, drop_limit_per_day=3,
         group_spawn_chance=0.007, claim_window_seconds=20,
         spawn_requires_activity=True, announce_spawn=True,
