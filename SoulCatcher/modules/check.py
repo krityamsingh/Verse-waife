@@ -170,42 +170,16 @@ async def _char_card_text(char: dict) -> str:
     price_max = tier.sell_price_max if tier else char.get("sell_price_max", 0)
     mpu       = tier.max_per_user   if tier else 0
     mpu_str   = str(mpu) if mpu else "∞"
-    video_only = tier.video_only if tier else False
-    media_type = "🎬 Video" if char.get("video_url") else "🖼 Image"
-    uploader   = char.get("mention") or char.get("uploaded_by") or "Unknown"
-
+    media_flag = "🎬" if char.get("video_url") else "🖼"
     return (
-        "╔══════════════════════════════╗\n"
-        "║     📄  CHARACTER  CARD      ║\n"
-        "╚══════════════════════════════╝\n\n"
-        f"🆔  **ID:** `{char_id}`\n"
-        f"👤  **Name:** {char.get('name', '?')}\n"
-        f"📖  **Anime:** _{char.get('anime', '?')}_\n"
-        f"✨  **Rarity:** {_rarity_badge(char)}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📊  **OWNERSHIP STATS**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👥  Unique Owners:  **{unique_owners:,}**\n"
-        f"📦  Total Copies:   **{total_copies:,}**\n"
-        f"👤  Max per User:   **{mpu_str}**\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💰  **ECONOMY**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌸  Kakera Reward:  `{kakera}`\n"
-        f"💵  Sell Price:     `{price_min:,} – {price_max:,}`\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔒  **RESTRICTIONS**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{_restrictions(char)}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎞  **MEDIA**\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{media_type}" + ("  ·  🎬 Video-Only Spawn" if video_only else "") + "\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📤  **Uploaded by:** {uploader}\n"
-        f"🕒  **Added:** `{str(char.get('added_at', '?'))[:10]}`"
+        f"〔 {media_flag} `{char_id}` 〕\n"
+        f"❝ **{char.get('name', '?')}** ❞\n"
+        f"╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+        f"📖  _{char.get('anime', '?')}_\n"
+        f"✨  {_rarity_badge(char)}\n\n"
+        f"👥  **{unique_owners:,}** owners  ·  **{total_copies:,}** copies  ·  max **{mpu_str}**/user\n\n"
+        f"🌸  `{kakera}` kakera  ·  💵 `{price_min:,} – {price_max:,}`\n"
     )
-
 
 def _card_buttons(char_id: str) -> IKM:
     return IKM([[
@@ -272,10 +246,11 @@ async def cmd_check(client, message: Message):
         await _reply_card(message, char)
         return
 
-    docs, total = await _get_page(1)
-    if not docs:
-        return await message.reply_text("📭 No characters in the database yet.")
-    await message.reply_text(_list_text(docs, 1, total), reply_markup=_list_nav(1, total))
+    return await message.reply_text(
+        "💡 Usage: `/check <id>`\n"
+        "Example: `/check 0042`\n\n"
+        "Use `/check <id>` to view full details for any character."
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
