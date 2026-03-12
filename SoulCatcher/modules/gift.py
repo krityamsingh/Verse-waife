@@ -111,12 +111,25 @@ async def cmd_gift(client, message: Message):
     if receiver.is_bot:
         return await message.reply_text("🤖 You can't gift a character to a bot.")
 
-    iid = message.command[1].upper()
+    raw_id = message.command[1].strip()
+    iid    = raw_id.upper()
 
-    # Look up the character in sender's harem
+    # Look up the character in sender's harem.
+    # The harem display shows instance_id (e.g. "A1B2C3D4") but falls back to
+    # char_id (e.g. "0002") for legacy/seeded docs that have no instance_id.
+    # So we try instance_id first, then char_id (zero-padded to 4 digits).
     char = await _col("user_characters").find_one({"user_id": sender.id, "instance_id": iid})
     if not char:
-        return await message.reply_text(f"❌ `{iid}` not found in your harem.")
+        # Try matching by char_id — handles the fallback display case
+        padded_char_id = raw_id.zfill(4)
+        char = await _col("user_characters").find_one({"user_id": sender.id, "char_id": padded_char_id})
+        if char:
+            iid = char["instance_id"]  # use the real instance_id going forward
+    if not char:
+        return await message.reply_text(
+            f"❌ `{raw_id}` not found in your harem.
+"            "Use /harem to see the IDs of your characters."
+        )
 
     # Rarity check
     if not can_gift(char.get("rarity", "")):
