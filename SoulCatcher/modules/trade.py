@@ -1,11 +1,10 @@
 """SoulCatcher/modules/trade.py
 Command: /trade
 Callbacks: trade:
-
-Split from collection.py.
 """
 
 from __future__ import annotations
+import re
 import uuid
 import logging
 from datetime import datetime
@@ -32,13 +31,18 @@ def _fmt(n) -> str:
         return str(n)
 
 
+def _esc(text: str) -> str:
+    """Escape markdown special chars in user-supplied strings (names, char names)."""
+    return re.sub(r"([_*`\[\]()])", r"\\\1", str(text))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # /trade
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("trade"))
 async def cmd_trade(_, message: Message):
-    """Reply to target user, then: /trade <your_instance_id> <their_instance_id>"""
+    """Reply to target user: /trade <your_instance_id> <their_instance_id>"""
     if not message.reply_to_message:
         return await message.reply_text(
             "Reply to the user you want to trade with:\n"
@@ -66,14 +70,13 @@ async def cmd_trade(_, message: Message):
         return await message.reply_text(f"❌ `{my_iid}` not found in your harem.")
     if not their_char:
         return await message.reply_text(
-            f"❌ `{their_iid}` not found in "
-            f"[{receiver.first_name}](tg://user?id={receiver.id})'s harem."
+            f"❌ `{their_iid}` not found in {_esc(receiver.first_name)}'s harem."
         )
 
     if not can_trade(my_char.get("rarity", "")):
-        return await message.reply_text(f"❌ **{my_char['name']}** cannot be traded!")
+        return await message.reply_text(f"❌ **{_esc(my_char['name'])}** cannot be traded!")
     if not can_trade(their_char.get("rarity", "")):
-        return await message.reply_text(f"❌ **{their_char['name']}** cannot be traded!")
+        return await message.reply_text(f"❌ **{_esc(their_char['name'])}** cannot be traded!")
 
     fee      = 500
     trade_id = str(uuid.uuid4())[:8].upper()
@@ -92,6 +95,10 @@ async def cmd_trade(_, message: Message):
     my_tier    = get_rarity(my_char.get("rarity", ""))
     their_tier = get_rarity(their_char.get("rarity", ""))
 
+    p_name = _esc(proposer.first_name)
+    r_name = _esc(receiver.first_name)
+    r_link = f"[{r_name}](tg://user?id={receiver.id})"
+
     kb = IKM([[
         IKB("✅ Accept",  callback_data=f"trade:accept:{trade_id}"),
         IKB("❌ Decline", callback_data=f"trade:decline:{trade_id}"),
@@ -99,12 +106,12 @@ async def cmd_trade(_, message: Message):
 
     await message.reply_text(
         f"🔄 **Trade Proposal** (`{trade_id}`)\n\n"
-        f"**{proposer.first_name}** offers:\n"
-        f"  {my_tier.emoji if my_tier else '?'} **{my_char['name']}** `{my_iid}`\n\n"
-        f"For [{receiver.first_name}](tg://user?id={receiver.id})'s:\n"
-        f"  {their_tier.emoji if their_tier else '?'} **{their_char['name']}** `{their_iid}`\n\n"
+        f"**{p_name}** offers:\n"
+        f"  {my_tier.emoji if my_tier else '?'} **{_esc(my_char['name'])}** `{my_iid}`\n\n"
+        f"For {r_link}'s:\n"
+        f"  {their_tier.emoji if their_tier else '?'} **{_esc(their_char['name'])}** `{their_iid}`\n\n"
         f"Fee: `{_fmt(fee)}` kakera each\n\n"
-        f"[{receiver.first_name}](tg://user?id={receiver.id}) — accept or decline?",
+        f"{r_link} — accept or decline?",
         reply_markup=kb,
     )
 
@@ -139,11 +146,9 @@ async def trade_cb(_, cb):
         if not receiver_char or not proposer_char:
             return await cb.message.edit_text("❌ One or both characters were deleted.")
 
-        # What each side WILL receive
         receiver_gets_rarity = get_rarity(proposer_char["rarity"])
         proposer_gets_rarity = get_rarity(receiver_char["rarity"])
 
-        # max_per_user checks (FIX: _col() sync + await count_documents)
         if receiver_gets_rarity and receiver_gets_rarity.max_per_user > 0:
             count = await _col("user_characters").count_documents({
                 "user_id": trade["receiver_id"],
@@ -168,7 +173,6 @@ async def trade_cb(_, cb):
                     show_alert=True,
                 )
 
-        # Execute swap
         ok1 = await transfer_harem_char(trade["proposer_char"], trade["proposer_id"], trade["receiver_id"])
         ok2 = await transfer_harem_char(trade["receiver_char"], trade["receiver_id"], trade["proposer_id"])
 
@@ -182,7 +186,7 @@ async def trade_cb(_, cb):
                 trade["proposer_char"], trade["receiver_char"],
             )
             await cb.message.edit_text(
-                f"✅ **Trade Complete!**\nFee: `{_fmt(trade['fee'])}` kakera each."
+                f"✅ **Trade Complete!** Fee: `{_fmt(trade['fee'])}` kakera each."
             )
         else:
             await cb.message.edit_text("❌ Trade failed — characters may have moved.")
