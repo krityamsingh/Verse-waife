@@ -157,7 +157,9 @@ async def cmd_top(client, message: Message):
     text = "🏆 **Top 10 Soul Collectors**\n\n"
     for i, r in enumerate(results):
         doc  = await get_user(r["_id"]) or {}
-        text += f"{medals[i]} **{doc.get('first_name',f'User#{r[chr(95)]}')}** — `{r['count']}` chars\n"
+        uid = r["_id"]
+        name = doc.get('first_name') or doc.get('username') or f'User#{uid}'
+        text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}` chars\n"
     await message.reply_text(text)
 
 
@@ -172,7 +174,9 @@ async def cmd_toprarity(client, message: Message):
     text = f"{tier.emoji} **Top 10 {tier.display_name} Collectors**\n\n"
     for i, r in enumerate(results, 1):
         doc  = await get_user(r["_id"]) or {}
-        text += f"`{i}.` **{doc.get('first_name',f'User#{r[chr(95)]}')}** — `{r['count']}`\n"
+        uid = r["_id"]
+        name = doc.get('first_name') or doc.get('username') or f'User#{uid}'
+        text += f"`{i}.` [{name}](tg://user?id={uid}) — `{r['count']}`\n"
     await message.reply_text(text)
 
 
