@@ -81,7 +81,7 @@ async def get_or_create_user(user_id, username="", first_name="", last_name=""):
             "total_claimed": 0, "total_married": 0, "marriage_count": 0,
             "xp": 0, "level": 1, "daily_streak": 0,
             "last_daily": None, "last_spin": None,
-            "badges": [], "harem_sort": "rarity", "custom_media": None,
+            "badges": [], "harem_sort": "rarity", "collection_mode": "all", "custom_media": None,
             "is_banned": False, "ban_reason": "",
             "joined_at": now, "last_seen": now, "created_at": now,
         }
