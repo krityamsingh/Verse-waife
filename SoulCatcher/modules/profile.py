@@ -4,14 +4,12 @@ Commands:
   /status       — full stats card
   /bal          — balance card
   /profile      — profile card with rarity breakdown
-  /rank         — your collector rank
-  /top          — top 10 collectors
-  /toprarity    — top 10 by rarity
   /richest      — top 10 richest
   /rarityinfo   — rarity table
   /event        — current game mode
 
-Uses HTML parse mode throughout for rich inline formatting.
+Note: /rank /top /toprarity have been removed from this file.
+      They live in tops.py (/ktop /ctop) and are no longer duplicated here.
 """
 
 import os
@@ -24,17 +22,18 @@ from pyrogram.types import Message
 from .. import app
 from ..database import (
     _col,
-    get_or_create_user, get_user, get_balance,
+    get_or_create_user, get_user,
     get_harem, get_harem_rarity_counts,
-    count_user_rank, top_collectors, top_by_rarity, top_richest,
+    count_user_rank, top_richest,
     count_characters,
 )
-from ..rarity import get_rarity, get_rarity_order
+from ..rarity import get_rarity, get_rarity_order, RARITIES
 
 log  = logging.getLogger("SoulCatcher.profile")
 HTML = enums.ParseMode.HTML
+MD   = enums.ParseMode.MARKDOWN
 
-# ── Formatting helpers ─────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _fmt(n) -> str:
     try:    return f"{int(n):,}"
@@ -42,23 +41,22 @@ def _fmt(n) -> str:
 
 
 def _bar(pct: float, w: int = 12) -> str:
-    """Progress bar using block characters."""
     filled = round(max(0.0, min(1.0, pct)) * w)
     return "█" * filled + "░" * (w - filled)
 
 
 def _wealth(n: int) -> str:
     for thr, lbl in reversed([
-        (0,         "Lost Soul"),
-        (1_000,     "Traveler"),
-        (5_000,     "Merchant"),
-        (20_000,    "Guild Master"),
-        (50_000,    "Lord"),
-        (150_000,   "Duke"),
-        (500_000,   "Prince"),
-        (1_000_000, "King"),
-        (5_000_000, "Emperor"),
-        (10_000_000,"Soul Lord"),
+        (0,          "Lost Soul"),
+        (1_000,      "Traveler"),
+        (5_000,      "Merchant"),
+        (20_000,     "Guild Master"),
+        (50_000,     "Lord"),
+        (150_000,    "Duke"),
+        (500_000,    "Prince"),
+        (1_000_000,  "King"),
+        (5_000_000,  "Emperor"),
+        (10_000_000, "Soul Lord"),
     ]):
         if n >= thr:
             return lbl
@@ -66,22 +64,16 @@ def _wealth(n: int) -> str:
 
 
 def _esc(text: str) -> str:
-    """Escape HTML special characters for safe inline use."""
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    """Escape HTML special characters."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _mention(name: str, uid: int) -> str:
     return f'<a href="tg://user?id={uid}"><b>{_esc(name)}</b></a>'
 
 
-_DIV  = "━━━━━━━━━━━━━━━━━━━━"
-_SDIV = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
-
+_DIV   = "━━━━━━━━━━━━━━━━━━━━"
+_SDIV  = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
 _MEDALS = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
 
 
@@ -97,18 +89,23 @@ async def cmd_status(client, message: Message):
         pass
 
     try:
-        await get_or_create_user(user.id, user.username or "", user.first_name or "")
-        doc      = await get_user(user.id)
+        await get_or_create_user(
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            getattr(user, "last_name", "") or "",
+        )
+        doc = await get_user(user.id)
         if not doc:
             return await loading.edit_text("❌ <b>Not registered.</b>", parse_mode=HTML)
 
-        _, total  = await get_harem(user.id, page=1, per_page=1)
-        total_db  = await count_characters()
-        comp      = (total / total_db * 100) if total_db else 0
-        balance   = doc.get("balance", 0)
-        bank      = doc.get("saved_amount", 0)
-        loan      = doc.get("loan_amount", 0)
-        rank      = await count_user_rank(user.id)
+        _, total      = await get_harem(user.id, page=1, per_page=1)
+        total_db      = await count_characters()
+        comp          = (total / total_db * 100) if total_db else 0
+        balance       = doc.get("balance", 0)
+        bank          = doc.get("saved_amount", 0)
+        loan          = doc.get("loan_amount", 0)
+        rank          = await count_user_rank(user.id)
         rarity_counts = await get_harem_rarity_counts(user.id)
 
         r_lines = []
@@ -117,7 +114,7 @@ async def cmd_status(client, message: Message):
             if cnt:
                 tier = get_rarity(r_name)
                 em   = tier.emoji if tier else "✦"
-                dn   = _esc(tier.display_name) if tier else r_name
+                dn   = _esc(tier.display_name) if tier else _esc(r_name)
                 r_lines.append(f"  {em} <b>{dn}</b>  <code>{_fmt(cnt)}</code>")
 
         caption = (
@@ -128,7 +125,7 @@ async def cmd_status(client, message: Message):
             f"<code>{_DIV}</code>\n"
             f"📦 <b>Collection</b>\n"
             f"  <code>{_fmt(total)}</code> / <code>{_fmt(total_db)}</code>  "
-            f"<code>{_bar(comp/100)}</code>  <b>{comp:.1f}%</b>\n"
+            f"<code>{_bar(comp / 100)}</code>  <b>{comp:.1f}%</b>\n"
             f"<code>{_DIV}</code>\n"
             f"💰 <b>Economy</b>\n"
             f"  🌸 Kakera  <code>{_fmt(balance)}</code>  <i>({_esc(_wealth(balance))})</i>\n"
@@ -161,7 +158,10 @@ async def cmd_status(client, message: Message):
 
     except Exception as e:
         log.error("/status error uid=%s: %s", user.id, e)
-        await loading.edit_text("❌ <b>Failed to load status.</b>", parse_mode=HTML)
+        try:
+            await loading.edit_text("❌ <b>Failed to load status.</b>", parse_mode=HTML)
+        except Exception:
+            pass
 
 
 # ── /bal ───────────────────────────────────────────────────────────────────────
@@ -174,7 +174,12 @@ async def cmd_bal(client, message: Message):
         else message.from_user
     )
     try:
-        await get_or_create_user(target.id, target.username or "", target.first_name or "")
+        await get_or_create_user(
+            target.id,
+            target.username or "",
+            target.first_name or "",
+            getattr(target, "last_name", "") or "",
+        )
         doc = await get_user(target.id)
         if not doc:
             return await message.reply_text("❌ <b>Not registered.</b>", parse_mode=HTML)
@@ -198,9 +203,12 @@ async def cmd_bal(client, message: Message):
         try:
             if custom:
                 t, mid = custom.get("type"), custom.get("id")
-                if t == "photo":     return await message.reply_photo(mid, caption=text, parse_mode=HTML)
-                if t == "video":     return await message.reply_video(mid, caption=text, parse_mode=HTML)
-                if t == "animation": return await message.reply_animation(mid, caption=text, parse_mode=HTML)
+                if t == "photo":
+                    return await message.reply_photo(mid, caption=text, parse_mode=HTML)
+                if t == "video":
+                    return await message.reply_video(mid, caption=text, parse_mode=HTML)
+                if t == "animation":
+                    return await message.reply_animation(mid, caption=text, parse_mode=HTML)
             async for p in client.get_chat_photos(target.id, limit=1):
                 return await message.reply_photo(p.file_id, caption=text, parse_mode=HTML)
         except Exception:
@@ -219,7 +227,12 @@ async def cmd_bal(client, message: Message):
 async def cmd_profile(client, message: Message):
     user = message.from_user
     try:
-        await get_or_create_user(user.id, user.username or "", user.first_name or "")
+        await get_or_create_user(
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            getattr(user, "last_name", "") or "",
+        )
         doc = await get_user(user.id)
         if not doc:
             return await message.reply_text("❌ <b>Profile not found.</b>", parse_mode=HTML)
@@ -241,11 +254,11 @@ async def cmd_profile(client, message: Message):
             if cnt:
                 tier = get_rarity(r_name)
                 em   = tier.emoji if tier else "✦"
-                dn   = _esc(tier.display_name) if tier else r_name
+                dn   = _esc(tier.display_name) if tier else _esc(r_name)
                 r_lines.append(f"  {em} <b>{dn}</b>  <code>{_fmt(cnt)}</code>")
 
-        uname_str  = f"  @{_esc(user.username)}\n" if user.username else ""
-        badge_str  = f"\n🏅 <b>Badges</b>  {' '.join(badges)}\n" if badges else ""
+        uname_str = f"  @{_esc(user.username)}\n" if user.username else ""
+        badge_str = f"\n🏅 <b>Badges</b>  {' '.join(_esc(b) for b in badges)}\n" if badges else ""
 
         text = (
             f"🌸 <b>{_esc(user.first_name)}</b>\n"
@@ -256,7 +269,7 @@ async def cmd_profile(client, message: Message):
             f"💰 <b>Kakera</b>   <code>{_fmt(kakera)}</code>  <i>({_esc(_wealth(kakera))})</i>\n"
             f"🔥 <b>Streak</b>   <code>{streak}</code> days\n"
             f"🎴 <b>Chars</b>    <code>{total}</code> / <code>{total_db}</code>  "
-            f"<code>{_bar(comp/100)}</code>  <b>{comp:.1f}%</b>\n"
+            f"<code>{_bar(comp / 100)}</code>  <b>{comp:.1f}%</b>\n"
             f"<code>{_DIV}</code>\n"
             f"🎭 <b>Rarity Breakdown</b>\n"
             + ("\n".join(r_lines) if r_lines else "  <i>None yet</i>") +
@@ -282,144 +295,6 @@ async def cmd_profile(client, message: Message):
     except Exception as e:
         log.error("/profile error uid=%s: %s", user.id, e)
         await message.reply_text("❌ <b>Failed to load profile.</b>", parse_mode=HTML)
-
-
-# ── /rank ──────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("rank"))
-async def cmd_rank(_, message: Message):
-    try:
-        uid        = message.from_user.id
-        rank       = await count_user_rank(uid)
-        _, total   = await get_harem(uid, page=1, per_page=1)
-        name       = _esc(message.from_user.first_name)
-        await message.reply_text(
-            f"🏆 <b>Global Rank</b>\n"
-            f"<code>{_SDIV}</code>\n"
-            f"👤 <b>{name}</b>\n"
-            f"  🎖 Rank   <b>#{rank}</b>\n"
-            f"  🎴 Chars  <code>{_fmt(total)}</code>\n"
-            f"<code>{_SDIV}</code>",
-            parse_mode=HTML,
-        )
-    except Exception as e:
-        log.error("/rank error: %s", e)
-        await message.reply_text("❌ <b>Failed to load rank.</b>", parse_mode=HTML)
-
-
-# ── /top ───────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("top"))
-async def cmd_top(client, message: Message):
-    wait = await message.reply_text("⏳ <i>Loading top collectors…</i>", parse_mode=HTML)
-    try:
-        results = await top_collectors(10)
-        if not results:
-            return await wait.edit_text("📊 <i>No collectors yet.</i>", parse_mode=HTML)
-
-        uid_list  = [r["_id"] for r in results]
-        user_docs = await _col("users").find(
-            {"user_id": {"$in": uid_list}},
-            {"user_id": 1, "first_name": 1, "username": 1},
-        ).to_list(10)
-        name_map = {
-            d["user_id"]: (d.get("first_name") or d.get("username") or None)
-            for d in user_docs
-        }
-
-        lines = [
-            f"🏆 <b>TOP 10 SOUL COLLECTORS</b>\n"
-            f"<code>{_DIV}</code>\n"
-        ]
-        for i, r in enumerate(results):
-            uid   = r["_id"]
-            name  = _esc(name_map.get(uid) or f"User {uid}")
-            count = r["count"]
-            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i+1}."
-            if i == 0:
-                lines.append(
-                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
-                    f"  🎴 <b><code>{_fmt(count)}</code></b> characters"
-                )
-            else:
-                lines.append(
-                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
-                    f"<code>{_fmt(count)}</code> chars"
-                )
-
-        lines.append(f"\n<code>{_DIV}</code>")
-        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
-
-    except Exception as e:
-        log.error("/top error: %s", e)
-        await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
-
-
-# ── /toprarity ─────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("toprarity"))
-async def cmd_toprarity(client, message: Message):
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text(
-            "❓ <b>Usage:</b> <code>/toprarity &lt;rarity&gt;</code>\n"
-            "<i>e.g. /toprarity mythic</i>",
-            parse_mode=HTML,
-        )
-    tier = get_rarity(args[1].lower())
-    if not tier:
-        return await message.reply_text(
-            "❌ <b>Unknown rarity.</b>\n"
-            "<i>Try:</i> <code>common · rare · cosmos · infernal · seasonal · mythic · eternal</code>",
-            parse_mode=HTML,
-        )
-
-    wait = await message.reply_text(
-        f"⏳ <i>Loading {_esc(tier.display_name)} leaderboard…</i>", parse_mode=HTML
-    )
-    try:
-        results = await top_by_rarity(args[1].lower(), 10)
-        if not results:
-            return await wait.edit_text(
-                f"📊 <i>No {_esc(tier.display_name)} collectors yet.</i>", parse_mode=HTML
-            )
-
-        uid_list  = [r["_id"] for r in results]
-        user_docs = await _col("users").find(
-            {"user_id": {"$in": uid_list}},
-            {"user_id": 1, "first_name": 1, "username": 1},
-        ).to_list(10)
-        name_map = {
-            d["user_id"]: (d.get("first_name") or d.get("username") or None)
-            for d in user_docs
-        }
-
-        lines = [
-            f"{tier.emoji} <b>TOP 10 {_esc(tier.display_name.upper())} COLLECTORS</b>\n"
-            f"<code>{_DIV}</code>\n"
-        ]
-        for i, r in enumerate(results):
-            uid   = r["_id"]
-            name  = _esc(name_map.get(uid) or f"User {uid}")
-            count = r["count"]
-            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i+1}."
-            if i == 0:
-                lines.append(
-                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
-                    f"  {tier.emoji} <b><code>{_fmt(count)}</code></b> characters"
-                )
-            else:
-                lines.append(
-                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
-                    f"<code>{_fmt(count)}</code>"
-                )
-
-        lines.append(f"\n<code>{_DIV}</code>")
-        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
-
-    except Exception as e:
-        log.error("/toprarity error: %s", e)
-        await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
 
 
 # ── /richest ───────────────────────────────────────────────────────────────────
@@ -454,7 +329,9 @@ async def cmd_richest(_, message: Message):
                 )
 
         lines.append(f"\n<code>{_DIV}</code>")
-        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
+        await wait.edit_text(
+            "\n".join(lines), parse_mode=HTML, disable_web_page_preview=True
+        )
 
     except Exception as e:
         log.error("/richest error: %s", e)
@@ -466,13 +343,15 @@ async def cmd_richest(_, message: Message):
 @app.on_message(filters.command("rarityinfo"))
 async def cmd_rarityinfo(_, message: Message):
     try:
-        from ..rarity import get_rarity_card, RARITIES
         args = message.command
 
         if len(args) > 1:
+            # get_rarity_card returns Markdown — send with MD parse mode
+            from ..rarity import get_rarity_card
             card = get_rarity_card(args[1].lower())
-            return await message.reply_text(card, parse_mode=HTML)
+            return await message.reply_text(card, parse_mode=MD)
 
+        # Full table — build in HTML
         lines = [
             f"🌸 <b>SOULCATCHER RARITY TABLE</b>\n"
             f"<code>{_DIV}</code>\n"
@@ -483,8 +362,7 @@ async def cmd_rarityinfo(_, message: Message):
                 for s in r.sub_rarities
             )
             lines.append(
-                f"{r.emoji} <b>{_esc(r.display_name)}</b>  "
-                f"<i>(Tier {r.id})</i>\n"
+                f"{r.emoji} <b>{_esc(r.display_name)}</b>  <i>(Tier {r.id})</i>\n"
                 f"  Weight <code>{r.weight}</code>  "
                 f"Kakera <code>{r.kakera_reward}</code>  "
                 f"Claim <code>{r.claim_window_seconds}s</code>"
@@ -511,8 +389,8 @@ async def cmd_event(_, message: Message):
             f"<code>{_SDIV}</code>\n"
             f"✦ <b>{_esc(mode['label'])}</b>\n"
             f"<code>{_SDIV}</code>\n"
-            f"⚡ Spawn weight  <code>{mode['weight_mult']}×</code>\n"
-            f"🌸 Kakera reward <code>{mode['kakera_mult']}×</code>\n"
+            f"⚡ Spawn weight   <code>{mode['weight_mult']}×</code>\n"
+            f"🌸 Kakera reward  <code>{mode['kakera_mult']}×</code>\n"
             f"<code>{_SDIV}</code>",
             parse_mode=HTML,
         )
