@@ -1,8 +1,26 @@
-"""SoulCatcher/modules/profile.py — /status /bal /profile /rank /top /toprarity /richest /rarityinfo /event"""
-import os, random, math
+"""SoulCatcher/modules/profile.py
+
+Commands:
+  /status       — full stats card
+  /bal          — balance card
+  /profile      — profile card with rarity breakdown
+  /rank         — your collector rank
+  /top          — top 10 collectors
+  /toprarity    — top 10 by rarity
+  /richest      — top 10 richest
+  /rarityinfo   — rarity table
+  /event        — current game mode
+
+Uses HTML parse mode throughout for rich inline formatting.
+"""
+
+import os
+import logging
 from datetime import datetime
-from pyrogram import filters
+
+from pyrogram import filters, enums
 from pyrogram.types import Message
+
 from .. import app
 from ..database import (
     _col,
@@ -13,154 +31,293 @@ from ..database import (
 )
 from ..rarity import get_rarity, get_rarity_order
 
-def _fmt(n):
+log  = logging.getLogger("SoulCatcher.profile")
+HTML = enums.ParseMode.HTML
+
+# ── Formatting helpers ─────────────────────────────────────────────────────────
+
+def _fmt(n) -> str:
     try:    return f"{int(n):,}"
     except: return str(n)
 
-def _bar(pct, w=10):
-    fill = round(pct*w); return "█"*fill + "░"*(w-fill)
 
-def _wealth(n):
-    for thr, lbl in reversed([(0,"Beginner"),(1000,"Traveler"),(5000,"Merchant"),
-        (20000,"Guild Master"),(50000,"Lord"),(150000,"Duke"),(500000,"Prince"),
-        (1000000,"King"),(5000000,"Emperor"),(10000000,"Soul Lord")]):
-        if n >= thr: return lbl
+def _bar(pct: float, w: int = 12) -> str:
+    """Progress bar using block characters."""
+    filled = round(max(0.0, min(1.0, pct)) * w)
+    return "█" * filled + "░" * (w - filled)
+
+
+def _wealth(n: int) -> str:
+    for thr, lbl in reversed([
+        (0,         "Lost Soul"),
+        (1_000,     "Traveler"),
+        (5_000,     "Merchant"),
+        (20_000,    "Guild Master"),
+        (50_000,    "Lord"),
+        (150_000,   "Duke"),
+        (500_000,   "Prince"),
+        (1_000_000, "King"),
+        (5_000_000, "Emperor"),
+        (10_000_000,"Soul Lord"),
+    ]):
+        if n >= thr:
+            return lbl
     return "Lost Soul"
 
 
+def _esc(text: str) -> str:
+    """Escape HTML special characters for safe inline use."""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _mention(name: str, uid: int) -> str:
+    return f'<a href="tg://user?id={uid}"><b>{_esc(name)}</b></a>'
+
+
+_DIV  = "━━━━━━━━━━━━━━━━━━━━"
+_SDIV = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
+_MEDALS = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
+
+
+# ── /status ────────────────────────────────────────────────────────────────────
+
 @app.on_message(filters.command("status"))
 async def cmd_status(client, message: Message):
-    user = message.from_user
-    try: await message.react("⚡")
-    except Exception: pass
-    loading = await message.reply_text("🔍 Loading...")
-    await get_or_create_user(user.id, user.username or "", user.first_name or "")
-    doc = await get_user(user.id)
-    if not doc: return await loading.edit_text("❌ Not registered.")
-    _, total = await get_harem(user.id, page=1, per_page=1)
-    total_db = await count_characters()
-    comp     = (total/total_db*100) if total_db else 0
-    balance  = doc.get("balance", 0)
-    bank     = doc.get("saved_amount", 0)
-    loan     = doc.get("loan_amount",  0)
-    rank     = await count_user_rank(user.id)
-    rarity_counts = await get_harem_rarity_counts(user.id)
-    r_lines = "\n".join(
-        f"{get_rarity(r).emoji if get_rarity(r) else '?'} {r} → `{c}`"
-        for r, c in sorted(rarity_counts.items())
-    ) or "⚫ common → 0"
-    caption = (
-        f"✨ **Player Status** ✨\n───────────────────\n"
-        f"👤 [{user.first_name}](tg://user?id={user.id})\n🆔 `{user.id}`\n"
-        f"───────────────────\n📦 **Collection**\n"
-        f"• Chars: `{_fmt(total)}/{_fmt(total_db)}` {_bar(comp/100)} `{comp:.1f}%`\n"
-        f"───────────────────\n💰 **Economy**\n"
-        f"• Kakera: `{_fmt(balance)}` ({_wealth(balance)})\n"
-        f"• Bank: `{_fmt(bank)}` | Loan: `{_fmt(loan)}`\n"
-        f"───────────────────\n🏆 Global Rank: **#{rank}**\n"
-        f"───────────────────\n🎭 **Rarity Breakdown**\n{r_lines}\n───────────────────"
-    )
-    await loading.delete()
-    photo_path = None
+    user    = message.from_user
+    loading = await message.reply_text("🔍 <i>Loading your status…</i>", parse_mode=HTML)
     try:
-        async for p in client.get_chat_photos(user.id, limit=1):
-            photo_path = await client.download_media(p.file_id); break
-    except Exception: pass
-    if photo_path:
-        await message.reply_photo(photo_path, caption=caption)
-        try: os.remove(photo_path)
-        except Exception: pass
-    else:
-        await message.reply_text(caption)
+        await message.react("⚡")
+    except Exception:
+        pass
 
+    try:
+        await get_or_create_user(user.id, user.username or "", user.first_name or "")
+        doc      = await get_user(user.id)
+        if not doc:
+            return await loading.edit_text("❌ <b>Not registered.</b>", parse_mode=HTML)
+
+        _, total  = await get_harem(user.id, page=1, per_page=1)
+        total_db  = await count_characters()
+        comp      = (total / total_db * 100) if total_db else 0
+        balance   = doc.get("balance", 0)
+        bank      = doc.get("saved_amount", 0)
+        loan      = doc.get("loan_amount", 0)
+        rank      = await count_user_rank(user.id)
+        rarity_counts = await get_harem_rarity_counts(user.id)
+
+        r_lines = []
+        for r_name in get_rarity_order():
+            cnt = rarity_counts.get(r_name, 0)
+            if cnt:
+                tier = get_rarity(r_name)
+                em   = tier.emoji if tier else "✦"
+                dn   = _esc(tier.display_name) if tier else r_name
+                r_lines.append(f"  {em} <b>{dn}</b>  <code>{_fmt(cnt)}</code>")
+
+        caption = (
+            f"✨ <b>PLAYER STATUS</b> ✨\n"
+            f"<code>{_DIV}</code>\n"
+            f"👤 {_mention(user.first_name, user.id)}\n"
+            f"🆔 <code>{user.id}</code>\n"
+            f"<code>{_DIV}</code>\n"
+            f"📦 <b>Collection</b>\n"
+            f"  <code>{_fmt(total)}</code> / <code>{_fmt(total_db)}</code>  "
+            f"<code>{_bar(comp/100)}</code>  <b>{comp:.1f}%</b>\n"
+            f"<code>{_DIV}</code>\n"
+            f"💰 <b>Economy</b>\n"
+            f"  🌸 Kakera  <code>{_fmt(balance)}</code>  <i>({_esc(_wealth(balance))})</i>\n"
+            f"  🏦 Bank    <code>{_fmt(bank)}</code>\n"
+            f"  💳 Loan    <code>{_fmt(loan)}</code>\n"
+            f"<code>{_DIV}</code>\n"
+            f"🏆 Global Rank  <b>#{rank}</b>\n"
+            f"<code>{_DIV}</code>\n"
+            f"🎭 <b>Rarity Breakdown</b>\n"
+            + ("\n".join(r_lines) if r_lines else "  <i>No characters yet</i>") +
+            f"\n<code>{_DIV}</code>"
+        )
+
+        await loading.delete()
+
+        photo_path = None
+        try:
+            async for p in client.get_chat_photos(user.id, limit=1):
+                photo_path = await client.download_media(p.file_id)
+                break
+        except Exception:
+            pass
+
+        if photo_path:
+            await message.reply_photo(photo_path, caption=caption, parse_mode=HTML)
+            try: os.remove(photo_path)
+            except Exception: pass
+        else:
+            await message.reply_text(caption, parse_mode=HTML)
+
+    except Exception as e:
+        log.error("/status error uid=%s: %s", user.id, e)
+        await loading.edit_text("❌ <b>Failed to load status.</b>", parse_mode=HTML)
+
+
+# ── /bal ───────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("bal"))
 async def cmd_bal(client, message: Message):
-    target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
-    await get_or_create_user(target.id, target.username or "", target.first_name or "")
-    doc = await get_user(target.id)
-    if not doc: return await message.reply_text("❌ Not registered.")
-    text = (
-        "🌸 **SoulCatcher Balance**\n━━━━━━━━━━━━━━━━━\n"
-        f"❖ **User:** [{target.first_name}](tg://user?id={target.id})\n\n"
-        f"💰 **Kakera:** `{_fmt(doc.get('balance',0))}`\n"
-        f"🏦 **Bank:** `{_fmt(doc.get('saved_amount',0))}`\n"
-        f"💸 **Loan:** `{_fmt(doc.get('loan_amount',0))}`\n"
-        "━━━━━━━━━━━━━━━━━"
+    target = (
+        message.reply_to_message.from_user
+        if message.reply_to_message
+        else message.from_user
     )
-    custom = doc.get("custom_media")
     try:
-        if custom:
-            t, mid = custom.get("type"), custom.get("id")
-            if t == "photo":     return await message.reply_photo(mid, caption=text)
-            if t == "video":     return await message.reply_video(mid, caption=text)
-            if t == "animation": return await message.reply_animation(mid, caption=text)
-        async for p in client.get_chat_photos(target.id, limit=1):
-            return await message.reply_photo(p.file_id, caption=text)
-    except Exception: pass
-    await message.reply_text(text)
+        await get_or_create_user(target.id, target.username or "", target.first_name or "")
+        doc = await get_user(target.id)
+        if not doc:
+            return await message.reply_text("❌ <b>Not registered.</b>", parse_mode=HTML)
 
+        bal  = doc.get("balance", 0)
+        bank = doc.get("saved_amount", 0)
+        loan = doc.get("loan_amount", 0)
+
+        text = (
+            f"🌸 <b>SOULCATCHER BALANCE</b>\n"
+            f"<code>{_DIV}</code>\n"
+            f"👤 {_mention(target.first_name, target.id)}\n"
+            f"<code>{_SDIV}</code>\n"
+            f"🌸 <b>Kakera</b>   <code>{_fmt(bal)}</code>\n"
+            f"🏦 <b>Bank</b>     <code>{_fmt(bank)}</code>\n"
+            f"💳 <b>Loan</b>     <code>{_fmt(loan)}</code>\n"
+            f"<code>{_DIV}</code>"
+        )
+
+        custom = doc.get("custom_media")
+        try:
+            if custom:
+                t, mid = custom.get("type"), custom.get("id")
+                if t == "photo":     return await message.reply_photo(mid, caption=text, parse_mode=HTML)
+                if t == "video":     return await message.reply_video(mid, caption=text, parse_mode=HTML)
+                if t == "animation": return await message.reply_animation(mid, caption=text, parse_mode=HTML)
+            async for p in client.get_chat_photos(target.id, limit=1):
+                return await message.reply_photo(p.file_id, caption=text, parse_mode=HTML)
+        except Exception:
+            pass
+
+        await message.reply_text(text, parse_mode=HTML)
+
+    except Exception as e:
+        log.error("/bal error: %s", e)
+        await message.reply_text("❌ <b>Failed to load balance.</b>", parse_mode=HTML)
+
+
+# ── /profile ───────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("profile"))
 async def cmd_profile(client, message: Message):
     user = message.from_user
-    await get_or_create_user(user.id, user.username or "", user.first_name or "")
-    doc = await get_user(user.id)
-    if not doc: return await message.reply_text("❌ Profile not found.")
-    _, total = await get_harem(user.id, page=1, per_page=1)
-    total_db = await count_characters()
-    comp     = (total/total_db*100) if total_db else 0
-    rarity_cnt = await get_harem_rarity_counts(user.id)
-    rank     = await count_user_rank(user.id)
-    kakera   = doc.get("balance", 0)
-    streak   = doc.get("daily_streak", 0)
-    badges   = doc.get("badges", [])
-    joined   = doc.get("joined_at", datetime.utcnow())
-    age_days = (datetime.utcnow()-joined).days if hasattr(joined,"date") else 0
-    r_lines  = []
-    for r_name in get_rarity_order():
-        cnt = rarity_cnt.get(r_name, 0)
-        if cnt:
-            t = get_rarity(r_name)
-            r_lines.append(f"  {t.emoji} **{t.display_name}**: `{cnt}`")
-    text = (
-        f"🌸 **{user.first_name}**" + (f" (@{user.username})" if user.username else "")
-        + f"\n📅 Joined {age_days}d ago | 🏆 Rank **#{rank}**"
-        + f"\n\n💰 **Kakera:** `{_fmt(kakera)}` ({_wealth(kakera)})"
-        + f"\n🔥 **Streak:** `{streak}` days"
-        + f"\n🎴 **Chars:** `{total}/{total_db}` {_bar(comp/100)} `{comp:.1f}%`"
-        + f"\n\n**Rarity Breakdown:**\n" + ("\n".join(r_lines) or "  _None yet_")
-        + (f"\n\n🏅 **Badges:** " + " ".join(badges) if badges else "")
-    )
-    photo_path = None
     try:
-        async for p in client.get_chat_photos(user.id, limit=1):
-            photo_path = await client.download_media(p.file_id); break
-    except Exception: pass
-    if photo_path:
-        await message.reply_photo(photo_path, caption=text)
-        try: os.remove(photo_path)
-        except Exception: pass
-    else:
-        await message.reply_text(text)
+        await get_or_create_user(user.id, user.username or "", user.first_name or "")
+        doc = await get_user(user.id)
+        if not doc:
+            return await message.reply_text("❌ <b>Profile not found.</b>", parse_mode=HTML)
 
+        _, total   = await get_harem(user.id, page=1, per_page=1)
+        total_db   = await count_characters()
+        comp       = (total / total_db * 100) if total_db else 0
+        rarity_cnt = await get_harem_rarity_counts(user.id)
+        rank       = await count_user_rank(user.id)
+        kakera     = doc.get("balance", 0)
+        streak     = doc.get("daily_streak", 0)
+        badges     = doc.get("badges", [])
+        joined     = doc.get("joined_at", datetime.utcnow())
+        age_days   = (datetime.utcnow() - joined).days if hasattr(joined, "date") else 0
+
+        r_lines = []
+        for r_name in get_rarity_order():
+            cnt = rarity_cnt.get(r_name, 0)
+            if cnt:
+                tier = get_rarity(r_name)
+                em   = tier.emoji if tier else "✦"
+                dn   = _esc(tier.display_name) if tier else r_name
+                r_lines.append(f"  {em} <b>{dn}</b>  <code>{_fmt(cnt)}</code>")
+
+        uname_str  = f"  @{_esc(user.username)}\n" if user.username else ""
+        badge_str  = f"\n🏅 <b>Badges</b>  {' '.join(badges)}\n" if badges else ""
+
+        text = (
+            f"🌸 <b>{_esc(user.first_name)}</b>\n"
+            f"{uname_str}"
+            f"<code>{_DIV}</code>\n"
+            f"📅 Joined <b>{age_days}d</b> ago  ·  🏆 Rank <b>#{rank}</b>\n"
+            f"<code>{_SDIV}</code>\n"
+            f"💰 <b>Kakera</b>   <code>{_fmt(kakera)}</code>  <i>({_esc(_wealth(kakera))})</i>\n"
+            f"🔥 <b>Streak</b>   <code>{streak}</code> days\n"
+            f"🎴 <b>Chars</b>    <code>{total}</code> / <code>{total_db}</code>  "
+            f"<code>{_bar(comp/100)}</code>  <b>{comp:.1f}%</b>\n"
+            f"<code>{_DIV}</code>\n"
+            f"🎭 <b>Rarity Breakdown</b>\n"
+            + ("\n".join(r_lines) if r_lines else "  <i>None yet</i>") +
+            f"\n{badge_str}"
+            f"<code>{_DIV}</code>"
+        )
+
+        photo_path = None
+        try:
+            async for p in client.get_chat_photos(user.id, limit=1):
+                photo_path = await client.download_media(p.file_id)
+                break
+        except Exception:
+            pass
+
+        if photo_path:
+            await message.reply_photo(photo_path, caption=text, parse_mode=HTML)
+            try: os.remove(photo_path)
+            except Exception: pass
+        else:
+            await message.reply_text(text, parse_mode=HTML)
+
+    except Exception as e:
+        log.error("/profile error uid=%s: %s", user.id, e)
+        await message.reply_text("❌ <b>Failed to load profile.</b>", parse_mode=HTML)
+
+
+# ── /rank ──────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("rank"))
 async def cmd_rank(_, message: Message):
-    rank = await count_user_rank(message.from_user.id)
-    _, total = await get_harem(message.from_user.id, page=1, per_page=1)
-    await message.reply_text(f"🏆 Your rank: **#{rank}** with **{total}** characters!")
+    try:
+        uid        = message.from_user.id
+        rank       = await count_user_rank(uid)
+        _, total   = await get_harem(uid, page=1, per_page=1)
+        name       = _esc(message.from_user.first_name)
+        await message.reply_text(
+            f"🏆 <b>Global Rank</b>\n"
+            f"<code>{_SDIV}</code>\n"
+            f"👤 <b>{name}</b>\n"
+            f"  🎖 Rank   <b>#{rank}</b>\n"
+            f"  🎴 Chars  <code>{_fmt(total)}</code>\n"
+            f"<code>{_SDIV}</code>",
+            parse_mode=HTML,
+        )
+    except Exception as e:
+        log.error("/rank error: %s", e)
+        await message.reply_text("❌ <b>Failed to load rank.</b>", parse_mode=HTML)
 
+
+# ── /top ───────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("top"))
 async def cmd_top(client, message: Message):
-    wait = await message.reply_text("⏳ Loading...")
+    wait = await message.reply_text("⏳ <i>Loading top collectors…</i>", parse_mode=HTML)
     try:
         results = await top_collectors(10)
         if not results:
-            return await wait.edit_text("📊 No collectors yet.")
-        # Batch-fetch all names in one DB query
-        uid_list = [r["_id"] for r in results]
+            return await wait.edit_text("📊 <i>No collectors yet.</i>", parse_mode=HTML)
+
+        uid_list  = [r["_id"] for r in results]
         user_docs = await _col("users").find(
             {"user_id": {"$in": uid_list}},
             {"user_id": 1, "first_name": 1, "username": 1},
@@ -169,32 +326,65 @@ async def cmd_top(client, message: Message):
             d["user_id"]: (d.get("first_name") or d.get("username") or None)
             for d in user_docs
         }
-        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
-        text = "🏆 **Top 10 Soul Collectors**\n\n"
-        for i, r in enumerate(results):
-            uid  = r["_id"]
-            name = name_map.get(uid) or f"User {uid}"
-            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}` chars\n"
-        await wait.edit_text(text)
-    except Exception as e:
-        import logging; logging.getLogger("SoulCatcher.profile").error("/top error: %s", e)
-        await wait.edit_text("❌ Failed to load leaderboard.")
 
+        lines = [
+            f"🏆 <b>TOP 10 SOUL COLLECTORS</b>\n"
+            f"<code>{_DIV}</code>\n"
+        ]
+        for i, r in enumerate(results):
+            uid   = r["_id"]
+            name  = _esc(name_map.get(uid) or f"User {uid}")
+            count = r["count"]
+            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i+1}."
+            if i == 0:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
+                    f"  🎴 <b><code>{_fmt(count)}</code></b> characters"
+                )
+            else:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
+                    f"<code>{_fmt(count)}</code> chars"
+                )
+
+        lines.append(f"\n<code>{_DIV}</code>")
+        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
+
+    except Exception as e:
+        log.error("/top error: %s", e)
+        await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
+
+
+# ── /toprarity ─────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("toprarity"))
 async def cmd_toprarity(client, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/toprarity <rarity_name>`")
+        return await message.reply_text(
+            "❓ <b>Usage:</b> <code>/toprarity &lt;rarity&gt;</code>\n"
+            "<i>e.g. /toprarity mythic</i>",
+            parse_mode=HTML,
+        )
     tier = get_rarity(args[1].lower())
     if not tier:
-        return await message.reply_text("❌ Unknown rarity. Try: common, rare, cosmos, infernal, seasonal, mythic, eternal")
-    wait = await message.reply_text(f"⏳ Loading {tier.display_name} leaderboard...")
+        return await message.reply_text(
+            "❌ <b>Unknown rarity.</b>\n"
+            "<i>Try:</i> <code>common · rare · cosmos · infernal · seasonal · mythic · eternal</code>",
+            parse_mode=HTML,
+        )
+
+    wait = await message.reply_text(
+        f"⏳ <i>Loading {_esc(tier.display_name)} leaderboard…</i>", parse_mode=HTML
+    )
     try:
         results = await top_by_rarity(args[1].lower(), 10)
         if not results:
-            return await wait.edit_text(f"📊 No {tier.display_name} collectors yet.")
-        uid_list = [r["_id"] for r in results]
+            return await wait.edit_text(
+                f"📊 <i>No {_esc(tier.display_name)} collectors yet.</i>", parse_mode=HTML
+            )
+
+        uid_list  = [r["_id"] for r in results]
         user_docs = await _col("users").find(
             {"user_id": {"$in": uid_list}},
             {"user_id": 1, "first_name": 1, "username": 1},
@@ -203,64 +393,129 @@ async def cmd_toprarity(client, message: Message):
             d["user_id"]: (d.get("first_name") or d.get("username") or None)
             for d in user_docs
         }
-        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
-        text = f"{tier.emoji} **Top 10 {tier.display_name} Collectors**\n\n"
-        for i, r in enumerate(results):
-            uid  = r["_id"]
-            name = name_map.get(uid) or f"User {uid}"
-            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{r['count']}`\n"
-        await wait.edit_text(text)
-    except Exception as e:
-        import logging; logging.getLogger("SoulCatcher.profile").error("/toprarity error: %s", e)
-        await wait.edit_text("❌ Failed to load leaderboard.")
 
+        lines = [
+            f"{tier.emoji} <b>TOP 10 {_esc(tier.display_name.upper())} COLLECTORS</b>\n"
+            f"<code>{_DIV}</code>\n"
+        ]
+        for i, r in enumerate(results):
+            uid   = r["_id"]
+            name  = _esc(name_map.get(uid) or f"User {uid}")
+            count = r["count"]
+            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i+1}."
+            if i == 0:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
+                    f"  {tier.emoji} <b><code>{_fmt(count)}</code></b> characters"
+                )
+            else:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
+                    f"<code>{_fmt(count)}</code>"
+                )
+
+        lines.append(f"\n<code>{_DIV}</code>")
+        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
+
+    except Exception as e:
+        log.error("/toprarity error: %s", e)
+        await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
+
+
+# ── /richest ───────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("richest"))
 async def cmd_richest(_, message: Message):
-    wait = await message.reply_text("⏳ Loading richest players...")
+    wait = await message.reply_text("⏳ <i>Loading richest players…</i>", parse_mode=HTML)
     try:
         results = await top_richest(10)
-        # Filter out users with 0 balance
         results = [r for r in results if r.get("balance", 0) > 0]
         if not results:
-            return await wait.edit_text("📊 No wealthy players yet.")
-        medals = ["🥇","🥈","🥉"] + ["🏅"] * 7
-        text = "💰 **Top 10 Richest Players**\n\n"
-        for i, r in enumerate(results):
-            uid  = r.get("user_id", "?")
-            name = r.get("first_name") or r.get("username") or f"User {uid}"
-            bal  = r.get("balance", 0)
-            text += f"{medals[i]} [{name}](tg://user?id={uid}) — `{_fmt(bal)}` 🌸\n"
-        await wait.edit_text(text)
-    except Exception as e:
-        import logging; logging.getLogger("SoulCatcher.profile").error("/richest error: %s", e)
-        await wait.edit_text("❌ Failed to load leaderboard.")
+            return await wait.edit_text("📊 <i>No wealthy players yet.</i>", parse_mode=HTML)
 
+        lines = [
+            f"💰 <b>TOP 10 RICHEST PLAYERS</b>\n"
+            f"<code>{_DIV}</code>\n"
+        ]
+        for i, r in enumerate(results):
+            uid   = r.get("user_id", 0)
+            name  = _esc(r.get("first_name") or r.get("username") or f"User {uid}")
+            bal   = r.get("balance", 0)
+            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i+1}."
+            if i == 0:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
+                    f"  🌸 <b><code>{_fmt(bal)}</code></b> kakera"
+                )
+            else:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
+                    f"<code>{_fmt(bal)}</code> 🌸"
+                )
+
+        lines.append(f"\n<code>{_DIV}</code>")
+        await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
+
+    except Exception as e:
+        log.error("/richest error: %s", e)
+        await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
+
+
+# ── /rarityinfo ────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("rarityinfo"))
 async def cmd_rarityinfo(_, message: Message):
-    from ..rarity import get_rarity_card, RARITIES, SUB_RARITIES
-    args = message.command
-    if len(args) > 1:
-        return await message.reply_text(get_rarity_card(args[1].lower()))
-    # Show all tiers in a clean table
-    lines = []
-    for r in RARITIES.values():
-        subs = "  ".join(f"{s.emoji}`{s.display_name}`" for s in r.sub_rarities)
-        lines.append(
-            f"{r.emoji} **{r.display_name}** (Tier {r.id})\n"
-            f"  Weight:`{r.weight}` Kakera:`{r.kakera_reward}` Claim:`{r.claim_window_seconds}s`"
-            + (f"\n  └ Sub: {subs}" if subs else "")
-        )
-    await message.reply_text("🌸 **SoulCatcher Rarity Table**\n\n" + "\n\n".join(lines))
+    try:
+        from ..rarity import get_rarity_card, RARITIES
+        args = message.command
 
+        if len(args) > 1:
+            card = get_rarity_card(args[1].lower())
+            return await message.reply_text(card, parse_mode=HTML)
+
+        lines = [
+            f"🌸 <b>SOULCATCHER RARITY TABLE</b>\n"
+            f"<code>{_DIV}</code>\n"
+        ]
+        for r in RARITIES.values():
+            subs = "  ".join(
+                f"{s.emoji} <code>{_esc(s.display_name)}</code>"
+                for s in r.sub_rarities
+            )
+            lines.append(
+                f"{r.emoji} <b>{_esc(r.display_name)}</b>  "
+                f"<i>(Tier {r.id})</i>\n"
+                f"  Weight <code>{r.weight}</code>  "
+                f"Kakera <code>{r.kakera_reward}</code>  "
+                f"Claim <code>{r.claim_window_seconds}s</code>"
+                + (f"\n  └ {subs}" if subs else "")
+            )
+
+        lines.append(f"\n<code>{_DIV}</code>")
+        await message.reply_text("\n\n".join(lines), parse_mode=HTML)
+
+    except Exception as e:
+        log.error("/rarityinfo error: %s", e)
+        await message.reply_text("❌ <b>Failed to load rarity info.</b>", parse_mode=HTML)
+
+
+# ── /event ─────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("event"))
 async def cmd_event(_, message: Message):
-    import SoulCatcher.rarity as _mod
-    mode = _mod.GAME_MODES.get(_mod.CURRENT_MODE, _mod.GAME_MODES["normal"])
-    await message.reply_text(
-        f"🎮 **Current Mode:** {mode['label']}\n\n"
-        f"• Spawn weight: `{mode['weight_mult']}×`\n"
-        f"• Kakera reward: `{mode['kakera_mult']}×`"
-    )
+    try:
+        import SoulCatcher.rarity as _mod
+        mode = _mod.GAME_MODES.get(_mod.CURRENT_MODE, _mod.GAME_MODES["normal"])
+        await message.reply_text(
+            f"🎮 <b>CURRENT GAME MODE</b>\n"
+            f"<code>{_SDIV}</code>\n"
+            f"✦ <b>{_esc(mode['label'])}</b>\n"
+            f"<code>{_SDIV}</code>\n"
+            f"⚡ Spawn weight  <code>{mode['weight_mult']}×</code>\n"
+            f"🌸 Kakera reward <code>{mode['kakera_mult']}×</code>\n"
+            f"<code>{_SDIV}</code>",
+            parse_mode=HTML,
+        )
+    except Exception as e:
+        log.error("/event error: %s", e)
+        await message.reply_text("❌ <b>Failed to load event info.</b>", parse_mode=HTML)
