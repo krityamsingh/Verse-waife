@@ -249,7 +249,7 @@ async def expire_spawn(spawn_id):
     await _col("active_spawns").update_one({"spawn_id": spawn_id}, {"$set": {"expired": True}})
 
 async def unclaim_spawn(spawn_id):
-    """Roll back a claim that was blocked (e.g. max_per_user exceeded).
+    """Roll back a claim blocked by max_per_user.
     Sets claimed=False so another user can still grab the character.
     Referenced by spawn.py claim_cb.
     """
@@ -257,6 +257,7 @@ async def unclaim_spawn(spawn_id):
         {"spawn_id": spawn_id},
         {"$set": {"claimed": False, "claimed_by": None, "claimed_at": None}}
     )
+
 
 
 # ── DROP LOGS ─────────────────────────────────────────────────────────────────
