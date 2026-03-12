@@ -1,13 +1,21 @@
-"""SoulCatcher 🌸  check.py
+"""SoulCatcher/modules/check.py
 
 Commands:
-  /check         — paginated list of ALL uploaded characters
-  /check <id>    — show full details + media for one character  (e.g. /check 0042 or /check 42)
+  /check              — paginated browsable character database
+  /check <id>         — full character card with ownership stats
 """
 
+from __future__ import annotations
 import logging
+
 from pyrogram import filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup as IKM,
+    InlineKeyboardButton as IKB,
+    InputMediaVideo,
+    InputMediaPhoto,
+)
 
 from .. import app
 from ..rarity import get_rarity
@@ -15,27 +23,29 @@ from ..database import _col, get_character
 
 log = logging.getLogger("SoulCatcher.check")
 
-PER_PAGE = 15   # characters per page in list mode
+PER_PAGE = 12
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _pad(raw: str) -> str:
-    """Normalise any ID input to 4-digit zero-padded form. '1' → '0001', '042' → '0042'."""
     try:
         return str(int(raw)).zfill(4)
     except (ValueError, TypeError):
         return raw.strip()
 
 
-def _rarity_line(char: dict) -> str:
+def _rarity_badge(char: dict) -> str:
     tier = get_rarity(char.get("rarity", ""))
     if not tier:
-        return f"`{char.get('rarity','?')}`"
-    line = f"{tier.emoji} {tier.display_name}"
-    # Sub-rarity decoration
+        return f"❔ `{char.get('rarity', '?')}`"
+    line = f"{tier.emoji} **{tier.display_name}**"
     for label_key, emoji_key in [
-        ("festival_label", "festival_emoji"),
-        ("sport_label",    "sport_emoji"),
-        ("archetype_label","archetype_emoji"),
+        ("festival_label",  "festival_emoji"),
+        ("sport_label",     "sport_emoji"),
+        ("archetype_label", "archetype_emoji"),
     ]:
         if char.get(label_key):
             line += f"  {char.get(emoji_key, '')} {char[label_key]}"
@@ -43,17 +53,46 @@ def _rarity_line(char: dict) -> str:
     return line
 
 
+def _restrictions(char: dict) -> str:
+    tier = get_rarity(char.get("rarity", ""))
+    parts = []
+    if tier:
+        if not tier.trade_allowed:
+            parts.append("🚫 No Trade")
+        if not tier.gift_allowed:
+            parts.append("🚫 No Gift")
+        if tier.max_per_user:
+            parts.append(f"👤 Max {tier.max_per_user}/user")
+    return "  ·  ".join(parts) if parts else "✅ Tradeable & Giftable"
+
+
+async def _ownership_stats(char_id: str) -> tuple[int, int]:
+    col   = _col("user_characters")
+    total = await col.count_documents({"char_id": char_id})
+    owners = await col.distinct("user_id", {"char_id": char_id})
+    return len(owners), total
+
+
+async def _top_owners(char_id: str, limit: int = 8) -> list[dict]:
+    pipeline = [
+        {"$match": {"char_id": char_id}},
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": limit},
+    ]
+    rows = await _col("user_characters").aggregate(pipeline).to_list(limit)
+    return [{"user_id": r["_id"], "count": r["count"]} for r in rows]
+
+
 async def _get_page(page: int):
-    """Fetch one page of characters sorted by numeric ID ascending."""
     skip  = (page - 1) * PER_PAGE
     total = await _col("characters").count_documents({"enabled": True})
     docs  = await (
         _col("characters")
-        .find({"enabled": True}, {"id": 1, "name": 1, "anime": 1, "rarity": 1,
-                                   "img_url": 1, "video_url": 1,
-                                   "festival_label": 1, "festival_emoji": 1,
-                                   "sport_label": 1, "sport_emoji": 1,
-                                   "archetype_label": 1, "archetype_emoji": 1})
+        .find(
+            {"enabled": True},
+            {"id": 1, "name": 1, "anime": 1, "rarity": 1, "video_url": 1, "img_url": 1},
+        )
         .sort("id", 1)
         .skip(skip)
         .limit(PER_PAGE)
@@ -62,69 +101,185 @@ async def _get_page(page: int):
     return docs, total
 
 
-def _build_list_text(docs: list, page: int, total: int) -> str:
+# ─────────────────────────────────────────────────────────────────────────────
+# List page
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _list_text(docs: list, page: int, total: int) -> str:
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
-    lines = [
-        f"📋 **Character Database**  —  `{total}` total",
-        f"Page `{page}` / `{total_pages}`  ·  `/check <id>` for details\n",
-    ]
+
+    header = (
+        "╔══════════════════════════════╗\n"
+        "║   📋  CHARACTER DATABASE     ║\n"
+        "╚══════════════════════════════╝\n\n"
+        f"📦 **{total:,}** characters  ·  Page **{page}/{total_pages}**\n"
+        "──────────────────────────────\n"
+    )
+
+    lines = []
     for char in docs:
-        tier = get_rarity(char.get("rarity", ""))
-        emoji = tier.emoji if tier else "❓"
-        media = "🎬" if char.get("video_url") else "🖼️"
+        tier  = get_rarity(char.get("rarity", ""))
+        emoji = tier.emoji if tier else "❔"
+        media = "🎬" if char.get("video_url") else "🖼"
         lines.append(
-            f"{media} `{char['id']}` {emoji} **{char['name']}** — _{char.get('anime','?')}_"
+            f"{media} `{char['id']}` {emoji} **{char['name']}**\n"
+            f"         ╰ _{char.get('anime', '?')}_"
         )
-    return "\n".join(lines)
+
+    footer = (
+        "\n──────────────────────────────\n"
+        "💡 `/check <id>` — full character card"
+    )
+
+    return header + "\n\n".join(lines) + footer
 
 
-def _nav_buttons(page: int, total: int) -> InlineKeyboardMarkup:
+def _list_nav(page: int, total: int) -> IKM:
     total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
-    row = []
+    nav = []
     if page > 1:
-        row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"chk_pg:{page-1}"))
-    row.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="noop"))
+        nav.append(IKB("⬅️", callback_data=f"chk_pg:{page-1}"))
+    nav.append(IKB(f"📖 {page} / {total_pages}", callback_data="noop"))
     if page < total_pages:
-        row.append(InlineKeyboardButton("Next ▶️", callback_data=f"chk_pg:{page+1}"))
-    return InlineKeyboardMarkup([row]) if row else None
+        nav.append(IKB("➡️", callback_data=f"chk_pg:{page+1}"))
+
+    jump = []
+    if page > 2:
+        jump.append(IKB("⏮ First", callback_data="chk_pg:1"))
+    if page < total_pages - 1:
+        jump.append(IKB("Last ⏭", callback_data=f"chk_pg:{total_pages}"))
+
+    rows = [nav]
+    if jump:
+        rows.append(jump)
+    return IKM(rows)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /check  [id]
+# Character card
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.command("check"))
-async def cmd_check(_, message: Message):
-    args = message.command
+async def _char_card_text(char: dict) -> str:
+    tier = get_rarity(char.get("rarity", ""))
+    char_id = char["id"]
 
-    # ── /check <id>  →  single character detail view ──────────────────────────
-    if len(args) >= 2:
-        raw_id = args[1].strip()
-        char_id = _pad(raw_id)
+    unique_owners, total_copies = await _ownership_stats(char_id)
 
-        char = await get_character(char_id)
-        if not char:
-            return await message.reply_text(
-                f"❌ Character `{char_id}` not found.\n"
-                "Use `/check` (no args) to browse all characters."
-            )
+    kakera    = tier.kakera_reward  if tier else char.get("kakera_reward", "?")
+    price_min = tier.sell_price_min if tier else char.get("sell_price_min", 0)
+    price_max = tier.sell_price_max if tier else char.get("sell_price_max", 0)
+    mpu       = tier.max_per_user   if tier else 0
+    mpu_str   = str(mpu) if mpu else "∞"
+    video_only = tier.video_only if tier else False
+    media_type = "🎬 Video" if char.get("video_url") else "🖼 Image"
+    uploader   = char.get("mention") or char.get("uploaded_by") or "Unknown"
 
-        await _send_char_detail(message, char)
-        return
-
-    # ── /check  →  page 1 of list ─────────────────────────────────────────────
-    docs, total = await _get_page(1)
-    if not docs:
-        return await message.reply_text("📭 No characters in the database yet.")
-
-    await message.reply_text(
-        _build_list_text(docs, 1, total),
-        reply_markup=_nav_buttons(1, total),
+    return (
+        "╔══════════════════════════════╗\n"
+        "║     📄  CHARACTER  CARD      ║\n"
+        "╚══════════════════════════════╝\n\n"
+        f"🆔  **ID:** `{char_id}`\n"
+        f"👤  **Name:** {char.get('name', '?')}\n"
+        f"📖  **Anime:** _{char.get('anime', '?')}_\n"
+        f"✨  **Rarity:** {_rarity_badge(char)}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊  **OWNERSHIP STATS**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥  Unique Owners:  **{unique_owners:,}**\n"
+        f"📦  Total Copies:   **{total_copies:,}**\n"
+        f"👤  Max per User:   **{mpu_str}**\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💰  **ECONOMY**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌸  Kakera Reward:  `{kakera}`\n"
+        f"💵  Sell Price:     `{price_min:,} – {price_max:,}`\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔒  **RESTRICTIONS**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{_restrictions(char)}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🎞  **MEDIA**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{media_type}" + ("  ·  🎬 Video-Only Spawn" if video_only else "") + "\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📤  **Uploaded by:** {uploader}\n"
+        f"🕒  **Added:** `{str(char.get('added_at', '?'))[:10]}`"
     )
 
 
+def _card_buttons(char_id: str) -> IKM:
+    return IKM([[
+        IKB("👥 Top Owners", callback_data=f"chk_own:{char_id}"),
+        IKB("◀️ List", callback_data="chk_pg:1"),
+    ]])
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Pagination callback  chk_pg:<page>
+# Send / edit helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _reply_card(source: Message, char: dict):
+    text   = await _char_card_text(char)
+    markup = _card_buttons(char["id"])
+    vid    = char.get("video_url", "")
+    img    = char.get("img_url", "")
+    try:
+        if vid:
+            await source.reply_video(vid, caption=text, reply_markup=markup)
+        elif img:
+            await source.reply_photo(img, caption=text, reply_markup=markup)
+        else:
+            await source.reply_text(text, reply_markup=markup)
+    except Exception:
+        await source.reply_text(text, reply_markup=markup)
+
+
+async def _edit_card(source, char: dict):
+    text   = await _char_card_text(char)
+    markup = _card_buttons(char["id"])
+    vid    = char.get("video_url", "")
+    img    = char.get("img_url", "")
+    try:
+        if vid:
+            await source.edit_media(InputMediaVideo(vid, caption=text), reply_markup=markup)
+        elif img:
+            await source.edit_media(InputMediaPhoto(img, caption=text), reply_markup=markup)
+        else:
+            await source.edit_text(text, reply_markup=markup)
+    except Exception:
+        try:
+            await source.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commands
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("check"))
+async def cmd_check(client, message: Message):
+    args = message.command
+
+    if len(args) >= 2:
+        char_id = _pad(args[1].strip())
+        char    = await get_character(char_id)
+        if not char:
+            return await message.reply_text(
+                f"❌ Character `{char_id}` not found.\n"
+                "Use `/check` to browse all characters."
+            )
+        await _reply_card(message, char)
+        return
+
+    docs, total = await _get_page(1)
+    if not docs:
+        return await message.reply_text("📭 No characters in the database yet.")
+    await message.reply_text(_list_text(docs, 1, total), reply_markup=_list_nav(1, total))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^chk_pg:"))
@@ -133,54 +288,68 @@ async def check_page_cb(_, cb):
     docs, total = await _get_page(page)
     if not docs:
         return await cb.answer("No more pages.", show_alert=True)
-
     try:
-        await cb.message.edit_text(
-            _build_list_text(docs, page, total),
-            reply_markup=_nav_buttons(page, total),
-        )
+        await cb.message.edit_text(_list_text(docs, page, total), reply_markup=_list_nav(page, total))
     except Exception:
         pass
     await cb.answer()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: send full character card
-# ─────────────────────────────────────────────────────────────────────────────
+@app.on_callback_query(filters.regex(r"^chk_own:"))
+async def check_owners_cb(client, cb):
+    char_id = cb.data.split(":")[1]
+    char    = await get_character(char_id)
+    if not char:
+        return await cb.answer("Character not found.", show_alert=True)
 
-async def _send_char_detail(message: Message, char: dict):
-    tier      = get_rarity(char.get("rarity", ""))
-    rarity_str = _rarity_line(char)
-    media_type = "🎬 Video" if char.get("video_url") else "🖼️ Image"
-    media_url  = char.get("video_url") or char.get("img_url") or ""
+    unique_owners, total_copies = await _ownership_stats(char_id)
+    top   = await _top_owners(char_id, limit=8)
+    tier  = get_rarity(char.get("rarity", ""))
+    emoji = tier.emoji if tier else "❔"
 
-    restrictions = []
-    if not char.get("trade_allowed", True): restrictions.append("🚫 No Trade")
-    if not char.get("gift_allowed",  True): restrictions.append("🚫 No Gift")
-    mpu = char.get("max_per_user", 0)
-    if mpu: restrictions.append(f"👤 Max {mpu}/user")
-    restr_line = ("⚠️ " + " | ".join(restrictions) + "\n") if restrictions else ""
+    lines = [
+        "╔══════════════════════════════╗\n"
+        "║     👥  OWNERSHIP STATS      ║\n"
+        "╚══════════════════════════════╝\n",
+        f"{emoji} **{char['name']}** `{char_id}`\n"
+        f"📖 _{char.get('anime', '?')}_\n",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥  Unique Owners:  **{unique_owners:,}**\n"
+        f"📦  Total Copies:   **{total_copies:,}**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🏆  **TOP HOLDERS**\n",
+    ]
 
-    caption = (
-        f"📄 **Character Info**\n\n"
-        f"🆔 `{char['id']}`\n"
-        f"👤 **{char.get('name','?')}**\n"
-        f"📖 _{char.get('anime','?')}_\n"
-        f"Rarity: {rarity_str}\n"
-        f"💰 Sell: `{char.get('sell_price_min',0):,}–{char.get('sell_price_max',0):,}`\n"
-        f"🌸 Kakera: `{char.get('kakera_reward','?')}`\n"
-        f"{restr_line}"
-        f"{media_type}: `{media_url or 'N/A'}`\n"
-        f"📤 Added by: {char.get('mention','?')}\n"
-        f"🕒 `{str(char.get('added_at','?'))[:19]}`"
-    )
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
+    if not top:
+        lines.append("_No one owns this character yet._")
+    else:
+        for i, row in enumerate(top):
+            medal = medals[i] if i < len(medals) else f"{i+1}."
+            try:
+                user    = await client.get_users(row["user_id"])
+                mention = f"[{user.first_name}](tg://user?id={row['user_id']})"
+            except Exception:
+                mention = f"`{row['user_id']}`"
+            copies = row["count"]
+            label  = "copy" if copies == 1 else "copies"
+            lines.append(f"{medal}  {mention}  —  **{copies}** {label}")
+
+    text = "\n".join(lines)
+    kb   = IKM([[IKB("◀️ Back to Card", callback_data=f"chk_back:{char_id}")]])
 
     try:
-        if char.get("video_url"):
-            await message.reply_video(char["video_url"], caption=caption)
-        elif char.get("img_url"):
-            await message.reply_photo(char["img_url"], caption=caption)
-        else:
-            await message.reply_text(caption)
+        await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
     except Exception:
-        await message.reply_text(caption)
+        pass
+    await cb.answer()
+
+
+@app.on_callback_query(filters.regex(r"^chk_back:"))
+async def check_back_cb(client, cb):
+    char_id = cb.data.split(":")[1]
+    char    = await get_character(char_id)
+    if not char:
+        return await cb.answer("Character not found.", show_alert=True)
+    await cb.answer()
+    await _edit_card(cb.message, char)
