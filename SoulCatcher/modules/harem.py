@@ -224,8 +224,11 @@ async def _build_harem_text(
             tier = get_rarity(rarity_name)
             emoji = tier.emoji if tier else "❓"
             fav_star = "⭐" if char.get("is_favorite") else ""
+            # Show instance_id as the usable ID for /gift /sell /burn.
+            # If the doc pre-dates instance_id generation, show char_id as fallback.
+            display_id = char.get('instance_id') or cid
             text += (
-                f"◈⌠{emoji}⌡{fav_star} {char.get('instance_id', cid)} "
+                f"◈⌠{emoji}⌡{fav_star} {display_id} "
                 f"{escape(char.get('name', 'Unknown'))} ×{count}\n"
             )
             char_index += 1
