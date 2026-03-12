@@ -3,7 +3,8 @@
 ║        SoulCatcher 🌸  autouploader.py                                      ║
 ║                                                                              ║
 ║  COMMANDS (Owner + Uploaders):                                               ║
-║   /upload <anime> | <char> | <rarity_id>   — reply to photo/video           ║
+║   /upload <name> | <anime> | <rarity_id>              — no sub-rarity       ║
+║   /upload <name> | <anime> | <rarity_id> | <sub_tag>  — with sub-rarity     ║
 ║   /uchar media   <id>                      — update media                   ║
 ║   /uchar rarity  <id> <rarity_id>          — update rarity tier             ║
 ║   /uchar name    <id> <new_name>           — rename character               ║
@@ -65,36 +66,35 @@ def _build_upload_help() -> str:
             + (" ⚠️ VIDEO ONLY" if r.video_only else "")
         )
 
-    lines += ["", "━━━━ **🌸 FESTIVAL SEASONS** _(use after upload: `/uchar season <id> <key>`)_ ━━━━"]
+    lines += ["", "━━━━ **🌸 FESTIVAL SEASONS** _(ID 51 sub-tag)_ ━━━━"]
     for k, v in FESTIVAL_SEASONS.items():
         months = ", ".join(str(m) for m in v["active_months"])
         lines.append(f"  `{k}` {v['emoji']} {v['label']}  — months: {months}")
 
-    lines += ["", "━━━━ **🏆 MYTHIC SPORTS** _(use after upload: `/uchar sport <id> <key>`)_ ━━━━"]
+    lines += ["", "━━━━ **🏆 MYTHIC SPORTS** _(ID 62 sub-tag)_ ━━━━"]
     for k, v in MYTHIC_SPORTS.items():
         lines.append(f"  `{k}` {v['emoji']} {v['label']}")
 
-    lines += ["", "━━━━ **🧝 MYTHIC FANTASY** _(use after upload: `/uchar fantasy <id> <key>`)_ ━━━━"]
+    lines += ["", "━━━━ **🧝 MYTHIC FANTASY** _(ID 63 sub-tag)_ ━━━━"]
     for k, v in MYTHIC_FANTASY.items():
         lines.append(f"  `{k}` {v['emoji']} {v['label']}")
 
     lines += [
         "",
         "━━━━ **EXAMPLES** ━━━━",
-        "`/upload Sasuke | Naruto | 2`  → 🔵 Rare",
-        "`/upload Luffy | One Piece | 6`  → 🔴 Mythic",
-        "`/upload Rukia | Bleach | 51 | diwali`  → 🌸 Festival (Diwali)",
-        "`/upload Gojo | JJK | 51 | christmas`  → 🌸 Festival (Christmas)",
-        "`/upload Oliver | Captain Tsubasa | 62 | football`  → 🏆 Sports (Football)",
-        "`/upload Miku | Vocaloid | 63 | fairy`  → 🧝 Fantasy (Fairy)",
-        "`/upload Asuna | SAO | 71`  → 🎠 Verse  _(VIDEO ONLY — reply to video)_",
-        "`/upload Rem | Re:Zero | 61`  → 🔮 Limited Edition",
+        "`/upload Sasuke | Naruto | 2`             → 🔵 Rare",
+        "`/upload Luffy | One Piece | 6`           → 🔴 Mythic",
+        "`/upload Rukia | Bleach | 51 | diwali`    → 🌸 Festival (Diwali)",
+        "`/upload Gojo | JJK | 51 | christmas`     → 🌸 Festival (Christmas)",
+        "`/upload Oliver | Tsubasa | 62 | football`→ 🏆 Sports (Football)",
+        "`/upload Miku | Vocaloid | 63 | fairy`    → 🧝 Fantasy (Fairy)",
+        "`/upload Asuna | SAO | 71`                → 🎠 Verse  _(VIDEO ONLY)_",
+        "`/upload Rem | Re:Zero | 61`              → 🔮 Limited Edition",
     ]
     return "\n".join(lines)
 
 
 UPLOAD_HELP_TEXT: str = _build_upload_help()
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,85 +131,78 @@ def _get_parent_name(rarity_id: int) -> Optional[str]:
     return {51: "seasonal", 61: "mythic", 62: "mythic", 63: "mythic", 71: "eternal"}.get(rarity_id)
 
 
-def _sub_meta_from_tier(tier) -> dict:
-    """Auto-build extra_meta for sub-rarity tiers so caption shows it immediately."""
-    if tier.id not in {51, 61, 62, 63, 71}:
-        return {}
-    return {"sub_tag": tier.name, "sub_label": tier.display_name, "sub_emoji": tier.emoji}
-
+# Sub-rarity IDs that require a tag — maps id → (field_prefix, lookup_dict)
+_NEEDS_TAG: Dict[int, tuple] = {
+    51: ("festival", FESTIVAL_SEASONS),
+    62: ("sport",    MYTHIC_SPORTS),
+    63: ("fantasy",  MYTHIC_FANTASY),
+}
 
 
 def _parse_upload_args(text: str):
     """
-    Supports both:
-      name | anime | rarity_id
-      name | anime | rarity_id | sub_tag
+    /upload name | anime | rarity_id
+    /upload name | anime | rarity_id | sub_tag   ← for Festival / Sports / Fantasy
     Returns (char_name, anime, rarity_id, sub_tag_or_None).
     """
     parts = [p.strip() for p in text.split("|")]
-    if len(parts) == 3:
-        char_name, anime, rid = parts
-        return char_name, anime, int(rid), None
-    if len(parts) == 4:
-        char_name, anime, rid, sub_tag = parts
-        return char_name, anime, int(rid), sub_tag.lower() or None
-    raise ValueError("Bad format — use: `name | anime | rarity_id` or `name | anime | rarity_id | sub_tag`")
+    if len(parts) not in (3, 4):
+        raise ValueError(
+            "Use: `name | anime | rarity_id`\n"
+            "or:  `name | anime | rarity_id | sub_tag`"
+        )
+    char_name, anime, rid = parts[0], parts[1], parts[2]
+    sub_tag = parts[3].lower() if len(parts) == 4 else None
+    return char_name, anime, int(rid), sub_tag or None
 
 
 def _resolve_sub_meta(rarity_id: int, sub_tag: Optional[str]) -> dict:
     """
-    Given a rarity_id and an optional sub_tag string entered by the uploader,
-    return the correct extra_meta dict for DB storage and caption display.
+    Build extra_meta for sub-rarity tiers.
 
-    For sub-rarities that don't need a tag (Limited Edition, Verse):
-      sub_tag can be omitted — meta is built from the tier itself.
-    For sub-rarities that need a tag (Festival, Sports, Fantasy):
-      sub_tag must match a key in the relevant lookup table.
+    IDs 61 (Limited Edition) & 71 (Verse) — no tag needed, emoji comes from tier.
+    IDs 51 (Festival) / 62 (Sports) / 63 (Fantasy) — sub_tag selects the variant.
     """
     tier = get_rarity_by_id(rarity_id)
-    if not tier:
+    if not tier or rarity_id not in {51, 61, 62, 63, 71}:
         return {}
 
-    # Not a sub-rarity — no meta needed
-    if rarity_id not in {51, 61, 62, 63, 71}:
-        return {}
-
-    # Base meta always present for any sub-rarity
+    # Base always present — emoji/label come straight from the tier definition
     base = {"sub_tag": tier.name, "sub_label": tier.display_name, "sub_emoji": tier.emoji}
 
-    if rarity_id == 51:   # Festival — needs season key
-        if sub_tag and sub_tag in FESTIVAL_SEASONS:
-            s = FESTIVAL_SEASONS[sub_tag]
-            return {**base,
-                "festival_season": sub_tag,
-                "festival_label":  s["label"],
-                "festival_emoji":  s["emoji"],
-                "active_months":   s["active_months"],
-            }
+    if rarity_id not in _NEEDS_TAG:
+        return base   # 61 / 71 — done, no extra fields needed
 
-    elif rarity_id == 62:  # Sports — needs sport key
-        if sub_tag and sub_tag in MYTHIC_SPORTS:
-            s = MYTHIC_SPORTS[sub_tag]
-            return {**base,
-                "sport_type":  sub_tag,
-                "sport_label": s["label"],
-                "sport_emoji": s["emoji"],
-            }
+    _, lookup = _NEEDS_TAG[rarity_id]
+    if not sub_tag or sub_tag not in lookup:
+        return base   # missing/invalid tag — still save base so caption shows something
 
-    elif rarity_id == 63:  # Fantasy — needs archetype key
-        if sub_tag and sub_tag in MYTHIC_FANTASY:
-            f = MYTHIC_FANTASY[sub_tag]
-            return {**base,
-                "archetype":       sub_tag,
-                "archetype_label": f["label"],
-                "archetype_emoji": f["emoji"],
-            }
+    info = lookup[sub_tag]
 
-    # For ID 61 (Limited Edition) and 71 (Verse), or when tag is missing/invalid
+    if rarity_id == 51:   # 🌸 Festival
+        return {**base,
+            "festival_season": sub_tag,
+            "festival_label":  info["label"],
+            "festival_emoji":  info["emoji"],   # ← emoji auto-picked from lookup
+            "active_months":   info["active_months"],
+        }
+    if rarity_id == 62:   # 🏆 Sports
+        return {**base,
+            "sport_type":  sub_tag,
+            "sport_label": info["label"],
+            "sport_emoji": info["emoji"],        # ← emoji auto-picked from lookup
+        }
+    if rarity_id == 63:   # 🧝 Fantasy
+        return {**base,
+            "archetype":       sub_tag,
+            "archetype_label": info["label"],
+            "archetype_emoji": info["emoji"],    # ← emoji auto-picked from lookup
+        }
     return base
 
 
 def _sub_line(char: dict) -> str:
+    """One-line sub-rarity summary for /charinfo."""
     if not char.get("sub_tag"):
         return ""
     line = f"\n🏷 Sub-tag: `{char['sub_tag']}`"
@@ -219,7 +212,7 @@ def _sub_line(char: dict) -> str:
         ("archetype_label","archetype_emoji"),
     ]:
         if char.get(label_key):
-            return line + f" {char.get(emoji_key,'')} {char[label_key]}"
+            return line + f" {char.get(emoji_key, '')} {char[label_key]}"
     return line
 
 
@@ -260,19 +253,16 @@ def _cleanup(path: Optional[str]):
 
 async def _do_upload_and_save(
     client,
-    message:   Message,
-    file_path: str,
-    is_video:  bool,
-    char_name: str,
-    anime:     str,
-    rarity_id: int,
-    mention:   str,
+    message:    Message,
+    file_path:  str,
+    is_video:   bool,
+    char_name:  str,
+    anime:      str,
+    rarity_id:  int,
+    mention:    str,
     extra_meta: Dict[str, Any] = None,
 ) -> Optional[str]:
-    """
-    Upload file to catbox, save to DB, post to channel.
-    Returns char_id on success, None on failure.
-    """
+    """Upload file to catbox, save to DB, post to channel. Returns char_id or None."""
     tier = get_rarity_by_id(rarity_id)
     if not tier:
         await message.reply_text(f"❌ Unknown rarity ID `{rarity_id}`.")
@@ -319,7 +309,7 @@ async def _do_upload_and_save(
     if not tier.gift_allowed:  restrictions.append("🚫 No Gift")
     if tier.max_per_user:      restrictions.append(f"👤 Max {tier.max_per_user}/user")
 
-    # Sub-rarity line — built from extra_meta if present
+    # Sub-rarity line — emoji is auto-resolved from extra_meta
     sub_rarity_line = ""
     meta = extra_meta or {}
     if meta.get("sub_tag"):
@@ -379,6 +369,7 @@ async def cmd_upload(client, message: Message):
     if not args_text:
         return await message.reply_text(UPLOAD_HELP_TEXT)
 
+    # ── Parse args ────────────────────────────────────────────────────────────
     try:
         char_name, anime, rid, sub_tag = _parse_upload_args(args_text)
     except (ValueError, IndexError) as e:
@@ -388,29 +379,26 @@ async def cmd_upload(client, message: Message):
     if not tier:
         return await message.reply_text(f"❌ Unknown rarity ID `{rid}`\n\n" + UPLOAD_HELP_TEXT)
 
-    # Validate sub_tag if provided
-    if sub_tag:
-        _valid_tags = {
-            51: set(FESTIVAL_SEASONS),
-            62: set(MYTHIC_SPORTS),
-            63: set(MYTHIC_FANTASY),
-        }
-        allowed = _valid_tags.get(rid)
-        if allowed is not None and sub_tag not in allowed:
-            valid_list = "`, `".join(sorted(allowed))
+    # ── Validate sub_tag if provided ──────────────────────────────────────────
+    if sub_tag and rid in _NEEDS_TAG:
+        _, lookup = _NEEDS_TAG[rid]
+        if sub_tag not in lookup:
+            valid_list = "`, `".join(sorted(lookup.keys()))
             return await message.reply_text(
                 f"❌ Invalid sub-tag `{sub_tag}` for {tier.emoji} **{tier.display_name}**\n"
-                f"Valid: `{valid_list}`"
+                f"Valid tags: `{valid_list}`"
             )
 
+    # ── Media type check ──────────────────────────────────────────────────────
     reply  = message.reply_to_message
     is_vid = bool(reply.video or reply.animation)
 
     if tier.video_only and not is_vid:
         return await message.reply_text(
-            f"❌ **{tier.display_name}** is VIDEO ONLY. Reply to a video/animation!"
+            f"❌ **{tier.display_name}** is VIDEO ONLY — reply to a video/animation!"
         )
 
+    # ── Download, upload, save ────────────────────────────────────────────────
     file_path, is_vid = await _download(message, reply)
     if not file_path:
         return
@@ -419,13 +407,13 @@ async def cmd_upload(client, message: Message):
 
     await _do_upload_and_save(
         client, message,
-        file_path=file_path,
-        is_video=is_vid,
-        char_name=char_name,
-        anime=anime,
-        rarity_id=rid,
-        mention=mention,
-        extra_meta=_resolve_sub_meta(rid, sub_tag),
+        file_path  = file_path,
+        is_video   = is_vid,
+        char_name  = char_name,
+        anime      = anime,
+        rarity_id  = rid,
+        mention    = mention,
+        extra_meta = _resolve_sub_meta(rid, sub_tag),
     )
     _cleanup(file_path)
 
@@ -682,15 +670,15 @@ async def cmd_rarities(client, message: Message):
             + (" | ⚠️ VIDEO ONLY" if r.video_only else "")
         )
 
-    lines.append("\n**— Festival Seasons** _(use with `/uchar season`)_")
+    lines.append("\n**— Festival Seasons** _(ID 51 sub-tag)_")
     for k, v in FESTIVAL_SEASONS.items():
         lines.append(f"  `{k}` {v['emoji']} {v['label']}")
 
-    lines.append("\n**— Mythic Sports** _(use with `/uchar sport`)_")
+    lines.append("\n**— Mythic Sports** _(ID 62 sub-tag)_")
     for k, v in MYTHIC_SPORTS.items():
         lines.append(f"  `{k}` {v['emoji']} {v['label']}")
 
-    lines.append("\n**— Mythic Fantasy** _(use with `/uchar fantasy`)_")
+    lines.append("\n**— Mythic Fantasy** _(ID 63 sub-tag)_")
     for k, v in MYTHIC_FANTASY.items():
         lines.append(f"  `{k}` {v['emoji']} {v['label']}")
 
