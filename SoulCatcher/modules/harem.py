@@ -61,44 +61,97 @@ CHARS_PER_PAGE = 15
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper: membership check (join group + channel)
+# Membership verification — checks support group + updates channel
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def check_membership(user_id: int, client) -> bool:
-    async def _is_member(chat_id: str, is_channel: bool = False) -> bool:
-        from pyrogram.errors import UserNotParticipant
-        variants = [chat_id]
-        if not str(chat_id).startswith("@"):
-            variants.append("@" + str(chat_id))
-        for tid in variants:
-            try:
-                await client.get_chat_member(tid, user_id)
-                return True
-            except UserNotParticipant:
-                return False
-            except Exception as exc:
-                err = str(exc).lower()
-                if is_channel and ("chat_admin_required" in err or "channels.getparticipant" in err):
-                    try:
-                        await client.get_chat(tid)
-                        return True
-                    except Exception:
-                        return False
+async def _check_one(client, chat_id: str, user_id: int) -> bool:
+    """
+    Returns True if user_id is an active member of chat_id.
+    Handles @username and plain username strings.
+    Fails open (returns True) if the bot lacks admin rights or the chat
+    is misconfigured — so users are never wrongly blocked by a config error.
+    """
+    from pyrogram.errors import (
+        UserNotParticipant, ChatAdminRequired,
+        ChannelPrivate, PeerIdInvalid, UsernameNotOccupied,
+    )
+    from pyrogram.enums import ChatMemberStatus as S
+    target = chat_id if str(chat_id).startswith("@") else f"@{chat_id}"
+    try:
+        member = await client.get_chat_member(target, user_id)
+        return member.status not in (S.BANNED, S.LEFT)
+    except UserNotParticipant:
         return False
+    except ChatAdminRequired:
+        log.warning("No admin rights to verify membership in %s — failing open", chat_id)
+        return True
+    except (ChannelPrivate, PeerIdInvalid, UsernameNotOccupied) as exc:
+        log.error("Cannot resolve chat %s: %s — failing open", chat_id, exc)
+        return True
+    except Exception as exc:
+        log.warning("_check_one(%s, %d) unexpected: %s", chat_id, user_id, exc)
+        return True
 
-    if not await _is_member(SUPPORT_GROUP):
-        return False
-    if not await _is_member(UPDATE_CHANNEL, is_channel=True):
-        return False
-    return True
+
+async def check_membership(user_id: int, client) -> tuple[bool, bool]:
+    """Returns (group_joined, channel_joined). Both must be True to access gated features."""
+    group_ok   = await _check_one(client, SUPPORT_GROUP,  user_id)
+    channel_ok = await _check_one(client, UPDATE_CHANNEL, user_id)
+    return group_ok, channel_ok
 
 
-def get_join_buttons(user_id: int, context: str = "harem") -> IKM:
-    return IKM([
-        [IKB("🥂 ᴊᴏɪɴ sᴜᴘᴘᴏʀᴛ ɢʀᴏᴜᴘ", url=f"https://t.me/{SUPPORT_GROUP}")],
-        [IKB("🧃 ᴊᴏɪɴ ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ", url=f"https://t.me/{UPDATE_CHANNEL}")],
-        [IKB("✅ I HAVE JOINED", callback_data=f"joined_check:{user_id}:{context}")],
-    ])
+def _join_card(user_id: int, name: str, group_ok: bool, channel_ok: bool, context: str) -> tuple[str, IKM]:
+    """
+    Build the full membership gate card — both the message text and keyboard together.
+    Shows live ✅ / ❌ status for each chat so the user knows exactly what's missing.
+    """
+    pending = []
+    if not group_ok:
+        pending.append("Support Group")
+    if not channel_ok:
+        pending.append("Updates Channel")
+
+    # Status lines
+    g_icon = "✅" if group_ok   else "🔴"
+    c_icon = "✅" if channel_ok else "🔴"
+    g_line = f"{g_icon} Support Group{'  · joined' if group_ok else '  · not joined'}"
+    c_line = f"{c_icon} Updates Channel{'  · joined' if channel_ok else '  · not joined'}"
+
+    remaining = len(pending)
+    if remaining == 2:
+        status_header = "⚠️ You haven't joined either chat yet."
+    elif remaining == 1:
+        status_header = f"⚠️ Almost there — just join the **{pending[0]}** to continue."
+    else:
+        status_header = "✅ All joined!"
+
+    text = (
+        "🌸 **Access Required**\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Hey **{escape(name)}**!\n\n"
+        f"{status_header}\n\n"
+        "**Membership Status:**\n"
+        f"  {g_line}\n"
+        f"  {c_line}\n\n"
+        "Join below, then tap **🔄 Verify** to continue."
+    )
+
+    rows = []
+    # Support Group row
+    if not group_ok:
+        rows.append([IKB("🫂 Join Support Group", url=f"https://t.me/{SUPPORT_GROUP}")])
+    else:
+        rows.append([IKB("✅ Support Group — Joined", callback_data="noop")])
+
+    # Updates Channel row
+    if not channel_ok:
+        rows.append([IKB("📢 Join Updates Channel", url=f"https://t.me/{UPDATE_CHANNEL}")])
+    else:
+        rows.append([IKB("✅ Updates Channel — Joined", callback_data="noop")])
+
+    rows.append([IKB("🔄 Verify Membership", callback_data=f"joined_check:{user_id}:{context}")])
+
+    return text, IKM(rows)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,11 +442,11 @@ async def cmd_harem(client, message: Message):
         getattr(message.from_user, "last_name", "") or "",
     )
 
-    if not await check_membership(user_id, client):
-        return await message.reply_text(
-            f"**🧃 {message.from_user.first_name}, please join our support group & channel first!**",
-            reply_markup=get_join_buttons(user_id, context="harem"),
-        )
+    group_ok, channel_ok = await check_membership(user_id, client)
+    if not (group_ok and channel_ok):
+        name = message.from_user.first_name or "there"
+        text, markup = _join_card(user_id, name, group_ok, channel_ok, "harem")
+        return await message.reply_text(text, reply_markup=markup)
 
     await display_harem(client, message, user_id, page=0, is_initial=True)
 
@@ -423,8 +476,9 @@ async def harem_cb(client, cb):
     if cb.from_user.id != uid:
         return await cb.answer("It's not your Harem!", show_alert=True)
 
-    if not await check_membership(uid, client):
-        return await cb.answer("Please join our group & channel first!", show_alert=True)
+    group_ok, channel_ok = await check_membership(uid, client)
+    if not (group_ok and channel_ok):
+        return await cb.answer("Please join our group & updates channel first!", show_alert=True)
 
     await cb.answer()
     await display_harem(client, cb.message, uid, page, filter_rarity, is_initial=False, callback_query=cb)
@@ -492,11 +546,11 @@ async def cmd_cmode(client, message: Message):
     if user_id in temp_block and temp_block[user_id] > time.time():
         return
 
-    if not await check_membership(user_id, client):
-        return await message.reply_text(
-            f"**ʜᴇʏ {message.from_user.first_name} — please join our support group & channel!**",
-            reply_markup=get_join_buttons(user_id, context="cmode"),
-        )
+    group_ok, channel_ok = await check_membership(user_id, client)
+    if not (group_ok and channel_ok):
+        name = message.from_user.first_name or "there"
+        text, markup = _join_card(user_id, name, group_ok, channel_ok, "cmode")
+        return await message.reply_text(text, reply_markup=markup)
 
     user_doc = await _col("users").find_one({"user_id": user_id}) or {}
     current_mode = user_doc.get("collection_mode", "All")
@@ -663,12 +717,12 @@ async def cmd_sort(_, message: Message):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# joined_check callback
+# ─────────────────────────────────────────────────────────────────────────────
+# joined_check callback — "🔄 Verify Membership" button
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^joined_check:"))
 async def joined_check_cb(client, cb):
-    await cb.answer("Checking membership...", show_alert=False)
     try:
         _, uid_s, context = cb.data.split(":", 2)
         uid = int(uid_s)
@@ -676,30 +730,57 @@ async def joined_check_cb(client, cb):
         return await cb.answer("Invalid request.", show_alert=True)
 
     if cb.from_user.id != uid:
-        return await cb.answer("This button isn't for you.", show_alert=True)
+        return await cb.answer("⛔ This button is not for you.", show_alert=True)
+
+    await cb.answer("🔄 Verifying...", show_alert=False)
 
     try:
-        ok = await check_membership(uid, client)
-    except Exception:
-        return await cb.answer("Error checking membership. Try again.", show_alert=True)
+        group_ok, channel_ok = await check_membership(uid, client)
+    except Exception as exc:
+        log.warning("joined_check error uid=%d: %s", uid, exc)
+        return await cb.answer("⚠️ Verification failed. Please try again.", show_alert=True)
 
-    if not ok:
-        return await cb.answer("You haven't joined both chats yet!", show_alert=True)
+    name = cb.from_user.first_name or "there"
 
+    # ── Still missing at least one — refresh the card with updated status ─────
+    if not (group_ok and channel_ok):
+        text, markup = _join_card(uid, name, group_ok, channel_ok, context)
+        try:
+            await cb.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+        return
+
+    # ── All joined — unlock the feature ──────────────────────────────────────
     if context == "harem":
+        try:
+            await cb.message.edit_text(
+                f"✅ **Verified, {escape(name)}!** Loading your harem...",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
         await display_harem(client, cb.message, uid, 0, None, is_initial=False, callback_query=cb)
+
     elif context == "cmode":
-        user_doc = await _col("users").find_one({"user_id": uid}) or {}
+        user_doc     = await _col("users").find_one({"user_id": uid}) or {}
         current_mode = user_doc.get("collection_mode", "All")
-        full_name = cb.from_user.first_name or ""
         caption = (
-            f"**ʜᴇʏʏᴀ {escape(full_name)}!\n\n"
-            "ʏᴏᴜ ᴄᴀɴ ᴄᴜsᴛᴏᴍɪᴢᴇ ʏᴏᴜʀ ᴄᴏʟʟᴇᴄᴛɪᴏɴ ᴍᴏᴅᴇ ʜᴇʀᴇ!**\n\n"
+            f"**ʜᴇʏʏᴀ {escape(name)}!**\n\n"
+            "ʏᴏᴜ ᴄᴀɴ ᴄᴜsᴛᴏᴍɪᴢᴇ ʏᴏᴜʀ ᴄᴏʟʟᴇᴄᴛɪᴏɴ ᴍᴏᴅᴇ ʜᴇʀᴇ!\n\n"
             f"**ᴄᴜʀʀᴇɴᴛ ᴍᴏᴅᴇ:** `{current_mode}`"
         )
         try:
             await cb.message.edit_text(caption, reply_markup=IKM(_cmode_main_buttons(uid)))
         except Exception:
             pass
+
     else:
-        await cb.answer("Membership confirmed — run the command again.", show_alert=True)
+        try:
+            await cb.message.edit_text(
+                f"✅ **All set, {escape(name)}!**\n\n"
+                "You're now verified. Use the command again to continue.",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
