@@ -1,19 +1,13 @@
 """SoulCatcher/modules/profile.py
 
 Command:
-  /profile  —  personal profile card showing join age, collector rank,
-               kakera balance, daily streak, completion bar, rarity
-               breakdown, and badges. Rendered over the user's profile photo.
+  /profile  —  personal profile card with rarity breakdown, streak, badges.
 """
 from __future__ import annotations
-
-import os
-import logging
+import os, logging
 from datetime import datetime
-
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import Message
-
 from .. import app
 from ..database import (
     get_or_create_user, get_user,
@@ -21,21 +15,40 @@ from ..database import (
     count_user_rank, count_characters,
 )
 from ..rarity import get_rarity, get_rarity_order
-from ._profile_helpers import HTML, DIV, SDIV, fmt, bar, wealth, esc
 
-log = logging.getLogger("SoulCatcher.profile")
+log  = logging.getLogger("SoulCatcher.profile")
+HTML = enums.ParseMode.HTML
+_DIV  = "━━━━━━━━━━━━━━━━━━━━"
+_SDIV = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
+def _fmt(n) -> str:
+    try:    return f"{int(n):,}"
+    except: return str(n)
+
+def _bar(pct: float, w: int = 12) -> str:
+    filled = round(max(0.0, min(1.0, pct)) * w)
+    return "█" * filled + "░" * (w - filled)
+
+def _wealth(n: int) -> str:
+    for thr, lbl in reversed([
+        (0,"Lost Soul"),(1_000,"Traveler"),(5_000,"Merchant"),
+        (20_000,"Guild Master"),(50_000,"Lord"),(150_000,"Duke"),
+        (500_000,"Prince"),(1_000_000,"King"),(5_000_000,"Emperor"),(10_000_000,"Soul Lord"),
+    ]):
+        if n >= thr: return lbl
+    return "Lost Soul"
+
+def _esc(t: str) -> str:
+    return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 
 @app.on_message(filters.command("profile"))
 async def cmd_profile(client, message: Message):
     user = message.from_user
-
     try:
         await get_or_create_user(
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            getattr(user, "last_name", "") or "",
+            user.id, user.username or "",
+            user.first_name or "", getattr(user, "last_name", "") or "",
         )
         doc = await get_user(user.id)
         if not doc:
@@ -58,27 +71,27 @@ async def cmd_profile(client, message: Message):
             if cnt:
                 tier = get_rarity(r_name)
                 em   = tier.emoji if tier else "✦"
-                dn   = esc(tier.display_name) if tier else esc(r_name)
-                r_lines.append(f"  {em} <b>{dn}</b>  <code>{fmt(cnt)}</code>")
+                dn   = _esc(tier.display_name) if tier else _esc(r_name)
+                r_lines.append(f"  {em} <b>{dn}</b>  <code>{_fmt(cnt)}</code>")
 
-        uname_str = f"  @{esc(user.username)}\n" if user.username else ""
-        badge_str = f"\n🏅 <b>Badges</b>  {' '.join(esc(b) for b in badges)}\n" if badges else ""
+        uname_str = f"  @{_esc(user.username)}\n" if user.username else ""
+        badge_str = f"\n🏅 <b>Badges</b>  {' '.join(_esc(b) for b in badges)}\n" if badges else ""
 
         text = (
-            f"🌸 <b>{esc(user.first_name)}</b>\n"
+            f"🌸 <b>{_esc(user.first_name)}</b>\n"
             f"{uname_str}"
-            f"<code>{DIV}</code>\n"
+            f"<code>{_DIV}</code>\n"
             f"📅 Joined <b>{age_days}d</b> ago  ·  🏆 Rank <b>#{rank}</b>\n"
-            f"<code>{SDIV}</code>\n"
-            f"💰 <b>Kakera</b>   <code>{fmt(kakera)}</code>  <i>({esc(wealth(kakera))})</i>\n"
+            f"<code>{_SDIV}</code>\n"
+            f"💰 <b>Kakera</b>   <code>{_fmt(kakera)}</code>  <i>({_esc(_wealth(kakera))})</i>\n"
             f"🔥 <b>Streak</b>   <code>{streak}</code> days\n"
             f"🎴 <b>Chars</b>    <code>{total}</code> / <code>{total_db}</code>  "
-            f"<code>{bar(comp / 100)}</code>  <b>{comp:.1f}%</b>\n"
-            f"<code>{DIV}</code>\n"
+            f"<code>{_bar(comp / 100)}</code>  <b>{comp:.1f}%</b>\n"
+            f"<code>{_DIV}</code>\n"
             f"🎭 <b>Rarity Breakdown</b>\n"
             + ("\n".join(r_lines) if r_lines else "  <i>None yet</i>") +
             f"\n{badge_str}"
-            f"<code>{DIV}</code>"
+            f"<code>{_DIV}</code>"
         )
 
         photo_path = None
@@ -91,10 +104,8 @@ async def cmd_profile(client, message: Message):
 
         if photo_path:
             await message.reply_photo(photo_path, caption=text, parse_mode=HTML)
-            try:
-                os.remove(photo_path)
-            except Exception:
-                pass
+            try: os.remove(photo_path)
+            except Exception: pass
         else:
             await message.reply_text(text, parse_mode=HTML)
 
