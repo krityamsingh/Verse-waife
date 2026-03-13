@@ -19,7 +19,7 @@ from ..database import (
     count_user_rank, count_characters,
 )
 from ..rarity import get_rarity, get_rarity_order
-from .profile_helpers import HTML, DIV, SDIV, fmt, bar, wealth, esc, mention
+from ._profile_helpers import HTML, DIV, SDIV, fmt, bar, wealth, esc, mention
 
 log = logging.getLogger("SoulCatcher.status")
 
