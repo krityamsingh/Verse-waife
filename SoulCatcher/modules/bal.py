@@ -2,21 +2,28 @@
 
 Command:
   /bal  —  balance card for yourself or a replied-to user.
-           Shows kakera wallet, bank savings, and loan amount.
-           Tries to display with profile photo or custom media if set.
 """
 from __future__ import annotations
-
 import logging
-
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import Message
-
 from .. import app
 from ..database import get_or_create_user, get_user
-from ._profile_helpers import HTML, DIV, SDIV, fmt, esc, mention
 
-log = logging.getLogger("SoulCatcher.bal")
+log  = logging.getLogger("SoulCatcher.bal")
+HTML = enums.ParseMode.HTML
+_DIV  = "━━━━━━━━━━━━━━━━━━━━"
+_SDIV = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
+def _fmt(n) -> str:
+    try:    return f"{int(n):,}"
+    except: return str(n)
+
+def _esc(t: str) -> str:
+    return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _mention(name: str, uid: int) -> str:
+    return f'<a href="tg://user?id={uid}"><b>{_esc(name)}</b></a>'
 
 
 @app.on_message(filters.command("bal"))
@@ -26,7 +33,6 @@ async def cmd_bal(client, message: Message):
         if message.reply_to_message
         else message.from_user
     )
-
     try:
         await get_or_create_user(
             target.id,
@@ -44,16 +50,15 @@ async def cmd_bal(client, message: Message):
 
         text = (
             f"🌸 <b>SOULCATCHER BALANCE</b>\n"
-            f"<code>{DIV}</code>\n"
-            f"👤 {mention(target.first_name, target.id)}\n"
-            f"<code>{SDIV}</code>\n"
-            f"🌸 <b>Kakera</b>   <code>{fmt(bal)}</code>\n"
-            f"🏦 <b>Bank</b>     <code>{fmt(bank)}</code>\n"
-            f"💳 <b>Loan</b>     <code>{fmt(loan)}</code>\n"
-            f"<code>{DIV}</code>"
+            f"<code>{_DIV}</code>\n"
+            f"👤 {_mention(target.first_name, target.id)}\n"
+            f"<code>{_SDIV}</code>\n"
+            f"🌸 <b>Kakera</b>   <code>{_fmt(bal)}</code>\n"
+            f"🏦 <b>Bank</b>     <code>{_fmt(bank)}</code>\n"
+            f"💳 <b>Loan</b>     <code>{_fmt(loan)}</code>\n"
+            f"<code>{_DIV}</code>"
         )
 
-        # Try custom media first, then profile photo, then plain text
         custom = doc.get("custom_media")
         try:
             if custom:
