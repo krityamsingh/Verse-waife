@@ -123,7 +123,6 @@ async def cmd_spin(_, message: Message):
 # PAY COMMAND (🔐 FIXED with rate limiting)
 # ────────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.command("pay"))
 async def cmd_pay(_, message: Message):
     """
     🔐 FIXED: Transfer kakera to another user with rate limiting
@@ -210,7 +209,6 @@ async def cmd_pay(_, message: Message):
 # BALANCE COMMAND
 # ────────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.command("bal"))
 async def cmd_bal(_, message: Message):
     """Check your kakera balance"""
     uid = message.from_user.id
