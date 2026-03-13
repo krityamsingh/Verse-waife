@@ -3,12 +3,12 @@ Command: /burn
 Callbacks: burn:
 
 Split from collection.py.
-"""
+
 
 from __future__ import annotations
 import logging
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message, InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB
 
 from .. import app
@@ -33,7 +33,7 @@ def _fmt(n) -> str:
 async def cmd_burn(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/burn <instance_id>`")
+        return await message.reply_text("Usage: `/burn <instance_id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     uid  = message.from_user.id
     iid  = args[1].upper()
