@@ -92,7 +92,11 @@ DM_TEXT = (
     "╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮\n\n"
     "💗 *Welcome, {mention}\\!*\n"
     "_Your anime soul\\-collecting journey begins here\\._\n\n"
-  
+    "🌸 Collect rare characters across every rarity tier\n"
+    "🎀 Build your dream harem and top the leaderboards\n"
+    "💕 Trade, gift, and compete with players worldwide\n"
+    "🌷 Claim your daily kakera and spin the wheel\n"
+    "💖 Wishlist characters — get pinged on spawn\n\n"
     "━━━━━━━━━━━━━━━━━━━━\n"
     "✨ _You've been registered\\! Explore below_ 👇\n"
     "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
