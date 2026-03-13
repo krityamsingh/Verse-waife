@@ -11,7 +11,7 @@ import uuid
 import logging
 from datetime import datetime
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message
 
 from .. import app
@@ -111,7 +111,7 @@ async def cmd_list(_, message: Message):
 async def cmd_buy(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/buy <listing_id>`")
+        return await message.reply_text("Usage: `/buy <listing_id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     uid = message.from_user.id
     lid = args[1].upper()
