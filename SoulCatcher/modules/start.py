@@ -1,11 +1,7 @@
-"""SoulCatcher/modules/start.py — /start, /help, bot-added logging.
+"""SoulCatcher/modules/start_pink.py — Premium pink anime-themed /start handler.
 
-Pyrogram 2.0.106 ParseMode values: DEFAULT | MARKDOWN | HTML | DISABLED
-MARKDOWN_V2 does NOT exist in this version — all parse_mode calls use MARKDOWN.
-
-Markdown v1 special chars that MUST be escaped inside user-supplied text:
-  _ * ` [  (only these four break the v1 parser)
-Everything else (hyphens, dots, parens, !) is safe to use raw in v1.
+Pyrogram 2.0.106 — ParseMode.MARKDOWN only (no MARKDOWN_V2).
+Markdown v1 special chars that MUST be escaped: _ * ` [
 """
 
 import re
@@ -30,11 +26,9 @@ log = logging.getLogger("SoulCatcher.start")
 
 _start_time = time.time()
 
-# ── Hardcoded DM intro video ───────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 DM_INTRO_VIDEO = "https://files.catbox.moe/6nqjqk.mp4"
-
 MD = enums.ParseMode.MARKDOWN
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -51,6 +45,7 @@ def _now() -> str:
 _MD1 = re.compile(r"([_*`\[\]])")
 
 def _esc(text: str) -> str:
+    """Escape Markdown v1 special chars in user-supplied text."""
     return _MD1.sub(r"\\\1", str(text))
 
 
@@ -62,34 +57,104 @@ def _safe_mention(user) -> str:
     return "Unknown"
 
 
-# ── Welcome text ──────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# PREMIUM PINK WELCOME — DM
+# ─────────────────────────────────────────────────────────────────────────────
 
 DM_TEXT = """\
-🌸 *Welcome to {bot}, {mention}!*
+╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
+
+💗 *Welcome,* {mention}*!*
+_Your anime soul-collecting journey begins here._
+
+🌸 Collect rare characters across every rarity tier
+🎀 Build your dream harem and top the leaderboards
+💕 Trade, gift, and compete with players worldwide
+🌷 Claim your daily kakera and spin the wheel
+💖 Wishlist characters — get pinged the moment they spawn
+
 ━━━━━━━━━━━━━━━━━━━━
-I'm your anime soul-collecting bot!
+✨ _You've been registered! Explore the buttons below_ 👇
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\
+"""
+
+GC_TEXT = """\
+╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
+
+💗 *{bot} is now active in this group!*
+
+🎴 Characters spawn every *15 messages*
+⏱ Uptime: `{uptime}`
+💖 Press ❤️ to claim a spawned character!
+
 ━━━━━━━━━━━━━━━━━━━━
-You've been registered! Start exploring 👇\
+✨ _Type_ `/drop` _to force a character spawn_
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# INLINE KEYBOARD BUILDERS — Pink-themed emoji prefix on every button
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _dm_kb(bot_username: str) -> InlineKeyboardMarkup:
+    """4-button premium pink keyboard for DM /start."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add to Group", url=f"https://t.me/{bot_username}?startgroup=true")],
         [
-            InlineKeyboardButton("💬 Support",  url=f"https://t.me/{SUPPORT_GROUP}"),
-            InlineKeyboardButton("📢 Updates",  url=f"https://t.me/{UPDATE_CHANNEL}"),
+            InlineKeyboardButton(
+                "🌸 Add to Group",
+                url=f"https://t.me/{bot_username}?startgroup=true",
+            ),
+            InlineKeyboardButton(
+                "💗 Support",
+                url=f"https://t.me/{SUPPORT_GROUP}",
+            ),
         ],
-        [InlineKeyboardButton("📚 Help & Commands", callback_data="help:main")],
+        [
+            InlineKeyboardButton(
+                "💖 Updates",
+                url=f"https://t.me/{UPDATE_CHANNEL}",
+            ),
+            InlineKeyboardButton(
+                "🎀 Help & Commands",
+                callback_data="help:main",
+            ),
+        ],
     ])
 
 
-# ── /start DM ─────────────────────────────────────────────────────────────────
+def _gc_kb(bot_username: str) -> InlineKeyboardMarkup:
+    """Group /start keyboard."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🌸 Open in DM",
+                url=f"https://t.me/{bot_username}?start=start",
+            ),
+            InlineKeyboardButton(
+                "💗 Support",
+                url=f"https://t.me/{SUPPORT_GROUP}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎀 Help & Commands",
+                callback_data="help:main",
+            ),
+        ],
+    ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /start — PRIVATE (DM)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_dm(client, message: Message):
     try:
         user = message.from_user
+
+        # Register user in DB
         try:
             await get_or_create_user(
                 user.id,
@@ -102,28 +167,38 @@ async def start_dm(client, message: Message):
 
         bot_me  = await client.get_me()
         mention = _safe_mention(user)
-        text    = DM_TEXT.format(mention=mention, bot=_esc(BOT_NAME))
+        text    = DM_TEXT.format(mention=mention)
         kb      = _dm_kb(bot_me.username)
 
+        # Attempt intro video with caption
         sent = False
         if DM_INTRO_VIDEO:
             try:
                 await client.send_video(
-                    message.chat.id, DM_INTRO_VIDEO,
-                    caption=text, reply_markup=kb, parse_mode=MD,
+                    message.chat.id,
+                    DM_INTRO_VIDEO,
+                    caption=text,
+                    reply_markup=kb,
+                    parse_mode=MD,
                 )
                 sent = True
             except Exception as e:
                 log.warning(f"send_video failed uid={user.id}: {e}")
 
+        # Fallback to plain text if video fails
         if not sent:
             await message.reply_text(text, reply_markup=kb, parse_mode=MD)
 
+        # Log to channel
         if LOG_CHANNEL_ID:
             try:
                 await client.send_message(
                     LOG_CHANNEL_ID,
-                    f"🟢 */start DM*\n{_esc(user.first_name or f'User#{user.id}')} `{user.id}`\n{_now()}",
+                    (
+                        f"🌸 */start DM*\n"
+                        f"{_esc(user.first_name or f'User#{user.id}')} "
+                        f"`{user.id}`\n{_now()}"
+                    ),
                     parse_mode=MD,
                 )
             except Exception as e:
@@ -132,36 +207,30 @@ async def start_dm(client, message: Message):
     except Exception as e:
         log.exception(f"start_dm crashed uid={getattr(message.from_user, 'id', '?')}: {e}")
         try:
-            await message.reply_text("Something went wrong. Please try /start again!")
+            await message.reply_text(
+                "🌸 Something went wrong. Please try /start again!",
+            )
         except Exception:
             pass
 
 
-# ── /start Group ──────────────────────────────────────────────────────────────
-
-GC_TEXT = (
-    "🌸 *{bot} is now active in this group!*\n"
-    "━━━━━━━━━━━━━━━\n"
-    "📦 Spawns every *15 messages*  |  ⏱ Uptime: `{uptime}`\n"
-    "━━━━━━━━━━━━━━━\n"
-    "Type `/drop` to force a character spawn!"
-)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# /start — GROUP
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("start") & filters.group)
 async def start_gc(client, message: Message):
     try:
         bot_me = await client.get_me()
         text   = GC_TEXT.format(bot=_esc(BOT_NAME), uptime=_uptime())
-        kb     = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🌸 DM me",    url=f"https://t.me/{bot_me.username}?start=start"),
-            InlineKeyboardButton("💬 Support",  url=f"https://t.me/{SUPPORT_GROUP}"),
-        ]])
+        kb     = _gc_kb(bot_me.username)
         await message.reply_text(text, reply_markup=kb, parse_mode=MD)
+
         try:
             await track_group(message.chat.id, getattr(message.chat, "title", ""))
         except Exception as e:
             log.warning(f"track_group failed chat={message.chat.id}: {e}")
+
     except Exception as e:
         log.exception(f"start_gc crashed chat={getattr(message.chat, 'id', '?')}: {e}")
         try:
@@ -173,7 +242,9 @@ async def start_gc(client, message: Message):
             pass
 
 
-# ── Bot added to group log ────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# BOT ADDED TO GROUP — log
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_chat_member_updated()
 async def on_member_update(client, update: ChatMemberUpdated):
@@ -183,10 +254,12 @@ async def on_member_update(client, update: ChatMemberUpdated):
         if old_s in ("left", "kicked", None) and new_s in ("member", "administrator"):
             chat  = update.chat
             actor = update.from_user
+
             try:
                 await track_group(chat.id, getattr(chat, "title", ""))
             except Exception as e:
                 log.warning(f"track_group failed on member update: {e}")
+
             if LOG_CHANNEL_ID:
                 try:
                     inv = await client.export_chat_invite_link(chat.id)
@@ -198,7 +271,7 @@ async def on_member_update(client, update: ChatMemberUpdated):
                     await client.send_message(
                         LOG_CHANNEL_ID,
                         (
-                            f"🔔 *Added to chat*\n"
+                            f"🌸 *Added to chat*\n"
                             f"{chat_title}\n`{chat.id}`\n"
                             f"By: [{actor_str}](tg://user?id={actor.id if actor else 0})\n"
                             f"{inv}\n{_now()}"
@@ -207,113 +280,126 @@ async def on_member_update(client, update: ChatMemberUpdated):
                     )
                 except Exception as e:
                     log.warning(f"Log channel update failed: {e}")
+
     except Exception as e:
         log.warning(f"on_member_update error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELP PAGES
-# All user-facing commands, sourced from every module in the bot.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Page structure: (title, list of (cmd, description))
 _PAGES: list[tuple[str, list[tuple[str, str]]]] = [
     (
-        "🎴 Collection",
+        "🌸 Collection",
         [
-            ("/harem",                   "Browse your full character collection"),
-            ("/collection",              "Alias for /harem"),
-            ("/view <id>",               "View a character card from your harem"),
-            ("/setfav <id>",             "Mark a character as favourite ⭐ (shown as cover)"),
-            ("/burn <id>",               "Burn a character for kakera 🔥"),
-            ("/sort <rarity|name|anime|recent>", "Change harem sort order"),
-            ("/cmode",                   "Set collection display mode (filter by rarity/anime/etc)"),
-            ("/all",                     "Full breakdown of all uploaded characters by rarity"),
-            ("/check",                   "Browse the global character database"),
-            ("/check <char_id>",         "View a specific character card + ownership stats"),
+            ("/harem",                            "Browse your full character collection"),
+            ("/collection",                       "Alias for /harem"),
+            ("/view <id>",                        "View a character card from your harem"),
+            ("/setfav <id>",                      "Mark a character as favourite ⭐"),
+            ("/burn <id>",                        "Burn a character for kakera 🔥"),
+            ("/sort <rarity|name|anime|recent>",  "Change harem sort order"),
+            ("/cmode",                            "Set collection display mode"),
+            ("/all",                              "Full breakdown by rarity"),
+            ("/check",                            "Browse the global character database"),
+            ("/check <char_id>",                  "View a specific character card + stats"),
         ],
     ),
     (
-        "⚔️ Spawns & Claiming",
+        "💗 Spawns & Claiming",
         [
-            ("/drop",                    "Force a character spawn (group cooldown applies)"),
-            ("/spawn",                   "Alias for /drop"),
-            ("❤️ button",                "Press to claim a spawned character"),
-            ("/wish <char_id>",          "Add a character to your wishlist — get pinged on spawn"),
-            ("/wishlist",                "View your wishlist (max 25 characters)"),
-            ("/unwish <char_id>",        "Remove a character from your wishlist"),
+            ("/drop",          "Force a character spawn (group cooldown applies)"),
+            ("/spawn",         "Alias for /drop"),
+            ("❤️ button",      "Press to claim a spawned character"),
+            ("/wish <id>",     "Wishlist a character — get pinged on spawn"),
+            ("/wishlist",      "View your wishlist (max 25)"),
+            ("/unwish <id>",   "Remove a character from your wishlist"),
         ],
     ),
     (
         "💰 Economy",
         [
-            ("/daily",                   "Claim daily kakera reward (streak bonuses apply!)"),
-            ("/spin",                    "Spin the wheel for random kakera (1h cooldown)"),
-            ("/bal",                     "Check your kakera balance"),
-            ("/bal @user",               "Check someone else's balance (reply to them)"),
-            ("/pay <amount>",            "Send kakera to a user (reply to them, 2% fee)"),
-            ("/cheque <amount> [note]",  "Send a collectible cheque card (reply to user)"),
-            ("/cashcheque <id>",         "Cash a cheque you've received"),
+            ("/daily",                    "Claim daily kakera (streak bonuses!)"),
+            ("/spin",                     "Spin the wheel for random kakera (1h cooldown)"),
+            ("/bal",                      "Check your kakera balance"),
+            ("/bal @user",                "Check someone else's balance"),
+            ("/pay <amount>",             "Send kakera (reply to user, 2% fee)"),
+            ("/cheque <amount> [note]",   "Send a collectible cheque card"),
+            ("/cashcheque <id>",          "Cash a received cheque"),
         ],
     ),
     (
         "🛒 Market",
         [
-            ("/sell <id>",               "Sell a character directly for kakera (instant)"),
-            ("/list <id> <price>",       "List a character on the player market"),
-            ("/mlist <id> <price>",      "Alias for /list"),
-            ("/buy <listing_id>",        "Buy a listing from the market"),
-            ("/market",                  "Browse all active market listings"),
-            ("/market <rarity>",         "Browse listings filtered by rarity"),
+            ("/sell <id>",          "Sell a character instantly for kakera"),
+            ("/list <id> <price>",  "List a character on the player market"),
+            ("/mlist <id> <price>", "Alias for /list"),
+            ("/buy <listing_id>",   "Buy a listing from the market"),
+            ("/market",             "Browse all active listings"),
+            ("/market <rarity>",    "Filter market by rarity"),
         ],
     ),
     (
-        "🤝 Social & Trading",
+        "🎀 Social & Trading",
         [
-            ("/trade <my_id> <their_id>","Propose a character trade (reply to user)"),
-            ("/gift <id>",               "Gift a character to someone (reply to user)"),
-            ("/marry",                   "Marry a random character from the database"),
-            ("/propose",                 "Propose to a character (3rd attempt guaranteed!)"),
-            ("/epropose",                "Extended propose sequence"),
-            ("/basket <bet>",            "🏀 Bet kakera on a dice game"),
+            ("/trade <my_id> <their_id>", "Propose a character trade (reply to user)"),
+            ("/gift <id>",                "Gift a character to someone"),
+            ("/marry",                    "Marry a random character from the database"),
+            ("/propose",                  "Propose to a character (3rd attempt guaranteed!)"),
+            ("/epropose",                 "Extended propose sequence"),
+            ("/basket <bet>",             "🏀 Bet kakera on a dice game"),
         ],
     ),
     (
-        "📊 Rankings & Stats",
+        "💖 Rankings & Stats",
         [
-            ("/profile",                 "View your full profile card"),
-            ("/status",                  "Detailed stats: collection, economy, rarity breakdown"),
-            ("/rank",                    "Your current global collector rank"),
-            ("/top",                     "Top 10 collectors by character count"),
-            ("/ktop",                    "Top 10 richest players by kakera"),
-            ("/ctop",                    "Top 10 collectors by total character copies"),
-            ("/toprarity <rarity>",      "Top 10 collectors for a specific rarity"),
-            ("/richest",                 "Top 10 wealthiest players"),
-            ("/rarityinfo",              "Full rarity table with drop rates & values"),
-            ("/rarityinfo <name>",       "Detailed card for a specific rarity tier"),
-            ("/event",                   "Current game mode (normal / happy hour / blitz etc)"),
+            ("/profile",             "View your full profile card"),
+            ("/status",              "Detailed stats: collection, economy, rarities"),
+            ("/rank",                "Your current global collector rank"),
+            ("/top",                 "Top 10 collectors by character count"),
+            ("/ktop",                "Top 10 richest players by kakera"),
+            ("/ctop",                "Top 10 collectors by total copies"),
+            ("/toprarity <rarity>",  "Top 10 for a specific rarity tier"),
+            ("/richest",             "Top 10 wealthiest players"),
+            ("/rarityinfo",          "Full rarity table with drop rates & values"),
+            ("/event",               "Current game mode (normal / happy hour / blitz)"),
         ],
     ),
 ]
 
-# Rarity quick-reference shown at the bottom of the last page
 _RARITY_REF = (
-    "\n*Rarity Tiers (low → high):*\n"
+    "\n💎 *Rarity Tiers (low → high)*\n"
     "⚫ Common · 🔵 Rare · 🌌 Legendry · 🔥 Elite\n"
-    "💎 Seasonal 🌸 Festival · 💀 Mythic 🔮 Limited 🏆 Sports 🧝 Fantasy\n"
-    "✨ Eternal 🎠 Verse _(video only — rarest)_"
+    "💎 Seasonal · 🌸 Festival · 💀 Mythic · 🔮 Limited\n"
+    "🏆 Sports · 🧝 Fantasy · ✨ Eternal · 🎠 Verse _(video — rarest)_"
 )
 
-# Pre-render each page as a Markdown string
+_MAIN_HELP_TEXT = (
+    "╭━━━〔 🌸 *SOUL CATCHER HELP* 🌸 〕━━━╮\n\n"
+    "💗 Choose a category below to explore all commands.\n\n"
+    "🌸 Collection — manage your harem\n"
+    "💗 Spawns — claim characters in groups\n"
+    "💰 Economy — earn and spend kakera\n"
+    "🛒 Market — buy and sell between players\n"
+    "🎀 Social — trade, gift and marry\n"
+    "💖 Rankings — stats and leaderboards\n\n"
+    "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
+)
+
+
 def _render_pages() -> dict[str, str]:
     pages = {}
     total = len(_PAGES)
     for i, (title, cmds) in enumerate(_PAGES, 1):
-        lines = [f"📚 *SoulCatcher Help ({i}/{total}) — {title}*\n"]
+        lines = [
+            f"╭━━━〔 {title} 〕━━━╮\n",
+            f"📚 *SoulCatcher Help ({i}/{total})*\n",
+        ]
         for cmd, desc in cmds:
             lines.append(f"`{cmd}` — {desc}")
         if i == total:
             lines.append(_RARITY_REF)
+        lines.append("\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯")
         pages[str(i)] = "\n".join(lines)
     return pages
 
@@ -326,10 +412,10 @@ def _help_kb(page: str) -> InlineKeyboardMarkup:
     idx   = pages.index(page)
     nav   = []
     if idx > 0:
-        nav.append(InlineKeyboardButton("◀️", callback_data=f"help:{pages[idx - 1]}"))
-    nav.append(InlineKeyboardButton(f"{int(page)}/{len(pages)}", callback_data="noop"))
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"help:{pages[idx - 1]}"))
+    nav.append(InlineKeyboardButton(f"🌸 {int(page)}/{len(pages)}", callback_data="noop"))
     if idx < len(pages) - 1:
-        nav.append(InlineKeyboardButton("▶️", callback_data=f"help:{pages[idx + 1]}"))
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"help:{pages[idx + 1]}"))
     return InlineKeyboardMarkup([
         nav,
         [InlineKeyboardButton("🏠 Home", callback_data="help:home")],
@@ -337,9 +423,9 @@ def _help_kb(page: str) -> InlineKeyboardMarkup:
 
 
 def _main_help_kb() -> InlineKeyboardMarkup:
-    """Category buttons on the main help landing page."""
-    buttons = []
-    row = []
+    """Category buttons on the main help landing page — 2-per-row."""
+    buttons: list[list] = []
+    row: list = []
     for i, (title, _) in enumerate(_PAGES, 1):
         row.append(InlineKeyboardButton(title, callback_data=f"help:{i}"))
         if len(row) == 2:
@@ -350,48 +436,45 @@ def _main_help_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-_MAIN_HELP_TEXT = (
-    "📚 *SoulCatcher — Command Help*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "Choose a category below to explore all commands.\n\n"
-    "🎴 Collection — manage your harem\n"
-    "⚔️ Spawns — claim characters in groups\n"
-    "💰 Economy — earn & spend kakera\n"
-    "🛒 Market — buy & sell between players\n"
-    "🤝 Social — trade, gift & marry\n"
-    "📊 Rankings — stats & leaderboards"
-)
-
+# ─────────────────────────────────────────────────────────────────────────────
+# HELP CALLBACK
+# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^help:"))
 async def help_cb(client, cb: CallbackQuery):
     page = cb.data.split(":", 1)[1]
 
-    # ── Home / landing ────────────────────────────────────────────────────────
-    if page in ("home", "main"):
-        bot_me = await client.get_me()
-        if page == "home":
-            # Go back to the start welcome card
-            mention = _safe_mention(cb.from_user)
-            text    = DM_TEXT.format(mention=mention, bot=_esc(BOT_NAME))
-            kb      = _dm_kb(bot_me.username)
-        else:
-            text = _MAIN_HELP_TEXT
-            kb   = _main_help_kb()
+    # ── Home — back to welcome card ───────────────────────────────────────────
+    if page == "home":
+        bot_me  = await client.get_me()
+        mention = _safe_mention(cb.from_user)
+        text    = DM_TEXT.format(mention=mention)
+        kb      = _dm_kb(bot_me.username)
         try:
             await cb.message.edit_caption(text, reply_markup=kb, parse_mode=MD)
         except Exception:
             try:
                 await cb.message.edit_text(text, reply_markup=kb, parse_mode=MD)
             except Exception as e:
-                log.warning(f"help_cb {page} edit failed: {e}")
+                log.warning(f"help_cb home edit failed: {e}")
         return await cb.answer()
 
-    # ── "📚 Help & Commands" button → show category menu ─────────────────────
-    if page not in HELP_PAGES:
-        # Unknown page — show main menu
+    # ── Main category menu ────────────────────────────────────────────────────
+    if page == "main":
         try:
-            await cb.message.edit_text(_MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode=MD)
+            await cb.message.edit_text(
+                _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode=MD,
+            )
+        except Exception as e:
+            log.warning(f"help_cb main edit failed: {e}")
+        return await cb.answer()
+
+    # ── Unknown page → fallback to main ──────────────────────────────────────
+    if page not in HELP_PAGES:
+        try:
+            await cb.message.edit_text(
+                _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode=MD,
+            )
         except Exception:
             pass
         return await cb.answer()
