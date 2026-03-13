@@ -3,6 +3,9 @@
 Commands:
   /ktop   — top 10 kakera holders
   /ctop   — top 10 character collectors
+
+All MongoDB queries live directly in this file.
+No leaderboard functions needed in database.py.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from pyrogram import filters, enums
 from pyrogram.types import Message
 
 from .. import app
-from ..database import top_richest, top_collectors
+from ..database import _col
 
 log  = logging.getLogger("SoulCatcher.tops")
 HTML = enums.ParseMode.HTML
@@ -20,6 +23,8 @@ HTML = enums.ParseMode.HTML
 _DIV   = "━━━━━━━━━━━━━━━━━━━━━━━━"
 MEDALS = ["🥇", "🥈", "🥉", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _fmt(n) -> str:
     try:
@@ -58,17 +63,99 @@ def _medal(i: int) -> str:
     return MEDALS[i] if i < len(MEDALS) else f"{i + 1}."
 
 
+# ── DB queries ────────────────────────────────────────────────────────────────
+
+async def _fetch_richest(limit: int = 10) -> list:
+    """
+    Top kakera holders sorted by balance descending.
+    Banned users are excluded. Single query on users collection.
+    Returns list of dicts: {user_id, balance, first_name, last_name, username}
+    """
+    return await (
+        _col("users")
+        .find(
+            {"balance": {"$gt": 0}, "is_banned": {"$ne": True}},
+            {"_id": 0, "user_id": 1, "balance": 1,
+             "first_name": 1, "last_name": 1, "username": 1},
+        )
+        .sort("balance", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+
+async def _fetch_collectors(limit: int = 10) -> list:
+    """
+    Top collectors by total characters owned, unique count as tiebreaker.
+    Banned users are excluded. 3 queries, zero per-user roundtrips.
+    Returns list of dicts: {user_id, total, unique, first_name, last_name, username}
+    """
+    fetch = limit * 3  # headroom so ban-filtering doesn't shrink list below limit
+
+    # Step 1 — total characters per user, rough top-N
+    total_rows = await _col("user_characters").aggregate([
+        {"$group": {"_id": "$user_id", "total": {"$sum": 1}}},
+        {"$sort":  {"total": -1}},
+        {"$limit": fetch},
+    ]).to_list(fetch)
+
+    if not total_rows:
+        return []
+
+    uid_list = [r["_id"] for r in total_rows]
+
+    # Step 2 — batch name lookup; banned users are absent from result → dropped in step 4
+    user_docs = await _col("users").find(
+        {"user_id": {"$in": uid_list}, "is_banned": {"$ne": True}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "username": 1},
+    ).to_list(fetch)
+    name_map = {d["user_id"]: d for d in user_docs}
+
+    # Drop banned users, cap to limit
+    total_rows = [r for r in total_rows if r["_id"] in name_map][:limit]
+    uid_list   = [r["_id"] for r in total_rows]
+
+    if not uid_list:
+        return []
+
+    # Step 3 — unique char_id count for surviving users only
+    uniq_rows = await _col("user_characters").aggregate([
+        {"$match":  {"user_id": {"$in": uid_list}}},
+        {"$group":  {"_id": {"uid": "$user_id", "cid": "$char_id"}}},
+        {"$group":  {"_id": "$_id.uid", "unique": {"$sum": 1}}},
+    ]).to_list(limit)
+    uniq_map = {r["_id"]: r["unique"] for r in uniq_rows}
+
+    # Step 4 — merge and sort by total desc, unique desc as tiebreaker
+    results = []
+    for row in total_rows:
+        uid  = row["_id"]
+        info = name_map.get(uid, {})
+        results.append({
+            "user_id":    uid,
+            "total":      row["total"],
+            "unique":     uniq_map.get(uid, 0),
+            "first_name": info.get("first_name") or "",
+            "last_name":  info.get("last_name")  or "",
+            "username":   info.get("username")   or "",
+        })
+
+    results.sort(key=lambda x: (x["total"], x["unique"]), reverse=True)
+    return results
+
+
 # ── /ktop ─────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("ktop"))
 async def cmd_ktop(_, message: Message):
+    """Top 10 users by kakera balance."""
     wait = await message.reply_text(
         "⏳ <i>Loading kakera leaderboard…</i>", parse_mode=HTML
     )
     try:
-        rows = await top_richest(limit=10, exclude_banned=True)
+        rows = await _fetch_richest(10)
     except Exception as exc:
-        log.error("ktop db error: %s", exc, exc_info=True)
+        log.error("ktop error: %s", exc, exc_info=True)
         await wait.edit_text(
             f"❌ <b>Database error:</b>\n<code>{_esc(str(exc)[:300])}</code>",
             parse_mode=HTML,
@@ -104,13 +191,14 @@ async def cmd_ktop(_, message: Message):
 
 @app.on_message(filters.command("ctop"))
 async def cmd_ctop(_, message: Message):
+    """Top 10 users by total characters owned (unique count as tiebreaker)."""
     wait = await message.reply_text(
         "⏳ <i>Loading collector leaderboard…</i>", parse_mode=HTML
     )
     try:
-        rows = await top_collectors(limit=10, exclude_banned=True)
+        rows = await _fetch_collectors(10)
     except Exception as exc:
-        log.error("ctop db error: %s", exc, exc_info=True)
+        log.error("ctop error: %s", exc, exc_info=True)
         await wait.edit_text(
             f"❌ <b>Database error:</b>\n<code>{_esc(str(exc)[:300])}</code>",
             parse_mode=HTML,
