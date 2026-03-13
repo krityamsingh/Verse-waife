@@ -359,17 +359,38 @@ async def _do_upload(
 
         # 4. Post to channel (using local file — no re-download needed)
         if UPLOAD_CHANNEL_ID:
+            channel_err: Optional[str] = None
+
             try:
                 if is_video:
                     await client.send_video(UPLOAD_CHANNEL_ID, file_path, caption=caption)
                 else:
                     await client.send_photo(UPLOAD_CHANNEL_ID, file_path, caption=caption)
-            except Exception as e:
-                log.warning(f"Channel post failed (character already saved): {e}")
+                log.info(f"Channel post OK — char_id={char_id} channel={UPLOAD_CHANNEL_ID}")
+
+            except Exception as media_exc:
+                log.warning(f"Channel media post failed (char_id={char_id}): {media_exc}")
+                # Fallback: try sending the caption as a plain text message
                 try:
                     await client.send_message(UPLOAD_CHANNEL_ID, caption)
-                except Exception:
-                    pass
+                    log.info(f"Channel text fallback OK — char_id={char_id}")
+                except Exception as text_exc:
+                    log.error(
+                        f"Channel text fallback also failed (char_id={char_id}): {text_exc}"
+                    )
+                    channel_err = (
+                        f"media → `{media_exc}`\n"
+                        f"text  → `{text_exc}`"
+                    )
+
+            if channel_err:
+                await status.edit_text(
+                    caption
+                    + f"\n\n{'─' * 28}\n"
+                    + f"⚠️ **Channel broadcast failed**\n{channel_err}\n"
+                    + f"Character was saved — ID: `{char_id}`"
+                )
+                return char_id
 
         await status.edit_text(caption)
         return char_id
