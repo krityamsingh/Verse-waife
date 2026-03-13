@@ -1,7 +1,9 @@
 """SoulCatcher/modules/topcollector.py
 
-Command:
-  /topcollector  —  top 10 players by total characters owned.
+Commands:
+  /topcollector  —  top 10 players by total characters owned
+  /topc          —  alias
+  /tc            —  short alias
 """
 from __future__ import annotations
 import logging
@@ -23,8 +25,9 @@ def _esc(t: str) -> str:
     return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 
-@app.on_message(filters.command("topcollector"))
+@app.on_message(filters.command(["topcollector", "topc", "tc"]))
 async def cmd_topcollector(_, message: Message):
+    log.info("/topcollector triggered by uid=%s", message.from_user.id if message.from_user else "?")
     wait = await message.reply_text("⏳ <i>Loading top collectors…</i>", parse_mode=HTML)
     try:
         results = await top_collectors(10)
@@ -55,5 +58,5 @@ async def cmd_topcollector(_, message: Message):
         await wait.edit_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
 
     except Exception as e:
-        log.error("/topcollector error: %s", e)
+        log.error("/topcollector error: %s", e, exc_info=True)
         await wait.edit_text("❌ <b>Failed to load collector leaderboard.</b>", parse_mode=HTML)
