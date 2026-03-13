@@ -72,7 +72,7 @@ def _safe_mention(user) -> str:
 DM_TEXT = """\
 ╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
 
-💗 *Welcome,* {mention}*!*
+💗 *Welcome,* {mention}!
 _Your anime soul-collecting journey begins here._
 
 🌸 Collect rare characters across every rarity tier
