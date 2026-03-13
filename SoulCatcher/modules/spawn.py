@@ -1,38 +1,3 @@
-"""SoulCatcher/modules/spawn.py — message counter, /drop, atomic ❤️ claim.
-
-FIXES vs original:
-  [BUG-1] message.effective_chat does not exist in Pyrogram 2.0.106.
-          Replaced every occurrence with message.chat (the correct attr).
-  [BUG-2] client.loop.create_task() used the loop captured at Client.__init__
-          time, which is a different (dead) loop from the one asyncio.run()
-          creates. Replaced with asyncio.create_task() which always schedules
-          on the currently running loop.
-  [BUG-3] ~filters.command([]) with an empty list is always True, so every
-          command message (including /drop) also triggered on_group_message,
-          causing double spawns. Replaced with an explicit exclusion list of
-          all bot commands.
-  [BUG-4] cmd_drop had no spawn_enabled / banned guard, so disabled or banned
-          groups could still force a spawn via /drop. Added the same checks
-          present in on_group_message.
-  [BUG-5] _do_spawn: `eff = sub if sub else tier` was evaluated *before* sub
-          was resolved (sub can be None), which could leave eff as None and
-          crash on eff.name. Now uses `eff = sub or tier` which is equivalent
-          but clearer, and the None path was already correct — kept as-is with
-          an explicit guard.
-  [BUG-6] _do_spawn: if the initial edit_caption/edit_text to insert the real
-          spawn_id fails, the button stays with callback_data="claim:PENDING"
-          forever and every press returns "Registering spawn…". Now the error
-          is logged and expire_spawn() is called immediately so the dead spawn
-          doesn't linger.
-  [BUG-7] claim_cb: max_per_user rollback imported _col() inline from
-          ..database, leaking a private internal detail. Replaced with a
-          dedicated public helper unclaim_spawn() (see database module note).
-  [BUG-8] on_group_message: banned groups could still accumulate the message
-          counter before the guard fires. The ban/disabled check is now done
-          before increment_group_msg reaches the threshold so the counter
-          never resets unnecessarily.
-"""
-
 import asyncio
 import logging
 from datetime import datetime
