@@ -422,15 +422,18 @@ async def is_uploader(uid): return bool(await _col("uploaders").find_one({"user_
 
 # ── LEADERBOARDS ──────────────────────────────────────────────────────────────
 
-async def top_richest(limit: int = 10, exclude_banned: bool = False) -> list[dict]:
+# ── LEADERBOARDS ──────────────────────────────────────────────────────────────
+
+async def top_richest(limit: int = 10, exclude_banned: bool = False) -> list:
     """
     Top kakera holders sorted by balance descending.
-
-    Called by tops.py → cmd_ktop().
     Returns list of dicts: {user_id, balance, first_name, last_name, username}
 
-    exclude_banned=True filters out users where is_banned == True.
-    The compound index on (is_banned, balance) makes this a single efficient scan.
+    Called by:
+      - tops.py   → cmd_ktop()  with exclude_banned=True
+      - profile.py → cmd_richest() with positional limit=10 (exclude_banned stays False)
+    Both call signatures are supported — exclude_banned defaults to False
+    so profile.py's existing call top_richest(10) works without any change.
     """
     filt: dict = {"balance": {"$gt": 0}}
     if exclude_banned:
@@ -449,23 +452,24 @@ async def top_richest(limit: int = 10, exclude_banned: bool = False) -> list[dic
     )
 
 
-async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[dict]:
+async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list:
     """
     Top collectors by total characters owned, unique count as tiebreaker.
-
-    Called by tops.py → cmd_ctop().
     Returns list of dicts: {user_id, total, unique, first_name, last_name, username}
 
-    Strategy (3 queries, zero per-user roundtrips):
-      1. Aggregate user_characters for total count — fetch limit*3 so banned
-         users can be dropped while still returning a full top-<limit> list.
-      2. Batch-fetch names from users in ONE find() — also applies ban filter here.
-      3. Batch-compute unique char_id counts in ONE aggregation.
-      4. Merge, re-sort by (total desc, unique desc), cap to limit.
-    """
-    fetch = limit * 3   # headroom so ban-filtering doesn't shrink the list below limit
+    Called by tops.py → cmd_ctop() with exclude_banned=True.
 
-    # Step 1 — total characters per user, rough top-N (pre-ban-filter)
+    Strategy — 3 queries, zero per-user roundtrips:
+      1. Aggregate user_characters → total per user, fetch limit*3 as headroom
+         so banned users can be dropped without shrinking the final list below limit.
+      2. Batch name lookup on users — ban filter applied here so banned UIDs
+         are absent from name_map and silently dropped in step 4.
+      3. Batch unique char_id count for the surviving uid list only.
+      4. Merge + sort by (total desc, unique desc), cap to limit.
+    """
+    fetch = limit * 3
+
+    # Step 1 — total characters per user, rough top-N
     total_rows = await _col("user_characters").aggregate([
         {"$group": {"_id": "$user_id", "total": {"$sum": 1}}},
         {"$sort":  {"total": -1}},
@@ -477,8 +481,7 @@ async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[
 
     uid_list = [r["_id"] for r in total_rows]
 
-    # Step 2 — batch name lookup; ban filter applied here so banned UIDs are
-    #          absent from name_map and silently dropped in step 4.
+    # Step 2 — batch name lookup; ban filter silently removes banned UIDs
     user_filt: dict = {"user_id": {"$in": uid_list}}
     if exclude_banned:
         user_filt["is_banned"] = {"$ne": True}
@@ -489,14 +492,14 @@ async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[
     ).to_list(fetch)
     name_map = {d["user_id"]: d for d in user_docs}
 
-    # Drop banned users and cap to limit before running step 3
+    # Drop banned users, cap to limit
     total_rows = [r for r in total_rows if r["_id"] in name_map][:limit]
     uid_list   = [r["_id"] for r in total_rows]
 
     if not uid_list:
         return []
 
-    # Step 3 — unique char_id count for the surviving uid_list only
+    # Step 3 — unique char_id count for surviving users only
     uniq_rows = await _col("user_characters").aggregate([
         {"$match":  {"user_id": {"$in": uid_list}}},
         {"$group":  {"_id": {"uid": "$user_id", "cid": "$char_id"}}},
@@ -504,7 +507,7 @@ async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[
     ]).to_list(limit)
     uniq_map = {r["_id"]: r["unique"] for r in uniq_rows}
 
-    # Step 4 — merge into result dicts, sort by total then unique descending
+    # Step 4 — merge and sort
     results = []
     for row in total_rows:
         uid  = row["_id"]
@@ -522,7 +525,7 @@ async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[
     return results
 
 
-async def top_by_rarity(rarity_name: str, limit: int = 10) -> list[dict]:
+async def top_by_rarity(rarity_name: str, limit: int = 10) -> list:
     """
     Top collectors of a specific rarity.
     Returns list of dicts: {user_id, count, first_name, last_name, username}
@@ -561,9 +564,9 @@ async def top_by_rarity(rarity_name: str, limit: int = 10) -> list[dict]:
 async def count_user_rank(user_id) -> int:
     """
     Returns the collector rank of a user (1 = most characters).
-    Used by profile badges. Efficient: counts only users with MORE chars than this user.
+    Uses $count stage instead of loading all documents into memory.
     """
-    cnt      = await _col("user_characters").count_documents({"user_id": user_id})
+    cnt = await _col("user_characters").count_documents({"user_id": user_id})
     pipeline = [
         {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
         {"$match": {"count": {"$gt": cnt}}},
