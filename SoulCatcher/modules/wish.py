@@ -7,7 +7,7 @@ Split from collection.py.
 from __future__ import annotations
 import logging
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message
 
 from .. import app
@@ -26,7 +26,7 @@ async def cmd_wish(_, message: Message):
         )
     char = await get_character(args[1])
     if not char:
-        return await message.reply_text(f"❌ Character `{args[1]}` not found in database.")
+        return await message.reply_text(f"❌ Character `{args[1]}` not found in database.", parse_mode=enums.ParseMode.MARKDOWN)
 
     added = await add_wish(
         message.from_user.id, args[1],
@@ -44,7 +44,7 @@ async def cmd_wish(_, message: Message):
 async def cmd_wishlist(_, message: Message):
     items = await get_wishlist(message.from_user.id)
     if not items:
-        return await message.reply_text("💛 Your wishlist is empty! Use `/wish <char_id>` to add.")
+        return await message.reply_text("💛 Your wishlist is empty! Use `/wish <char_id>` to add.", parse_mode=enums.ParseMode.MARKDOWN)
 
     lines = ["💛 **Your Wishlist**\n"]
     for i, item in enumerate(items, 1):
@@ -59,9 +59,9 @@ async def cmd_wishlist(_, message: Message):
 async def cmd_unwish(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/unwish <char_id>`")
+        return await message.reply_text("Usage: `/unwish <char_id>`", parse_mode=enums.ParseMode.MARKDOWN)
     removed = await remove_wish(message.from_user.id, args[1])
     if removed:
-        await message.reply_text(f"💛 `{args[1]}` removed from your wishlist.")
+        await message.reply_text(f"💛 `{args[1]}` removed from your wishlist.", parse_mode=enums.ParseMode.MARKDOWN)
     else:
         await message.reply_text("❌ Character not found in your wishlist.")
