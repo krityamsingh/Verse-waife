@@ -710,7 +710,7 @@ async def cmd_sort(_, message: Message):
     valid = ["rarity", "name", "anime", "recent"]
     args = message.command
     if len(args) < 2 or args[1].lower() not in valid:
-        return await message.reply_text(f"Usage: `/sort <{'|'.join(valid)}>`")
+        return await message.reply_text(f"Usage: `/sort <{'|'.join(valid)}>`", parse_mode=enums.ParseMode.MARKDOWN)
     val = args[1].lower()
     await update_user(message.from_user.id, {"$set": {"harem_sort": val}})
     await message.reply_text(f"✅ Harem sort order set to **{val}**!")
