@@ -122,3 +122,5 @@ async def burn_cb(_, cb):
             pass
 
     await cb.answer()
+
+"""
