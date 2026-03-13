@@ -33,7 +33,7 @@ from ..database import get_or_create_user, add_balance, get_balance, deduct_bala
 log  = logging.getLogger("SoulCatcher.wguess")
 HTML = enums.ParseMode.HTML
 
-HINT_COST   = 40   # kakera deducted per hint
+HINT_COST   = 20   # kakera deducted per hint
 REWARD_MIN  = 50
 REWARD_MAX  = 100
 TIMEOUT_SEC = 15
