@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import random
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup as IKM,
@@ -52,7 +52,7 @@ async def cmd_sell(client, message: Message):
 
     char = await _col("user_characters").find_one({"user_id": uid, "instance_id": iid})
     if not char:
-        return await message.reply_text(f"❌ `{iid}` not found in your harem.")
+        return await message.reply_text(f"❌ `{iid}` not found in your harem.", parse_mode=enums.ParseMode.MARKDOWN)
 
     # Check tradeable / sellable
     if not can_trade(char.get("rarity", "")):
