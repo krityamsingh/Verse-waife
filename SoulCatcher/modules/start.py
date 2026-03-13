@@ -65,13 +65,8 @@ DM_TEXT = """\
 ╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
 
 💗 *Welcome,* {mention}*!*
-_Your anime soul-collecting journey begins here._
-
-🌸 Collect rare characters across every rarity tier
-🎀 Build your dream harem and top the leaderboards
-💕 Trade, gift, and compete with players worldwide
-🌷 Claim your daily kakera and spin the wheel
-💖 Wishlist characters — get pinged the moment they spawn
+ 
+ Your anime soul-collecting journey begins here.
 
 ━━━━━━━━━━━━━━━━━━━━
 ✨ _You've been registered! Explore the buttons below_ 👇
