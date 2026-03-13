@@ -27,7 +27,10 @@ from pyrogram import raw
 from pyrogram.raw import functions, types as raw_types
 
 from .. import app
-from ..config import LOG_CHANNEL_ID, BOT_NAME, SUPPORT_GROUP, UPDATE_CHANNEL
+from ..config import BOT_NAME, SUPPORT_GROUP, UPDATE_CHANNEL
+
+# ── Logger GC — hardcoded ─────────────────────────────────────────────────────
+LOGGER_GC = -1003824102394
 from ..database import get_or_create_user, track_group
 
 log = logging.getLogger("SoulCatcher.start")
@@ -284,18 +287,29 @@ async def start_dm(client, message: Message):
             ])
             await message.reply_text(text, reply_markup=fallback_kb, parse_mode=MD)
 
-        # Log channel
-        if LOG_CHANNEL_ID:
-            try:
-                await client.send_message(
-                    LOG_CHANNEL_ID,
-                    f"🌸 */start DM*\n"
-                    f"{_esc(user.first_name or f'User#{user.id}')} "
-                    f"`{user.id}`\n{_now()}",
-                    parse_mode=MD,
-                )
-            except Exception as e:
-                log.warning(f"Log channel failed: {e}")
+        # ── Log to logger GC ─────────────────────────────────────────────────
+        try:
+            uname     = f"@{user.username}" if user.username else "no username"
+            full_name = _esc(
+                f"{user.first_name or ''} {user.last_name or ''}".strip()
+                or f"User#{user.id}"
+            )
+            mention_link = f"[{full_name}](tg://user?id={user.id})"
+            await client.send_message(
+                LOGGER_GC,
+                (
+                    "🌸 *New User Started Bot*\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 *Name:* {mention_link}\n"
+                    f"🔖 *Username:* `{uname}`\n"
+                    f"🆔 *User ID:* `{user.id}`\n"
+                    f"🕐 *Time:* `{_now()}`\n"
+                    "━━━━━━━━━━━━━━━━━━━━"
+                ),
+                parse_mode=MD,
+            )
+        except Exception as e:
+            log.warning(f"Logger GC /start log failed: {e}")
 
     except Exception as e:
         log.exception(f"start_dm crashed uid={getattr(message.from_user, 'id', '?')}: {e}")
@@ -358,33 +372,85 @@ async def on_member_update(client, update: ChatMemberUpdated):
     try:
         old_s = getattr(update.old_chat_member, "status", None)
         new_s = getattr(update.new_chat_member, "status", None)
+
+        # ── Bot was added to / rejoined a group ───────────────────────────────
         if old_s in ("left", "kicked", None) and new_s in ("member", "administrator"):
             chat  = update.chat
             actor = update.from_user
+
             try:
                 await track_group(chat.id, getattr(chat, "title", ""))
             except Exception as e:
                 log.warning(f"track_group failed: {e}")
-            if LOG_CHANNEL_ID:
+
+            # ── Rich logger GC message ────────────────────────────────────────
+            try:
+                # Try to get a real invite link; fall back gracefully
                 try:
-                    inv = await client.export_chat_invite_link(chat.id)
+                    inv_link = await client.export_chat_invite_link(chat.id)
                 except Exception:
-                    inv = "N/A"
-                actor_str  = _esc(actor.first_name) if actor and actor.first_name else "Unknown"
-                chat_title = _esc(getattr(chat, "title", str(chat.id)))
+                    inv_link = None
+
+                # Try fetching member count
                 try:
-                    await client.send_message(
-                        LOG_CHANNEL_ID,
-                        (
-                            f"🌸 *Added to chat*\n"
-                            f"{chat_title}\n`{chat.id}`\n"
-                            f"By: [{actor_str}](tg://user?id={actor.id if actor else 0})\n"
-                            f"{inv}\n{_now()}"
-                        ),
-                        parse_mode=MD,
-                    )
-                except Exception as e:
-                    log.warning(f"Log channel update failed: {e}")
+                    full_chat   = await client.get_chat(chat.id)
+                    member_count = getattr(full_chat, "members_count", "?")
+                except Exception:
+                    member_count = "?"
+
+                chat_title  = _esc(getattr(chat, "title", str(chat.id)))
+                chat_type   = str(getattr(chat, "type", "group")).replace("ChatType.", "").lower()
+                actor_name  = _esc(actor.first_name) if actor and actor.first_name else "Unknown"
+                actor_uname = f"@{actor.username}" if actor and actor.username else "no username"
+                actor_id    = actor.id if actor else 0
+
+                link_line = f"🔗 *Link:* {inv_link}" if inv_link else "🔗 *Link:* `private / N/A`"
+
+                await client.send_message(
+                    LOGGER_GC,
+                    (
+                        "🔔 *Bot Added to Group*\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📛 *Group:* {chat_title}\n"
+                        f"🆔 *Group ID:* `{chat.id}`\n"
+                        f"📂 *Type:* `{chat_type}`\n"
+                        f"👥 *Members:* `{member_count}`\n"
+                        f"{link_line}\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"👤 *Added by:* [{actor_name}](tg://user?id={actor_id})\n"
+                        f"🔖 *Username:* `{actor_uname}`\n"
+                        f"🆔 *User ID:* `{actor_id}`\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🕐 *Time:* `{_now()}`"
+                    ),
+                    parse_mode=MD,
+                )
+            except Exception as e:
+                log.warning(f"Logger GC group-added log failed: {e}")
+
+        # ── Bot was removed from a group ──────────────────────────────────────
+        elif old_s in ("member", "administrator") and new_s in ("left", "kicked"):
+            chat  = update.chat
+            actor = update.from_user
+            try:
+                chat_title  = _esc(getattr(chat, "title", str(chat.id)))
+                actor_name  = _esc(actor.first_name) if actor and actor.first_name else "Unknown"
+                actor_id    = actor.id if actor else 0
+                await client.send_message(
+                    LOGGER_GC,
+                    (
+                        "🚫 *Bot Removed from Group*\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📛 *Group:* {chat_title}\n"
+                        f"🆔 *Group ID:* `{chat.id}`\n"
+                        f"👤 *Removed by:* [{actor_name}](tg://user?id={actor_id})\n"
+                        f"🕐 *Time:* `{_now()}`"
+                    ),
+                    parse_mode=MD,
+                )
+            except Exception as e:
+                log.warning(f"Logger GC group-removed log failed: {e}")
+
     except Exception as e:
         log.warning(f"on_member_update error: {e}")
 
