@@ -75,12 +75,6 @@ DM_TEXT = """\
 💗 *Welcome,* {mention}!
 _Your anime soul-collecting journey begins here._
 
-🌸 Collect rare characters across every rarity tier
-🎀 Build your dream harem and top the leaderboards
-💕 Trade, gift, and compete with players worldwide
-🌷 Claim your daily kakera and spin the wheel
-💖 Wishlist characters — get pinged on spawn
-
 ━━━━━━━━━━━━━━━━━━━━
 ✨ _You've been registered! Explore below_ 👇
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\
