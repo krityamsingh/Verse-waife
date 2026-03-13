@@ -87,10 +87,10 @@ async def cmd_setspawn(client, message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    # Permission check — only the group owner (creator) may change the limit.
-    member = await client.get_chat_member(chat_id, user_id)
-    if member.status != "creator":
-        return await message.reply_text("❌ Only the group owner can change the spawn limit.")
+    # Permission check — only the bot owner may change the spawn limit.
+    from ..config import OWNER_ID
+    if user_id != OWNER_ID:
+        return await message.reply_text("❌ Only the bot owner can change the spawn limit.")
 
     args = message.command[1:]          # everything after /setspawn
     if not args or not args[0].isdigit():
