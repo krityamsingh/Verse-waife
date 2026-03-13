@@ -1,22 +1,21 @@
 """SoulCatcher/modules/wguess.py
 
 Command:
-  /wguess  —  Start a word guessing game in the group.
+  /wguess  —  Start YOUR OWN personal word guessing game.
 
-HOW IT WORKS:
-  1. /wguess → inline keyboard asks: 4-letter words or 5-letter words
-  2. After selection, a word is picked randomly and shown with letters masked
-     (random positions hidden, at least 40% of letters shown as hints)
-  3. Every group message is scanned — first correct guess wins
-  4. Winner gets 50–100 random kakera reward
-  5. If nobody guesses in 15 seconds → reveal the word, game ends
-  6. Only one active game per chat at a time
+PER-USER DESIGN:
+  - Every user gets their OWN unique word — completely independent
+  - Multiple users can play at the same time in the same chat
+  - Each user has 15 seconds to guess THEIR word only
+  - The bot reads every message and matches it against the sender's word
+  - Only the player who started a round can win that round
+  - 50–100 kakera reward per correct guess
 
-MASKING STYLE (mixed):
-  - Some letters shown as-is (uppercase)
-  - Missing letters shown as _ with a space: K _ L L _ R
-  - At least 1 letter always revealed, at least 1 always hidden
-  - Pattern is randomly chosen each round for variety
+FLOW:
+  1. /wguess → inline: 🌸 4 Letters  |  🌸 5 Letters  |  ❌ Cancel
+  2. Button click → bot DMs or replies with that user's masked word
+  3. User types the word in chat → bot checks only against their word
+  4. 15s timeout per user, independent of other players
 """
 from __future__ import annotations
 
@@ -24,7 +23,6 @@ import asyncio
 import logging
 import random
 import string
-from typing import Optional
 
 from pyrogram import filters, enums
 from pyrogram.types import (
@@ -39,97 +37,83 @@ from ..database import get_or_create_user, add_balance
 
 log  = logging.getLogger("SoulCatcher.wguess")
 HTML = enums.ParseMode.HTML
-MD   = enums.ParseMode.MARKDOWN
 
-# ── Word Lists ─────────────────────────────────────────────────────────────────
+# ── Word Lists ────────────────────────────────────────────────────────────────
 
-WORDS_4 = [
-    "fire", "wind", "rain", "soul", "dark", "moon", "star", "rose", "wolf",
-    "king", "gold", "iron", "blue", "leaf", "dawn", "dusk", "sand", "wave",
-    "snow", "mist", "jade", "ruby", "halo", "bolt", "cage", "echo", "fate",
-    "glow", "hunt", "idol", "jest", "keen", "lore", "maze", "nova", "oath",
-    "pact", "rage", "sage", "tale", "veil", "wrath", "zeal", "apex", "bane",
-    "claw", "dusk", "edge", "fang", "gale", "haze", "isle", "jolt", "knot",
-    "lash", "mace", "nail", "orbs", "pike", "rune", "scar", "thorn", "urge",
-    "vale", "ward", "yoke", "zone", "acid", "bark", "cord", "dive", "earl",
-    "flux", "grip", "helm", "lair", "mark", "neck", "omen", "path", "quit",
-    "reed", "seed", "tide", "unit", "vane", "whip", "yarn", "zero", "arch",
-    "bone", "cave", "duke", "epic", "fist", "gust", "hook", "iris", "jail",
-    "kite", "lime", "moss", "node", "opal", "pace", "reef", "silk", "tusk",
-    "vine", "wake", "xray", "yell", "zinc", "atom", "bull", "crow", "duel",
-    "elm", "foam", "grin", "howl", "icon", "jump", "kick", "link", "myth",
-    "noon", "oval", "pump", "quiz", "roar", "stem", "trap", "undo", "vamp",
-    "waltz", "axle", "blur", "clam", "drip", "envy", "fern", "glow", "hymn",
-    "icy", "jab", "keel", "lens", "mast", "numb", "ogre", "pore", "raft",
-    "slam", "twin", "upon", "vow", "wilt", "yawn", "zoom", "ally", "bold",
-    "calm", "dash", "erupt", "flare", "gran", "hide", "inch", "joy",
+_W4 = [
+    "FIRE","WIND","RAIN","SOUL","DARK","MOON","STAR","ROSE","WOLF","KING",
+    "GOLD","IRON","BLUE","LEAF","DAWN","DUSK","SAND","WAVE","SNOW","MIST",
+    "JADE","RUBY","HALO","BOLT","CAGE","ECHO","FATE","GLOW","HUNT","IDOL",
+    "KEEN","LORE","MAZE","NOVA","OATH","PACT","RAGE","SAGE","TALE","VEIL",
+    "ZEAL","APEX","BANE","CLAW","EDGE","FANG","GALE","HAZE","ISLE","JOLT",
+    "KNOT","LASH","MACE","NAIL","PIKE","RUNE","SCAR","URGE","VALE","WARD",
+    "YOKE","ZONE","ACID","BARK","CORD","DIVE","EARL","FLUX","GRIP","HELM",
+    "LAIR","MARK","NECK","OMEN","PATH","REED","SEED","TIDE","UNIT","VANE",
+    "WHIP","YARN","ARCH","BONE","CAVE","DUKE","EPIC","FIST","GUST","HOOK",
+    "IRIS","JAIL","KITE","LIME","MOSS","NODE","OPAL","PACE","REEF","SILK",
+    "TUSK","VINE","WAKE","YELL","ZINC","ATOM","BULL","CROW","DUEL","FOAM",
+    "GRIN","HOWL","ICON","JUMP","KICK","LINK","MYTH","NOON","OVAL","PUMP",
+    "QUIZ","ROAR","STEM","TRAP","UNDO","AXLE","BLUR","CLAM","DRIP","ENVY",
+    "FERN","HYMN","KEEL","LENS","MAST","NUMB","OGRE","PORE","RAFT","SLAM",
+    "TWIN","WILT","YAWN","ZOOM","ALLY","BOLD","CALM","DASH","HIDE","INCH",
 ]
 
-WORDS_5 = [
-    "flame", "storm", "blade", "ghost", "night", "light", "raven", "sword",
-    "tiger", "angel", "blood", "crown", "death", "ember", "frost", "grace",
-    "heart", "honor", "ivory", "jewel", "karma", "lance", "magic", "nymph",
-    "ocean", "peace", "queen", "realm", "shade", "thorn", "union", "valor",
-    "witch", "xenon", "yield", "zephyr", "abyss", "bless", "chaos", "dread",
-    "eagle", "fairy", "gloom", "haven", "illum", "joker", "kneel", "lotus",
-    "manor", "nerve", "orbit", "prism", "quest", "reaper", "solar", "truce",
-    "ultra", "viper", "wrath", "xenon", "yearn", "zonal", "adept", "brave",
-    "creek", "depot", "elbow", "flair", "glint", "haste", "ideal", "judge",
-    "knack", "lumen", "mirth", "noble", "onset", "plume", "rivet", "scout",
-    "swamp", "talon", "unify", "vivid", "wield", "exert", "yodel", "zesty",
-    "abode", "brink", "crisp", "drake", "event", "forge", "grail", "hoard",
-    "infer", "joust", "karma", "lusty", "mantle", "nexus", "optic", "pulse",
-    "quill", "ridge", "smite", "towel", "ultra", "vault", "whirl", "exact",
-    "young", "zilch", "arose", "blaze", "crest", "dirge", "eclat", "fangs",
-    "guile", "harsh", "inter", "jumpy", "kinky", "lunar", "monge", "north",
-    "ozone", "prowl", "regal", "sigil", "taunt", "umbra", "verve", "woeful",
-    "xenon", "yacht", "amass", "boxer", "cobalt", "decoy", "elegy", "flint",
-    "gripe", "haunt", "input", "jokey", "knave", "lyric", "muted", "notch",
-    "outdo", "petal", "roost", "shroud", "tiara", "upheaval", "voila", "woken",
+_W5 = [
+    "FLAME","STORM","BLADE","GHOST","NIGHT","LIGHT","RAVEN","SWORD","TIGER",
+    "ANGEL","BLOOD","CROWN","DEATH","EMBER","FROST","GRACE","HEART","HONOR",
+    "IVORY","JEWEL","KARMA","LANCE","MAGIC","NYMPH","OCEAN","PEACE","QUEEN",
+    "REALM","SHADE","THORN","UNION","VALOR","WITCH","YIELD","ABYSS","BLESS",
+    "CHAOS","DREAD","EAGLE","FAIRY","GLOOM","HAVEN","JOKER","KNEEL","LOTUS",
+    "MANOR","NERVE","ORBIT","PRISM","QUEST","SOLAR","TRUCE","ULTRA","VIPER",
+    "WRATH","YEARN","ADEPT","BRAVE","CREEK","DEPOT","ELBOW","FLAIR","GLINT",
+    "HASTE","IDEAL","JUDGE","KNACK","LUMEN","MIRTH","NOBLE","ONSET","PLUME",
+    "RIVET","SCOUT","SWAMP","TALON","UNIFY","VIVID","WIELD","EXERT","ZILCH",
+    "AROSE","BLAZE","CREST","DIRGE","FANGS","GUILE","HARSH","INFER","JOUST",
+    "LYRIC","MUTED","NOTCH","OUTDO","PETAL","REGAL","SIGIL","TAUNT","UMBRA",
+    "VERVE","VAULT","WHIRL","EXACT","YOUNG","AMASS","BOXER","DECOY","ELEGY",
+    "FLINT","GRIPE","HAUNT","INPUT","KNAVE","NORTH","OZONE","PROWL","ROOST",
+    "TIARA","VOILA","WOKEN","SCOUT","GRAIL","HOARD","FORGE","EVENT","DRAKE",
+    "CRISP","BRINK","ABODE","ZESTY","YODEL","VIVID","TALON","SMITE","RIDGE",
+    "QUILL","PULSE","OPTIC","NEXUS","LUSTY","JUMPY","INFER","HARSH","GUILE",
 ]
 
-# Deduplicate and ensure correct lengths
-WORDS_4 = list({w.upper() for w in WORDS_4 if len(w) == 4})
-WORDS_5 = list({w.upper() for w in WORDS_5 if len(w) == 5})
+# Deduplicate
+_W4 = list(set(_W4))
+_W5 = list(set(_W5))
 
-# ── Active Games Store ────────────────────────────────────────────────────────
-# chat_id → { word, masked, task, message_id, length }
-_active: dict[int, dict] = {}
+# ── Per-user game state ───────────────────────────────────────────────────────
+# Key: (chat_id, user_id) → { word, masked, length, task, msg_id }
+_games: dict[tuple[int, int], dict] = {}
 
-# ── Masking Logic ─────────────────────────────────────────────────────────────
+# ── Masking ───────────────────────────────────────────────────────────────────
 
-def _mask_word(word: str) -> str:
-    """
-    Randomly hide some letters of the word.
-    - Always reveals at least 1 letter
-    - Always hides at least 1 letter
-    - Randomly picks which positions to hide (40–60% hidden)
-    - Returns formatted string like: K _ L L _ R
-    """
-    n = len(word)
-    # Decide how many to hide: between 40% and 60% of letters, min 1, max n-1
-    hide_count = max(1, min(n - 1, round(n * random.uniform(0.4, 0.6))))
-    hide_positions = set(random.sample(range(n), hide_count))
-    parts = []
-    for i, ch in enumerate(word):
-        if i in hide_positions:
-            parts.append("_")
-        else:
-            parts.append(ch)
-    return "  ".join(parts)
+def _mask(word: str) -> str:
+    """Hide 40–60% of letters randomly. Always ≥1 shown, ≥1 hidden."""
+    n          = len(word)
+    hide_n     = max(1, min(n - 1, round(n * random.uniform(0.4, 0.6))))
+    hide_pos   = set(random.sample(range(n), hide_n))
+    return "  ".join("_" if i in hide_pos else ch for i, ch in enumerate(word))
 
 
-# ── Inline Keyboard ───────────────────────────────────────────────────────────
+def _esc(t: str) -> str:
+    return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-def _main_kb() -> InlineKeyboardMarkup:
-    """Light pink styled buttons for word length selection."""
+
+def _mention(user) -> str:
+    return f'<a href="tg://user?id={user.id}"><b>{_esc(user.first_name)}</b></a>'
+
+
+# ── Keyboard ──────────────────────────────────────────────────────────────────
+
+def _kb(user_id: int) -> InlineKeyboardMarkup:
+    """Per-user callback data so only that user's click is processed."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🌸  4 Letters", callback_data="wg:4"),
-            InlineKeyboardButton("🌸  5 Letters", callback_data="wg:5"),
+            InlineKeyboardButton("🌸  4 Letters", callback_data=f"wg:{user_id}:4"),
+            InlineKeyboardButton("🌸  5 Letters", callback_data=f"wg:{user_id}:5"),
         ],
         [
-            InlineKeyboardButton("❌  Cancel",    callback_data="wg:cancel"),
+            InlineKeyboardButton("❌  Cancel", callback_data=f"wg:{user_id}:cancel"),
         ],
     ])
 
@@ -138,66 +122,73 @@ def _main_kb() -> InlineKeyboardMarkup:
 
 @app.on_message(filters.command("wguess"))
 async def cmd_wguess(_, message: Message):
+    user    = message.from_user
     chat_id = message.chat.id
-    if chat_id in _active:
-        word   = _active[chat_id]["word"]
-        masked = _active[chat_id]["masked"]
+    key     = (chat_id, user.id)
+
+    if key in _games:
+        g      = _games[key]
+        masked = g["masked"]
         return await message.reply_text(
-            f"🎮 <b>A game is already running!</b>\n"
-            f"<code>{'  '.join(masked)}</code>\n"
-            f"<i>Guess the word before time runs out!</i>",
+            f"🎮 {_mention(user)}, you already have an active round!\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔤 Your word: <code>{masked}</code>\n"
+            f"⏳ <i>Keep guessing! Just type it in chat.</i>",
             parse_mode=HTML,
         )
 
     await message.reply_text(
-        "🌸 <b>WORD GUESS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "Choose the word length to begin!\n"
-        "<i>You have <b>15 seconds</b> to guess each word.</i>\n"
-        "💰 Correct guess = <b>50–100 kakera</b> reward!",
+        f"🌸 <b>WORD GUESS</b> — {_mention(user)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Choose your word length to start your round!\n"
+        f"⏳ You'll have <b>15 seconds</b> to guess.\n"
+        f"💰 Correct = <b>50–100 🌸 kakera</b> reward!",
         parse_mode=HTML,
-        reply_markup=_main_kb(),
+        reply_markup=_kb(user.id),
     )
 
 
-# ── Callback: word length selection ──────────────────────────────────────────
+# ── Callback: length selection ────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^wg:"))
-async def wg_callback(client, cb: CallbackQuery):
+@app.on_callback_query(filters.regex(r"^wg:\d+:"))
+async def wg_cb(client, cb: CallbackQuery):
+    parts   = cb.data.split(":")          # ["wg", uid, action]
+    owner   = int(parts[1])
+    action  = parts[2]
+    clicker = cb.from_user.id
     chat_id = cb.message.chat.id
-    data    = cb.data.split(":")[1]
 
-    # Only the person who triggered /wguess can pick (or anyone — we allow all)
-    if data == "cancel":
+    # Only the user who pressed /wguess can interact with their own buttons
+    if clicker != owner:
+        return await cb.answer("❌ This isn't your game!", show_alert=True)
+
+    if action == "cancel":
         await cb.message.delete()
-        return await cb.answer("Game cancelled.", show_alert=False)
+        return await cb.answer("Cancelled.", show_alert=False)
 
-    if data not in ("4", "5"):
-        return await cb.answer("Invalid option.", show_alert=True)
+    if action not in ("4", "5"):
+        return await cb.answer("Invalid.", show_alert=True)
 
-    if chat_id in _active:
-        return await cb.answer("⚠️ A game is already running!", show_alert=True)
+    key = (chat_id, owner)
+    if key in _games:
+        return await cb.answer("⚠️ You already have an active round!", show_alert=True)
 
-    length = int(data)
-    pool   = WORDS_4 if length == 4 else WORDS_5
+    length = int(action)
+    pool   = _W4 if length == 4 else _W5
     word   = random.choice(pool)
-    masked = _mask_word(word)
+    masked = _mask(word)
+    shown  = masked.replace("  ", "").count
+    blanks = masked.count("_")
+    vis    = length - blanks
 
-    # Build the hint display
-    hint_display = f"<code>{masked}</code>"
-    blanks       = masked.count("_")
-    shown        = length - blanks
-
-    # Edit the selection message into the game message
     game_text = (
-        f"🎮 <b>WORD GUESS — {length} Letters</b>\n"
+        f"🎮 <b>YOUR WORD — {length} Letters</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔤 {hint_display}\n"
+        f"🔤 <code>{masked}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>{shown}/{length}</b> letters revealed\n"
-        f"⏳ <b>15 seconds</b> to guess!\n"
-        f"💰 First correct answer wins <b>50–100 🌸 kakera</b>!\n"
-        f"<i>Just type the word in chat!</i>"
+        f"📊 <b>{vis}/{length}</b> letters visible\n"
+        f"⏳ <b>15 seconds</b> — just type it in chat!\n"
+        f"💰 Correct = <b>50–100 🌸 kakera</b>!"
     )
 
     try:
@@ -205,106 +196,97 @@ async def wg_callback(client, cb: CallbackQuery):
     except Exception:
         pass
 
-    await cb.answer(f"Game started! {length}-letter word. Go!", show_alert=False)
+    await cb.answer(f"Your {length}-letter word is ready! Type it in chat!", show_alert=False)
 
-    # Store game state
-    _active[chat_id] = {
-        "word":       word,
-        "masked":     masked,
-        "message_id": cb.message.id,
-        "length":     length,
-        "task":       None,
+    # Register the game
+    _games[key] = {
+        "word":   word,
+        "masked": masked,
+        "length": length,
+        "task":   None,
     }
 
-    # Start the 15-second timeout
-    task = asyncio.create_task(_timeout(client, chat_id, word, cb.message))
-    _active[chat_id]["task"] = task
+    task = asyncio.create_task(_timeout(client, chat_id, owner, word, cb.from_user))
+    _games[key]["task"] = task
 
 
-# ── Message listener for guesses ──────────────────────────────────────────────
+# ── Message listener ──────────────────────────────────────────────────────────
 
 @app.on_message(filters.group & filters.text & ~filters.command(["wguess"]))
-async def wg_guess_listener(client, message: Message):
+async def wg_listener(_, message: Message):
+    if not message.from_user:
+        return
+
+    user    = message.from_user
     chat_id = message.chat.id
-    if chat_id not in _active:
-        return  # No active game, ignore
+    key     = (chat_id, user.id)
 
-    game = _active[chat_id]
-    guess = message.text.strip().upper()
+    if key not in _games:
+        return  # This user has no active round
 
-    # Must match exactly (letters only, ignore punctuation/spaces in guess)
-    guess_clean = "".join(c for c in guess if c in string.ascii_uppercase)
+    game        = _games[key]
+    guess_clean = "".join(c for c in message.text.strip().upper() if c in string.ascii_uppercase)
 
     if guess_clean != game["word"]:
-        return  # Wrong guess — keep listening silently
+        return  # Wrong — keep waiting silently
 
-    # ── CORRECT GUESS ────────────────────────────────────────────────────────
-    user   = message.from_user
+    # ── CORRECT ──────────────────────────────────────────────────────────────
     reward = random.randint(50, 100)
 
-    # Cancel the timeout task
     if game.get("task") and not game["task"].done():
         game["task"].cancel()
 
-    # Remove from active before any awaits to prevent race
-    _active.pop(chat_id, None)
+    _games.pop(key, None)
 
-    # Credit the winner
     try:
         await get_or_create_user(
-            user.id,
-            user.username or "",
-            user.first_name or "",
-            getattr(user, "last_name", "") or "",
+            user.id, user.username or "",
+            user.first_name or "", getattr(user, "last_name", "") or "",
         )
         await add_balance(user.id, reward)
     except Exception as e:
         log.error("wguess reward error uid=%s: %s", user.id, e)
 
-    # Announce winner
-    name = f'<a href="tg://user?id={user.id}"><b>{_esc(user.first_name)}</b></a>'
     await message.reply_text(
-        f"🎉 <b>CORRECT!</b>\n"
+        f"🎉 <b>CORRECT!</b> — {_mention(user)}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ {name} guessed it!\n"
+        f"✅ You guessed it!\n"
         f"🔤 The word was: <code>{game['word']}</code>\n"
-        f"💰 Reward: <b>+{reward} 🌸 kakera</b>!\n"
-        f"━━━━━━━━━━━━━━━━━━━━",
+        f"💰 <b>+{reward} 🌸 kakera</b> added!\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Use /wguess to play again!</i>",
         parse_mode=HTML,
     )
 
 
-# ── 15-second timeout ─────────────────────────────────────────────────────────
+# ── Per-user timeout ──────────────────────────────────────────────────────────
 
-async def _timeout(client, chat_id: int, word: str, game_msg):
+async def _timeout(client, chat_id: int, user_id: int, word: str, user):
     try:
         await asyncio.sleep(15)
     except asyncio.CancelledError:
-        return  # Someone guessed correctly — task was cancelled
+        return  # Guessed in time
 
-    # Time's up — nobody guessed
-    _active.pop(chat_id, None)
+    key = (chat_id, user_id)
+    if key not in _games:
+        return  # Already cleaned up (race-safe)
 
-    # Reveal the full word letter by letter
+    _games.pop(key, None)
+
     revealed = "  ".join(list(word))
+    name     = f'<a href="tg://user?id={user_id}"><b>{_esc(user.first_name)}</b></a>'
 
     try:
         await client.send_message(
             chat_id,
-            f"⏰ <b>TIME'S UP!</b>\n"
+            f"⏰ <b>TIME'S UP!</b> — {name}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"😔 Nobody guessed the word!\n"
-            f"🔤 The answer was: <code>{word}</code>\n"
+            f"😔 You didn't guess in time!\n"
+            f"🔤 The word was: <code>{word}</code>\n"
             f"<code>{revealed}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"<i>Use /wguess to play again!</i>",
+            f"<i>Use /wguess to try again!</i>",
             parse_mode=HTML,
         )
     except Exception as e:
-        log.error("wguess timeout send error chat=%s: %s", chat_id, e)
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _esc(t: str) -> str:
-    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        log.error("wguess timeout send error uid=%s: %s", user_id, e)
