@@ -234,7 +234,7 @@ async def claim_cb(client, cb):
     if spawn_id == "PENDING":
         return await cb.answer("⏳ Registering spawn, try again!", show_alert=True)
 
-    await get_or_create_user(user.id, user.username or "", user.first_name or "")
+    await get_or_create_user(user.id, user.username or "", user.first_name or "", getattr(user, "last_name", "") or "")
     spawn_doc = await claim_spawn(spawn_id, user.id)
     if not spawn_doc:
         return await cb.answer("💨 Already claimed!", show_alert=True)
