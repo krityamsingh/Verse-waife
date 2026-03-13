@@ -22,6 +22,13 @@ COLLECTIONS:
   sequences          auto-increment char IDs
   top_groups         tracked group IDs
 ═══════════════════════════════════════════════════════════════════════
+
+FIXES APPLIED:
+  [FIX-IMPORT-1] Added top_richest(limit) — was imported by profile.py
+                 but completely missing from this file, causing an
+                 ImportError crash at bot startup.
+  [FIX-IMPORT-2] Added top_collectors(limit) — used by the new
+                 /topcollector command in profile.py.
 """
 from __future__ import annotations
 import uuid, logging
@@ -259,7 +266,6 @@ async def unclaim_spawn(spawn_id):
     )
 
 
-
 # ── DROP LOGS ─────────────────────────────────────────────────────────────────
 
 async def check_and_record_drop(chat_id, rarity_name):
@@ -435,3 +441,59 @@ async def count_user_rank(user_id) -> int:
     ]
     res = await _col("user_characters").aggregate(pipeline).to_list(1)
     return (res[0]["ahead"] if res else 0) + 1
+
+
+# ── LEADERBOARDS ──────────────────────────────────────────────────────────────
+
+async def top_richest(limit: int = 10) -> list:
+    """
+    [FIX-IMPORT-1] Returns the top `limit` users sorted by kakera balance
+    descending. Each document is a full user record from the users collection.
+
+    Was imported by profile.py but was completely absent from this file,
+    causing an ImportError crash at bot startup the moment the module loaded.
+    """
+    return await _col("users").find(
+        {"balance": {"$gt": 0}}
+    ).sort("balance", -1).limit(limit).to_list(limit)
+
+
+async def top_collectors(limit: int = 10) -> list:
+    """
+    [FIX-IMPORT-2] Returns the top `limit` users by total characters owned,
+    joining user_characters counts back to the users collection so we have
+    display names available.
+
+    Used by the new /topcollector command in profile.py.
+
+    Returns a list of dicts, each with:
+      user_id      int
+      char_count   int
+      first_name   str  (from users collection, may be empty)
+      username     str  (from users collection, may be empty)
+    """
+    pipeline = [
+        # Count characters per user
+        {"$group": {"_id": "$user_id", "char_count": {"$sum": 1}}},
+        # Sort by most characters first
+        {"$sort": {"char_count": -1}},
+        {"$limit": limit},
+        # Join display info from users collection
+        {"$lookup": {
+            "from": "users",
+            "localField": "_id",
+            "foreignField": "user_id",
+            "as": "user_info",
+        }},
+        # Flatten the joined array (may be empty if user doc missing)
+        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+        # Project only the fields we need
+        {"$project": {
+            "_id": 0,
+            "user_id": "$_id",
+            "char_count": 1,
+            "first_name": {"$ifNull": ["$user_info.first_name", ""]},
+            "username":   {"$ifNull": ["$user_info.username",   ""]},
+        }},
+    ]
+    return await _col("user_characters").aggregate(pipeline).to_list(limit)
