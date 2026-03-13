@@ -1,12 +1,20 @@
 """SoulCatcher/modules/profile.py
 
 Commands:
-  /status       — full stats card
-  /bal          — balance card
-  /profile      — profile card with rarity breakdown
-  /richest      — top 10 richest
-  /rarityinfo   — rarity table
-  /event        — current game mode
+  /status         — full stats card
+  /bal            — balance card
+  /profile        — profile card with rarity breakdown
+  /richest        — top 10 richest players by kakera
+  /topcollector   — top 10 collectors by total characters owned  [NEW]
+  /rarityinfo     — rarity table
+  /event          — current game mode
+
+FIXES APPLIED:
+  [FIX-IMPORT-1] top_richest is now properly defined in database.py.
+                 Previously this import caused an ImportError at startup
+                 which prevented the entire bot from loading.
+  [FIX-IMPORT-2] Added top_collectors import for the new /topcollector
+                 command.
 
 Note: /rank /top /toprarity have been removed from this file.
       They live in tops.py (/ktop /ctop) and are no longer duplicated here.
@@ -24,8 +32,9 @@ from ..database import (
     _col,
     get_or_create_user, get_user,
     get_harem, get_harem_rarity_counts,
-    count_user_rank, top_richest,
-    count_characters,
+    count_user_rank, count_characters,
+    top_richest,       # [FIX-IMPORT-1] now exists in database.py
+    top_collectors,    # [FIX-IMPORT-2] new function for /topcollector
 )
 from ..rarity import get_rarity, get_rarity_order, RARITIES
 
@@ -336,6 +345,61 @@ async def cmd_richest(_, message: Message):
     except Exception as e:
         log.error("/richest error: %s", e)
         await wait.edit_text("❌ <b>Failed to load leaderboard.</b>", parse_mode=HTML)
+
+
+# ── /topcollector ──────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("topcollector"))
+async def cmd_topcollector(_, message: Message):
+    """
+    Show the top 10 users with the most characters in their harem.
+
+    Uses the top_collectors() aggregation pipeline in database.py which
+    groups user_characters by user_id, counts them, joins display info
+    from the users collection, and returns sorted results.
+    """
+    wait = await message.reply_text("⏳ <i>Loading top collectors…</i>", parse_mode=HTML)
+    try:
+        results = await top_collectors(10)
+        if not results:
+            return await wait.edit_text(
+                "📊 <i>No collectors found yet. Start claiming characters!</i>",
+                parse_mode=HTML,
+            )
+
+        lines = [
+            f"🎴 <b>TOP 10 COLLECTORS</b>\n"
+            f"<code>{_DIV}</code>\n"
+        ]
+
+        for i, r in enumerate(results):
+            uid        = r.get("user_id", 0)
+            char_count = r.get("char_count", 0)
+            name       = _esc(
+                r.get("first_name") or r.get("username") or f"User {uid}"
+            )
+            medal = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
+
+            if i == 0:
+                # First place gets an expanded block
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\"><b>{name}</b></a>\n"
+                    f"  🎴 <b><code>{_fmt(char_count)}</code></b> characters"
+                )
+            else:
+                lines.append(
+                    f"{medal} <a href=\"tg://user?id={uid}\">{name}</a>  "
+                    f"<code>{_fmt(char_count)}</code> 🎴"
+                )
+
+        lines.append(f"\n<code>{_DIV}</code>")
+        await wait.edit_text(
+            "\n".join(lines), parse_mode=HTML, disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        log.error("/topcollector error: %s", e)
+        await wait.edit_text("❌ <b>Failed to load collector leaderboard.</b>", parse_mode=HTML)
 
 
 # ── /rarityinfo ────────────────────────────────────────────────────────────────
