@@ -21,7 +21,7 @@ from ..database import (
     count_user_rank, count_characters,
 )
 from ..rarity import get_rarity, get_rarity_order
-from .profile_helpers import HTML, DIV, SDIV, fmt, bar, wealth, esc
+from ._profile_helpers import HTML, DIV, SDIV, fmt, bar, wealth, esc
 
 log = logging.getLogger("SoulCatcher.profile")
 
