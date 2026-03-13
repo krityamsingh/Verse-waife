@@ -47,20 +47,23 @@ def _col(name):     return _db[name]
 
 async def _create_indexes():
     await _col("users").create_index("user_id", unique=True)
-    await _col("users").create_index("balance")
+    # compound index so top_richest() can sort+filter in one scan
+    await _col("users").create_index([("is_banned", 1), ("balance", -1)])
     await _col("characters").create_index("id", unique=True)
     await _col("characters").create_index("rarity")
-    await _col("characters").create_index([("name","text"),("anime","text")])
-    await _col("user_characters").create_index([("user_id",1),("instance_id",1)])
-    await _col("user_characters").create_index([("user_id",1),("rarity",1)])
+    await _col("characters").create_index([("name", "text"), ("anime", "text")])
+    await _col("user_characters").create_index([("user_id", 1), ("instance_id", 1)])
+    await _col("user_characters").create_index([("user_id", 1), ("rarity", 1)])
+    # index used by top_collectors() step-1 aggregation
+    await _col("user_characters").create_index([("user_id", 1), ("char_id", 1)])
     await _col("market_listings").create_index("listing_id", unique=True)
-    await _col("market_listings").create_index([("status",1),("rarity",1)])
-    await _col("wishlists").create_index([("user_id",1),("char_id",1)])
+    await _col("market_listings").create_index([("status", 1), ("rarity", 1)])
+    await _col("wishlists").create_index([("user_id", 1), ("char_id", 1)])
     await _col("active_spawns").create_index("spawn_id", unique=True)
     await _col("active_spawns").create_index("chat_id")
     await _col("group_settings").create_index("chat_id", unique=True)
     await _col("top_groups").create_index("group_id", unique=True)
-    await _col("drop_logs").create_index([("chat_id",1),("rarity",1),("date",1)])
+    await _col("drop_logs").create_index([("chat_id", 1), ("rarity", 1), ("date", 1)])
     await _col("global_bans").create_index("user_id", unique=True)
     await _col("global_mutes").create_index("user_id", unique=True)
     log.info("✅ Indexes ready")
@@ -132,7 +135,7 @@ async def count_all_users():
 
 async def next_char_id():
     docs = await _col("characters").find({"id": {"$exists": True}}, {"id": 1}).to_list(None)
-    existing = [int(c["id"]) for c in docs if str(c.get("id","")).isdigit()]
+    existing = [int(c["id"]) for c in docs if str(c.get("id", "")).isdigit()]
     seq  = await _col("sequences").find_one({"_id": "character_id"})
     nxt  = max(max(existing, default=0), seq["v"] if seq else 0) + 1
     await _col("sequences").update_one({"_id": "character_id"}, {"$set": {"v": nxt}}, upsert=True)
@@ -152,8 +155,6 @@ async def count_characters(enabled=True):
 
 async def get_random_character(rarity_name):
     from .rarity import is_video_only
-    # For video_only rarities (e.g. Verse/cartoon), ONLY pick characters
-    # that actually have a video_url — images would silently break the spawn.
     match_filter: dict = {"rarity": rarity_name, "enabled": True}
     if is_video_only(rarity_name):
         match_filter["video_url"] = {"$nin": [None, ""]}
@@ -176,8 +177,8 @@ async def add_to_harem(user_id, char):
     await _col("user_characters").insert_one({
         "instance_id": iid, "user_id": user_id,
         "char_id": char["id"], "name": char["name"],
-        "anime": char.get("anime","Unknown"), "rarity": char["rarity"],
-        "img_url": char.get("img_url",""), "video_url": char.get("video_url",""),
+        "anime": char.get("anime", "Unknown"), "rarity": char["rarity"],
+        "img_url": char.get("img_url", ""), "video_url": char.get("video_url", ""),
         "is_favorite": False, "note": "", "obtained_at": datetime.utcnow(),
     })
     await _col("users").update_one({"user_id": user_id}, {"$inc": {"total_claimed": 1}}, upsert=True)
@@ -185,15 +186,15 @@ async def add_to_harem(user_id, char):
 
 async def get_harem(user_id, page=1, per_page=10, sort_by="rarity"):
     SORT_MAP = {
-        "rarity": [("rarity",1),("name",1)],
-        "name":   [("name",1)],
-        "anime":  [("anime",1)],
-        "recent": [("obtained_at",-1)],
+        "rarity": [("rarity", 1), ("name", 1)],
+        "name":   [("name", 1)],
+        "anime":  [("anime", 1)],
+        "recent": [("obtained_at", -1)],
     }
     col   = _col("user_characters")
     total = await col.count_documents({"user_id": user_id})
-    skip  = (page-1)*per_page
-    chars = await col.find({"user_id": user_id}).sort(SORT_MAP.get(sort_by,SORT_MAP["rarity"])).skip(skip).limit(per_page).to_list(per_page)
+    skip  = (page - 1) * per_page
+    chars = await col.find({"user_id": user_id}).sort(SORT_MAP.get(sort_by, SORT_MAP["rarity"])).skip(skip).limit(per_page).to_list(per_page)
     return chars, total
 
 async def get_harem_char(user_id, instance_id):
@@ -257,7 +258,6 @@ async def unclaim_spawn(spawn_id):
         {"spawn_id": spawn_id},
         {"$set": {"claimed": False, "claimed_by": None, "claimed_at": None}}
     )
-
 
 
 # ── DROP LOGS ─────────────────────────────────────────────────────────────────
@@ -366,101 +366,145 @@ async def atomic_buy_listing(listing_id, buyer_id):
 
 # ── MARRIAGES ─────────────────────────────────────────────────────────────────
 
-async def get_marriage(uid):  return await _col("marriages").find_one({"$or":[{"user1":uid},{"user2":uid}]})
-async def create_marriage(u1,u2): await _col("marriages").insert_one({"user1":u1,"user2":u2,"married_at":datetime.utcnow()})
+async def get_marriage(uid):  return await _col("marriages").find_one({"$or": [{"user1": uid}, {"user2": uid}]})
+async def create_marriage(u1, u2): await _col("marriages").insert_one({"user1": u1, "user2": u2, "married_at": datetime.utcnow()})
 async def divorce(uid):
-    res = await _col("marriages").delete_one({"$or":[{"user1":uid},{"user2":uid}]})
-    return res.deleted_count>0
+    res = await _col("marriages").delete_one({"$or": [{"user1": uid}, {"user2": uid}]})
+    return res.deleted_count > 0
 
 
 # ── GLOBAL BAN / MUTE ─────────────────────────────────────────────────────────
 
 async def add_to_global_ban(uid, reason, banned_by):
-    await _col("global_bans").update_one({"user_id":uid},
-        {"$set":{"user_id":uid,"reason":reason,"banned_by":banned_by,"banned_at":datetime.utcnow()}},upsert=True)
+    await _col("global_bans").update_one({"user_id": uid},
+        {"$set": {"user_id": uid, "reason": reason, "banned_by": banned_by, "banned_at": datetime.utcnow()}}, upsert=True)
 
-async def remove_from_global_ban(uid):  await _col("global_bans").delete_one({"user_id":uid})
-async def is_user_globally_banned(uid): return bool(await _col("global_bans").find_one({"user_id":uid}))
-async def fetch_globally_banned_users():return await _col("global_bans").find({}).to_list(None)
+async def remove_from_global_ban(uid):  await _col("global_bans").delete_one({"user_id": uid})
+async def is_user_globally_banned(uid): return bool(await _col("global_bans").find_one({"user_id": uid}))
+async def fetch_globally_banned_users(): return await _col("global_bans").find({}).to_list(None)
 
 async def add_to_global_mute(uid, reason, muted_by):
-    await _col("global_mutes").update_one({"user_id":uid},
-        {"$set":{"user_id":uid,"reason":reason,"muted_by":muted_by,"muted_at":datetime.utcnow()}},upsert=True)
+    await _col("global_mutes").update_one({"user_id": uid},
+        {"$set": {"user_id": uid, "reason": reason, "muted_by": muted_by, "muted_at": datetime.utcnow()}}, upsert=True)
 
-async def remove_from_global_mute(uid):  await _col("global_mutes").delete_one({"user_id":uid})
-async def is_user_globally_muted(uid):   return bool(await _col("global_mutes").find_one({"user_id":uid}))
+async def remove_from_global_mute(uid):  await _col("global_mutes").delete_one({"user_id": uid})
+async def is_user_globally_muted(uid):   return bool(await _col("global_mutes").find_one({"user_id": uid}))
 async def fetch_globally_muted_users():  return await _col("global_mutes").find({}).to_list(None)
 
 async def get_all_chats():
     uids   = await get_all_user_ids()
     grpids = await get_all_tracked_group_ids()
-    return list(set(uids+grpids))
+    return list(set(uids + grpids))
 
 
 # ── SUDO / DEV / UPLOADER ─────────────────────────────────────────────────────
 
-async def add_sudo(uid):    await _col("sudo_users").update_one({"user_id":uid},{"$set":{"user_id":uid}},upsert=True)
-async def remove_sudo(uid): await _col("sudo_users").delete_one({"user_id":uid})
+async def add_sudo(uid):    await _col("sudo_users").update_one({"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True)
+async def remove_sudo(uid): await _col("sudo_users").delete_one({"user_id": uid})
 async def get_sudo_ids():
     docs = await _col("sudo_users").find({}).to_list(None); return [d["user_id"] for d in docs]
-async def is_sudo(uid):     return bool(await _col("sudo_users").find_one({"user_id":uid}))
+async def is_sudo(uid):     return bool(await _col("sudo_users").find_one({"user_id": uid}))
 
-async def add_dev(uid):    await _col("dev_users").update_one({"user_id":uid},{"$set":{"user_id":uid}},upsert=True)
-async def remove_dev(uid): await _col("dev_users").delete_one({"user_id":uid})
+async def add_dev(uid):    await _col("dev_users").update_one({"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True)
+async def remove_dev(uid): await _col("dev_users").delete_one({"user_id": uid})
 async def get_dev_ids():
     docs = await _col("dev_users").find({}).to_list(None); return [d["user_id"] for d in docs]
-async def is_dev(uid):     return bool(await _col("dev_users").find_one({"user_id":uid}))
+async def is_dev(uid):     return bool(await _col("dev_users").find_one({"user_id": uid}))
 
 async def add_uploader(uid):
-    await _col("uploaders").update_one({"user_id":uid},
-        {"$set":{"user_id":uid,"added_at":datetime.utcnow()}},upsert=True)
-async def remove_uploader(uid): await _col("uploaders").delete_one({"user_id":uid})
+    await _col("uploaders").update_one({"user_id": uid},
+        {"$set": {"user_id": uid, "added_at": datetime.utcnow()}}, upsert=True)
+async def remove_uploader(uid): await _col("uploaders").delete_one({"user_id": uid})
 async def get_uploader_ids():
     docs = await _col("uploaders").find({}).to_list(None); return [d["user_id"] for d in docs]
-async def is_uploader(uid): return bool(await _col("uploaders").find_one({"user_id":uid}))
+async def is_uploader(uid): return bool(await _col("uploaders").find_one({"user_id": uid}))
 
 
-# ── LEADERBOARDS ─────────────────────────────────────────────────────────────
+# ── LEADERBOARDS ──────────────────────────────────────────────────────────────
 
-async def top_collectors(limit=10):
+async def top_richest(limit: int = 10, exclude_banned: bool = False) -> list[dict]:
     """
-    Top collectors by total characters owned.
-    Returns list of dicts: {user_id, total, unique, first_name, username}
-    
-    Strategy:
-      1. Aggregate user_characters for totals
-      2. Batch-fetch names from users in ONE query (no per-user roundtrips)
-      3. Batch-compute unique counts in ONE aggregation
-    Compatible with any MongoDB version (no $lookup pipeline sub-queries).
+    Top kakera holders sorted by balance descending.
+
+    Called by tops.py → cmd_ktop().
+    Returns list of dicts: {user_id, balance, first_name, last_name, username}
+
+    exclude_banned=True filters out users where is_banned == True.
+    The compound index on (is_banned, balance) makes this a single efficient scan.
     """
-    # Step 1: total chars per user, sorted, top N
+    filt: dict = {"balance": {"$gt": 0}}
+    if exclude_banned:
+        filt["is_banned"] = {"$ne": True}
+
+    return await (
+        _col("users")
+        .find(
+            filt,
+            {"_id": 0, "user_id": 1, "balance": 1,
+             "first_name": 1, "last_name": 1, "username": 1},
+        )
+        .sort("balance", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+
+async def top_collectors(limit: int = 10, exclude_banned: bool = False) -> list[dict]:
+    """
+    Top collectors by total characters owned, unique count as tiebreaker.
+
+    Called by tops.py → cmd_ctop().
+    Returns list of dicts: {user_id, total, unique, first_name, last_name, username}
+
+    Strategy (3 queries, zero per-user roundtrips):
+      1. Aggregate user_characters for total count — fetch limit*3 so banned
+         users can be dropped while still returning a full top-<limit> list.
+      2. Batch-fetch names from users in ONE find() — also applies ban filter here.
+      3. Batch-compute unique char_id counts in ONE aggregation.
+      4. Merge, re-sort by (total desc, unique desc), cap to limit.
+    """
+    fetch = limit * 3   # headroom so ban-filtering doesn't shrink the list below limit
+
+    # Step 1 — total characters per user, rough top-N (pre-ban-filter)
     total_rows = await _col("user_characters").aggregate([
         {"$group": {"_id": "$user_id", "total": {"$sum": 1}}},
         {"$sort":  {"total": -1}},
-        {"$limit": limit},
-    ]).to_list(limit)
+        {"$limit": fetch},
+    ]).to_list(fetch)
 
     if not total_rows:
         return []
 
     uid_list = [r["_id"] for r in total_rows]
 
-    # Step 2: batch name lookup — single find() on users
+    # Step 2 — batch name lookup; ban filter applied here so banned UIDs are
+    #          absent from name_map and silently dropped in step 4.
+    user_filt: dict = {"user_id": {"$in": uid_list}}
+    if exclude_banned:
+        user_filt["is_banned"] = {"$ne": True}
+
     user_docs = await _col("users").find(
-        {"user_id": {"$in": uid_list}},
-        {"_id": 0, "user_id": 1, "first_name": 1, "username": 1},
-    ).to_list(limit)
+        user_filt,
+        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "username": 1},
+    ).to_list(fetch)
     name_map = {d["user_id"]: d for d in user_docs}
 
-    # Step 3: batch unique char_id count — single aggregation
+    # Drop banned users and cap to limit before running step 3
+    total_rows = [r for r in total_rows if r["_id"] in name_map][:limit]
+    uid_list   = [r["_id"] for r in total_rows]
+
+    if not uid_list:
+        return []
+
+    # Step 3 — unique char_id count for the surviving uid_list only
     uniq_rows = await _col("user_characters").aggregate([
-        {"$match": {"user_id": {"$in": uid_list}}},
-        {"$group": {"_id": {"uid": "$user_id", "cid": "$char_id"}}},
-        {"$group": {"_id": "$_id.uid", "unique": {"$sum": 1}}},
+        {"$match":  {"user_id": {"$in": uid_list}}},
+        {"$group":  {"_id": {"uid": "$user_id", "cid": "$char_id"}}},
+        {"$group":  {"_id": "$_id.uid", "unique": {"$sum": 1}}},
     ]).to_list(limit)
     uniq_map = {r["_id"]: r["unique"] for r in uniq_rows}
 
-    # Step 4: merge into result list, preserving sort order
+    # Step 4 — merge into result dicts, sort by total then unique descending
     results = []
     for row in total_rows:
         uid  = row["_id"]
@@ -470,15 +514,18 @@ async def top_collectors(limit=10):
             "total":      row["total"],
             "unique":     uniq_map.get(uid, 0),
             "first_name": info.get("first_name") or "",
+            "last_name":  info.get("last_name")  or "",
             "username":   info.get("username")   or "",
         })
+
+    results.sort(key=lambda x: (x["total"], x["unique"]), reverse=True)
     return results
 
 
-async def top_by_rarity(rarity_name, limit=10):
+async def top_by_rarity(rarity_name: str, limit: int = 10) -> list[dict]:
     """
     Top collectors of a specific rarity.
-    Returns list of dicts: {user_id, count, first_name, username}
+    Returns list of dicts: {user_id, count, first_name, last_name, username}
     """
     count_rows = await _col("user_characters").aggregate([
         {"$match": {"rarity": rarity_name}},
@@ -493,7 +540,7 @@ async def top_by_rarity(rarity_name, limit=10):
     uid_list  = [r["_id"] for r in count_rows]
     user_docs = await _col("users").find(
         {"user_id": {"$in": uid_list}},
-        {"_id": 0, "user_id": 1, "first_name": 1, "username": 1},
+        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "username": 1},
     ).to_list(limit)
     name_map = {d["user_id"]: d for d in user_docs}
 
@@ -505,31 +552,22 @@ async def top_by_rarity(rarity_name, limit=10):
             "user_id":    uid,
             "count":      row["count"],
             "first_name": info.get("first_name") or "",
+            "last_name":  info.get("last_name")  or "",
             "username":   info.get("username")   or "",
         })
     return results
 
 
-async def top_richest(limit=10):
+async def count_user_rank(user_id) -> int:
     """
-    Top kakera holders sorted by balance descending.
-    Returns list of dicts: {user_id, balance, first_name, username}
-    Reads ONLY from users — no join needed.
+    Returns the collector rank of a user (1 = most characters).
+    Used by profile badges. Efficient: counts only users with MORE chars than this user.
     """
-    return await (
-        _col("users")
-        .find(
-            {"balance": {"$gt": 0}},
-            {"_id": 0, "user_id": 1, "balance": 1, "first_name": 1, "username": 1},
-        )
-        .sort("balance", -1)
-        .limit(limit)
-        .to_list(limit)
-    )
-
-
-async def count_user_rank(user_id):
-    cnt      = await _col("user_characters").count_documents({"user_id":user_id})
-    pipeline = [{"$group":{"_id":"$user_id","count":{"$sum":1}}},{"$match":{"count":{"$gt":cnt}}}]
-    rows     = await _col("user_characters").aggregate(pipeline).to_list(None)
-    return len(rows)+1
+    cnt      = await _col("user_characters").count_documents({"user_id": user_id})
+    pipeline = [
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": cnt}}},
+        {"$count": "ahead"},
+    ]
+    res = await _col("user_characters").aggregate(pipeline).to_list(1)
+    return (res[0]["ahead"] if res else 0) + 1
