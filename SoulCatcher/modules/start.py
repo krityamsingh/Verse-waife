@@ -1,57 +1,43 @@
-"""SoulCatcher/modules/start_colored.py
+"""SoulCatcher/modules/start.py
 
-Rewritten in aiogram 3.x to use Bot API 9.4 colored inline buttons.
+Pyrogram 2.x  +  Bot API 9.4 colored inline buttons via raw TL invoke.
 
-Bot API 9.4 button style options (ONLY these 3 exist — no pink):
-  "danger"  → red   (closest to pink/rose — best for SoulCatcher theme)
-  "success" → green
-  "primary" → blue
+Colored buttons (Bot API 9.4):
+  style="danger"  → red / rose  ← used for SoulCatcher pink theme
+  style="success" → green
+  style="primary" → blue
 
-Install:
-  pip install aiogram>=3.7.0
-
-Pyrogram does NOT support the `style` field yet.
-Use aiogram for colored buttons.
+Pyrogram's high-level InlineKeyboardButton has no `style` param yet,
+so we build raw TL objects and call client.invoke() to send them.
+Everything else (handlers, DB, logs) stays on normal Pyrogram API.
 """
 
-import logging
 import re
 import time
+import logging
 from datetime import datetime
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import (
+from pyrogram import filters, enums
+from pyrogram.types import (
+    Message,
     CallbackQuery,
     ChatMemberUpdated,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
 )
+from pyrogram import raw
+from pyrogram.raw import functions, types as raw_types
 
-# ── Config (replace with your values / import from config.py) ─────────────────
-BOT_TOKEN       = "YOUR_BOT_TOKEN"
-BOT_NAME        = "Soul Catcher"
-LOG_CHANNEL_ID  = -1001234567890   # or None
-SUPPORT_GROUP   = "your_support_group"
-UPDATE_CHANNEL  = "your_update_channel"
-DM_INTRO_VIDEO  = "https://files.catbox.moe/6nqjqk.mp4"
+from .. import app
+from ..config import LOG_CHANNEL_ID, BOT_NAME, SUPPORT_GROUP, UPDATE_CHANNEL
+from ..database import get_or_create_user, track_group
 
-# ── Bot / Dispatcher setup ────────────────────────────────────────────────────
-bot    = Bot(token=BOT_TOKEN)
-dp     = Dispatcher()
-router = Router()
-dp.include_router(router)
-
-log         = logging.getLogger("SoulCatcher.start")
+log = logging.getLogger("SoulCatcher.start")
 _start_time = time.time()
 
-# ── Markdown escape (Telegram MarkdownV2) ─────────────────────────────────────
-_MD2 = re.compile(r"([_*\[\]()~`>#+=|{}.!\\-])")
+DM_INTRO_VIDEO = "https://files.catbox.moe/6nqjqk.mp4"
+MD = enums.ParseMode.MARKDOWN
 
-def _esc(text: str) -> str:
-    return _MD2.sub(r"\\\1", str(text))
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _uptime() -> str:
     s = int(time.time() - _start_time)
@@ -63,158 +49,351 @@ def _now() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
 
+_MD1 = re.compile(r"([_*`\[\]])")
+
+def _esc(text: str) -> str:
+    """Escape Markdown v1 special chars only: _ * ` ["""
+    return _MD1.sub(r"\\\1", str(text))
+
+
+def _safe_mention(user) -> str:
+    if user and user.first_name:
+        return f"[{_esc(user.first_name)}](tg://user?id={user.id})"
+    if user:
+        return f"User#{user.id}"
+    return "Unknown"
+
+
+# ── Message text ──────────────────────────────────────────────────────────────
+
+DM_TEXT = """\
+╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
+
+💗 *Welcome,* {mention}*!*
+_Your anime soul-collecting journey begins here._
+
+🌸 Collect rare characters across every rarity tier
+🎀 Build your dream harem and top the leaderboards
+💕 Trade, gift, and compete with players worldwide
+🌷 Claim your daily kakera and spin the wheel
+💖 Wishlist characters — get pinged on spawn
+
+━━━━━━━━━━━━━━━━━━━━
+✨ _You've been registered! Explore below_ 👇
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\
+"""
+
+GC_TEXT = """\
+╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮
+
+💗 *{bot} is now active in this group!*
+
+🎴 Characters spawn every *15 messages*
+⏱ Uptime: `{uptime}`
+💖 Press ❤️ to claim a spawned character!
+
+━━━━━━━━━━━━━━━━━━━━
+✨ _Type_ `/drop` _to force a character spawn_
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\
+"""
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# HELPER: Build InlineKeyboardButton WITH color style
+# RAW TL BUTTON BUILDERS  (Bot API 9.4 colored buttons via Pyrogram raw API)
 #
-# aiogram 3.x passes extra kwargs straight through to the Bot API JSON,
-# so `style=` works as soon as Telegram supports it (Bot API 9.4+).
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _btn(text: str, *, style: str | None = None, **kwargs) -> InlineKeyboardButton:
-    """
-    Wrapper that injects `style` into an InlineKeyboardButton.
-
-    style options:
-      "danger"  → red   (best pink-adjacent for SoulCatcher 🌸)
-      "success" → green
-      "primary" → blue
-      None      → default (grey/white depending on theme)
-    """
-    extra = {"style": style} if style else {}
-    return InlineKeyboardButton(text=text, **kwargs, **extra)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# WELCOME TEXT
-# ─────────────────────────────────────────────────────────────────────────────
-
-DM_TEXT = (
-    "╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮\n\n"
-    "💗 *Welcome, {mention}\\!*\n"
-    "_Your anime soul\\-collecting journey begins here\\._\n\n"
-    "🌸 Collect rare characters across every rarity tier\n"
-    "🎀 Build your dream harem and top the leaderboards\n"
-    "💕 Trade, gift, and compete with players worldwide\n"
-    "🌷 Claim your daily kakera and spin the wheel\n"
-    "💖 Wishlist characters — get pinged on spawn\n\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "✨ _You've been registered\\! Explore below_ 👇\n"
-    "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
-)
-
-GC_TEXT = (
-    "╭━━━〔 🌸 *SOUL CATCHER* 🌸 〕━━━╮\n\n"
-    "💗 *{bot} is now active in this group\\!*\n\n"
-    "🎴 Characters spawn every *15 messages*\n"
-    "⏱ Uptime: `{uptime}`\n"
-    "💖 Press ❤️ to claim a spawned character\\!\n\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "✨ _Type_ `/drop` _to force a character spawn_\n"
-    "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
-)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KEYBOARDS  —  Bot API 9.4 colored buttons
+# raw_types.KeyboardButtonCallback  →  callback_data buttons
+# raw_types.KeyboardButtonUrl       →  URL buttons
 #
-# Layout mirror (2 per row, pink-adjacent theme):
-#   [ 🌸 Add to Group  |  💗 Support  ]   ← both "danger" (red/rose)
-#   [ 💖 Updates       |  🎀 Help     ]   ← "success" (green) + "danger"
+# Both accept a `style` string field in Bot API 9.4:
+#   "danger"  = red/rose
+#   "success" = green
+#   "primary" = blue
+#   ""        = default (no color)
+#
+# NOTE: Pyrogram's TL schema may not include `style` yet.
+# We use model_copy / __dict__ injection below as a safe fallback.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _dm_kb(bot_username: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _raw_url_btn(text: str, url: str, style: str = "") -> object:
+    btn = raw_types.KeyboardButtonUrl(text=text, url=url)
+    if style:
+        # Inject the style field directly into the TL object dict
+        # so it gets serialised into the raw API call even if Pyrogram's
+        # schema doesn't expose it natively yet.
+        try:
+            object.__setattr__(btn, "style", style)
+        except Exception:
+            pass
+    return btn
+
+
+def _raw_cb_btn(text: str, data: str, style: str = "") -> object:
+    btn = raw_types.KeyboardButtonCallback(
+        text=text,
+        data=data.encode(),
+        requires_password=False,
+    )
+    if style:
+        try:
+            object.__setattr__(btn, "style", style)
+        except Exception:
+            pass
+    return btn
+
+
+def _raw_markup(rows: list[list]) -> raw_types.ReplyInlineMarkup:
+    """Wrap a list-of-lists of raw button objects into a ReplyInlineMarkup."""
+    return raw_types.ReplyInlineMarkup(
+        rows=[raw_types.KeyboardButtonRow(buttons=row) for row in rows]
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KEYBOARD DEFINITIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _dm_raw_kb(bot_username: str) -> raw_types.ReplyInlineMarkup:
+    return _raw_markup([
         [
-            _btn("🌸 Add to Group",
-                 style="danger",
-                 url=f"https://t.me/{bot_username}?startgroup=true"),
-            _btn("💗 Support",
-                 style="danger",
-                 url=f"https://t.me/{SUPPORT_GROUP}"),
+            _raw_url_btn("🌸 Add to Group",
+                         f"https://t.me/{bot_username}?startgroup=true",
+                         style="danger"),
+            _raw_url_btn("💗 Support",
+                         f"https://t.me/{SUPPORT_GROUP}",
+                         style="danger"),
         ],
         [
-            _btn("💖 Updates",
-                 style="success",
-                 url=f"https://t.me/{UPDATE_CHANNEL}"),
-            _btn("🎀 Help & Commands",
-                 style="danger",
-                 callback_data="help:main"),
+            _raw_url_btn("💖 Updates",
+                         f"https://t.me/{UPDATE_CHANNEL}",
+                         style="success"),
+            _raw_cb_btn("🎀 Help & Commands",
+                        "help:main",
+                        style="danger"),
         ],
     ])
 
 
-def _gc_kb(bot_username: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _gc_raw_kb(bot_username: str) -> raw_types.ReplyInlineMarkup:
+    return _raw_markup([
         [
-            _btn("🌸 Open in DM",
-                 style="danger",
-                 url=f"https://t.me/{bot_username}?start=start"),
-            _btn("💗 Support",
-                 style="danger",
-                 url=f"https://t.me/{SUPPORT_GROUP}"),
+            _raw_url_btn("🌸 Open in DM",
+                         f"https://t.me/{bot_username}?start=start",
+                         style="danger"),
+            _raw_url_btn("💗 Support",
+                         f"https://t.me/{SUPPORT_GROUP}",
+                         style="danger"),
         ],
         [
-            _btn("🎀 Help & Commands",
-                 style="success",
-                 callback_data="help:main"),
+            _raw_cb_btn("🎀 Help & Commands", "help:main", style="success"),
         ],
     ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEND HELPERS  (raw invoke so the markup reaches Telegram unmodified)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _send_raw_text(client, chat_id: int, text: str,
+                         markup: raw_types.ReplyInlineMarkup) -> None:
+    """Send a text message with a raw TL markup using client.invoke()."""
+    peer = await client.resolve_peer(chat_id)
+    await client.invoke(
+        functions.messages.SendMessage(
+            peer=peer,
+            message=text,
+            random_id=client.rnd_id(),
+            reply_markup=markup,
+            no_webpage=True,
+            parse_mode=raw_types.InputTextMarkdownV1(),  # Pyrogram internal parse
+        )
+    )
+
+
+async def _send_raw_video(client, chat_id: int, video_url: str,
+                          caption: str,
+                          markup: raw_types.ReplyInlineMarkup) -> None:
+    """Send a video URL with caption + raw TL markup."""
+    peer = await client.resolve_peer(chat_id)
+    media = raw_types.InputMediaDocumentExternal(url=video_url)
+    await client.invoke(
+        functions.messages.SendMedia(
+            peer=peer,
+            media=media,
+            message=caption,
+            random_id=client.rnd_id(),
+            reply_markup=markup,
+        )
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /start — PRIVATE DM
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.message(CommandStart(), F.chat.type == "private")
-async def start_dm(message: Message):
-    user    = message.from_user
-    mention = f"[{_esc(user.first_name)}](tg://user?id={user.id})"
-    text    = DM_TEXT.format(mention=mention)
-    me      = await bot.get_me()
-    kb      = _dm_kb(me.username)
+@app.on_message(filters.command("start") & filters.private)
+async def start_dm(client, message: Message):
+    try:
+        user = message.from_user
 
-    sent = False
-    if DM_INTRO_VIDEO:
+        # Register user
         try:
-            await message.answer_video(
-                DM_INTRO_VIDEO,
-                caption=text,
-                reply_markup=kb,
-                parse_mode="MarkdownV2",
+            await get_or_create_user(
+                user.id,
+                user.username or "",
+                user.first_name or "",
+                user.last_name or "",
             )
-            sent = True
-        except Exception as e:
-            log.warning(f"send_video failed uid={user.id}: {e}")
+        except Exception as db_err:
+            log.warning(f"DB register failed uid={user.id}: {db_err}")
 
-    if not sent:
-        await message.answer(text, reply_markup=kb, parse_mode="MarkdownV2")
+        bot_me  = await client.get_me()
+        mention = _safe_mention(user)
+        text    = DM_TEXT.format(mention=mention)
+        markup  = _dm_raw_kb(bot_me.username)
 
-    if LOG_CHANNEL_ID:
+        # Try raw video send first
+        sent = False
+        if DM_INTRO_VIDEO:
+            try:
+                await _send_raw_video(client, message.chat.id,
+                                      DM_INTRO_VIDEO, text, markup)
+                sent = True
+            except Exception as e:
+                log.warning(f"raw video send failed uid={user.id}: {e}")
+
+        # Fallback: raw text send
+        if not sent:
+            try:
+                await _send_raw_text(client, message.chat.id, text, markup)
+                sent = True
+            except Exception as e:
+                log.warning(f"raw text send failed uid={user.id}: {e}")
+
+        # Last resort: normal Pyrogram send (no colored buttons)
+        if not sent:
+            from pyrogram.types import (
+                InlineKeyboardMarkup as IKM,
+                InlineKeyboardButton as IKB,
+            )
+            fallback_kb = IKM([
+                [IKB("🌸 Add to Group",
+                     url=f"https://t.me/{bot_me.username}?startgroup=true"),
+                 IKB("💗 Support", url=f"https://t.me/{SUPPORT_GROUP}")],
+                [IKB("💖 Updates", url=f"https://t.me/{UPDATE_CHANNEL}"),
+                 IKB("🎀 Help & Commands", callback_data="help:main")],
+            ])
+            await message.reply_text(text, reply_markup=fallback_kb, parse_mode=MD)
+
+        # Log channel
+        if LOG_CHANNEL_ID:
+            try:
+                await client.send_message(
+                    LOG_CHANNEL_ID,
+                    f"🌸 */start DM*\n"
+                    f"{_esc(user.first_name or f'User#{user.id}')} "
+                    f"`{user.id}`\n{_now()}",
+                    parse_mode=MD,
+                )
+            except Exception as e:
+                log.warning(f"Log channel failed: {e}")
+
+    except Exception as e:
+        log.exception(f"start_dm crashed uid={getattr(message.from_user, 'id', '?')}: {e}")
         try:
-            await bot.send_message(
-                LOG_CHANNEL_ID,
-                f"🌸 */start DM*\n{_esc(user.first_name or f'User#{user.id}')} `{user.id}`\n{_now()}",
-                parse_mode="MarkdownV2",
+            await message.reply_text(
+                "🌸 Something went wrong. Please try /start again!"
             )
-        except Exception as e:
-            log.warning(f"Log channel failed: {e}")
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /start — GROUP
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.message(CommandStart(), F.chat.type.in_({"group", "supergroup"}))
-async def start_gc(message: Message):
-    me   = await bot.get_me()
-    text = GC_TEXT.format(bot=_esc(BOT_NAME), uptime=_uptime())
-    kb   = _gc_kb(me.username)
-    await message.answer(text, reply_markup=kb, parse_mode="MarkdownV2")
+@app.on_message(filters.command("start") & filters.group)
+async def start_gc(client, message: Message):
+    try:
+        bot_me = await client.get_me()
+        text   = GC_TEXT.format(bot=_esc(BOT_NAME), uptime=_uptime())
+        markup = _gc_raw_kb(bot_me.username)
+
+        try:
+            await _send_raw_text(client, message.chat.id, text, markup)
+        except Exception as e:
+            log.warning(f"raw gc send failed, falling back: {e}")
+            from pyrogram.types import (
+                InlineKeyboardMarkup as IKM,
+                InlineKeyboardButton as IKB,
+            )
+            fallback_kb = IKM([[
+                IKB("🌸 Open in DM",
+                    url=f"https://t.me/{bot_me.username}?start=start"),
+                IKB("💗 Support", url=f"https://t.me/{SUPPORT_GROUP}"),
+            ]])
+            await message.reply_text(text, reply_markup=fallback_kb, parse_mode=MD)
+
+        try:
+            await track_group(message.chat.id, getattr(message.chat, "title", ""))
+        except Exception as e:
+            log.warning(f"track_group failed: {e}")
+
+    except Exception as e:
+        log.exception(f"start_gc crashed: {e}")
+        try:
+            await message.reply_text(
+                f"🌸 *{_esc(BOT_NAME)} is active!* Spawns every 15 messages!",
+                parse_mode=MD,
+            )
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELP PAGES
+# BOT ADDED TO GROUP — log
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_chat_member_updated()
+async def on_member_update(client, update: ChatMemberUpdated):
+    try:
+        old_s = getattr(update.old_chat_member, "status", None)
+        new_s = getattr(update.new_chat_member, "status", None)
+        if old_s in ("left", "kicked", None) and new_s in ("member", "administrator"):
+            chat  = update.chat
+            actor = update.from_user
+            try:
+                await track_group(chat.id, getattr(chat, "title", ""))
+            except Exception as e:
+                log.warning(f"track_group failed: {e}")
+            if LOG_CHANNEL_ID:
+                try:
+                    inv = await client.export_chat_invite_link(chat.id)
+                except Exception:
+                    inv = "N/A"
+                actor_str  = _esc(actor.first_name) if actor and actor.first_name else "Unknown"
+                chat_title = _esc(getattr(chat, "title", str(chat.id)))
+                try:
+                    await client.send_message(
+                        LOG_CHANNEL_ID,
+                        (
+                            f"🌸 *Added to chat*\n"
+                            f"{chat_title}\n`{chat.id}`\n"
+                            f"By: [{actor_str}](tg://user?id={actor.id if actor else 0})\n"
+                            f"{inv}\n{_now()}"
+                        ),
+                        parse_mode=MD,
+                    )
+                except Exception as e:
+                    log.warning(f"Log channel update failed: {e}")
+    except Exception as e:
+        log.warning(f"on_member_update error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELP SYSTEM  (normal Pyrogram high-level API — no colored buttons needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 _PAGES: list[tuple[str, list[tuple[str, str]]]] = [
     ("🌸 Collection", [
@@ -275,10 +454,10 @@ _PAGES: list[tuple[str, list[tuple[str, str]]]] = [
 ]
 
 _RARITY_REF = (
-    "\n💎 *Rarity Tiers \\(low → high\\)*\n"
+    "\n💎 *Rarity Tiers (low → high)*\n"
     "⚫ Common · 🔵 Rare · 🌌 Legendry · 🔥 Elite\n"
     "💎 Seasonal · 🌸 Festival · 💀 Mythic · 🔮 Limited\n"
-    "🏆 Sports · 🧝 Fantasy · ✨ Eternal · 🎠 Verse _\\(video — rarest\\)_"
+    "🏆 Sports · 🧝 Fantasy · ✨ Eternal · 🎠 Verse _(video — rarest)_"
 )
 
 _MAIN_HELP_TEXT = (
@@ -300,10 +479,10 @@ def _render_pages() -> dict[str, str]:
     for i, (title, cmds) in enumerate(_PAGES, 1):
         lines = [
             f"╭━━━〔 {title} 〕━━━╮\n",
-            f"📚 *SoulCatcher Help \\({i}/{total}\\)*\n",
+            f"📚 *SoulCatcher Help ({i}/{total})*\n",
         ]
         for cmd, desc in cmds:
-            lines.append(f"`{_esc(cmd)}` — {_esc(desc)}")
+            lines.append(f"`{cmd}` — {desc}")
         if i == total:
             lines.append(_RARITY_REF)
         lines.append("\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯")
@@ -317,87 +496,77 @@ HELP_PAGES = _render_pages()
 def _help_kb(page: str) -> InlineKeyboardMarkup:
     pages = [str(i) for i in range(1, len(_PAGES) + 1)]
     idx   = pages.index(page)
-    nav: list[InlineKeyboardButton] = []
+    nav   = []
     if idx > 0:
-        nav.append(_btn("◀️ Prev", style="primary",
-                        callback_data=f"help:{pages[idx - 1]}"))
-    nav.append(_btn(f"🌸 {int(page)}/{len(pages)}", callback_data="noop"))
+        nav.append(InlineKeyboardButton("◀️ Prev", callback_data=f"help:{pages[idx - 1]}"))
+    nav.append(InlineKeyboardButton(f"🌸 {int(page)}/{len(pages)}", callback_data="noop"))
     if idx < len(pages) - 1:
-        nav.append(_btn("Next ▶️", style="primary",
-                        callback_data=f"help:{pages[idx + 1]}"))
-    return InlineKeyboardMarkup(inline_keyboard=[
+        nav.append(InlineKeyboardButton("Next ▶️", callback_data=f"help:{pages[idx + 1]}"))
+    return InlineKeyboardMarkup([
         nav,
-        [_btn("🏠 Home", style="danger", callback_data="help:home")],
+        [InlineKeyboardButton("🏠 Home", callback_data="help:home")],
     ])
 
 
 def _main_help_kb() -> InlineKeyboardMarkup:
-    """2-per-row category grid — alternating danger / success colors."""
     buttons: list[list] = []
     row: list = []
-    styles = ["danger", "success"]
     for i, (title, _) in enumerate(_PAGES, 1):
-        row.append(_btn(title, style=styles[i % 2],
-                        callback_data=f"help:{i}"))
+        row.append(InlineKeyboardButton(title, callback_data=f"help:{i}"))
         if len(row) == 2:
             buttons.append(row)
             row = []
     if row:
         buttons.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    return InlineKeyboardMarkup(buttons)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELP CALLBACK
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.callback_query(F.data.startswith("help:"))
-async def help_cb(cb: CallbackQuery):
+@app.on_callback_query(filters.regex(r"^help:"))
+async def help_cb(client, cb: CallbackQuery):
     page = cb.data.split(":", 1)[1]
 
     if page == "home":
-        me      = await bot.get_me()
-        mention = f"[{_esc(cb.from_user.first_name)}](tg://user?id={cb.from_user.id})"
+        bot_me  = await client.get_me()
+        mention = _safe_mention(cb.from_user)
         text    = DM_TEXT.format(mention=mention)
-        kb      = _dm_kb(me.username)
+        # rebuild raw markup for home button
+        markup = _dm_raw_kb(bot_me.username)
         try:
-            await cb.message.edit_caption(text, reply_markup=kb, parse_mode="MarkdownV2")
+            await cb.message.edit_caption(text, parse_mode=MD)
         except Exception:
-            await cb.message.edit_text(text, reply_markup=kb, parse_mode="MarkdownV2")
+            try:
+                await cb.message.edit_text(text, parse_mode=MD)
+            except Exception as e:
+                log.warning(f"help home edit failed: {e}")
         return await cb.answer()
 
     if page == "main":
-        await cb.message.edit_text(
-            _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode="MarkdownV2",
-        )
+        try:
+            await cb.message.edit_text(
+                _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode=MD,
+            )
+        except Exception as e:
+            log.warning(f"help main edit failed: {e}")
         return await cb.answer()
 
     if page not in HELP_PAGES:
-        await cb.message.edit_text(
-            _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode="MarkdownV2",
-        )
+        try:
+            await cb.message.edit_text(
+                _MAIN_HELP_TEXT, reply_markup=_main_help_kb(), parse_mode=MD,
+            )
+        except Exception:
+            pass
         return await cb.answer()
 
-    await cb.message.edit_text(
-        HELP_PAGES[page], reply_markup=_help_kb(page), parse_mode="MarkdownV2",
-    )
+    try:
+        await cb.message.edit_text(
+            HELP_PAGES[page], reply_markup=_help_kb(page), parse_mode=MD,
+        )
+    except Exception as e:
+        log.warning(f"help page={page} edit failed: {e}")
     await cb.answer()
 
 
-@router.callback_query(F.data == "noop")
-async def noop(cb: CallbackQuery):
+@app.on_callback_query(filters.regex("^noop$"))
+async def noop(_, cb: CallbackQuery):
     await cb.answer()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
