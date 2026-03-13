@@ -13,7 +13,7 @@ from pyrogram.types import Message
 
 from .. import app
 from ..rarity import RARITIES, get_rarity_card
-from .profile_helpers import HTML, MD, DIV, esc
+from ._profile_helpers import HTML, MD, DIV, esc
 
 log = logging.getLogger("SoulCatcher.rarityinfo")
 
