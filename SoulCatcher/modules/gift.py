@@ -347,7 +347,7 @@ async def gift_cb(client, cb):
             return await cb.answer()
 
         # Ensure receiver user doc exists BEFORE the transfer
-        await get_or_create_user(receiver_id)
+        await get_or_create_user(receiver_id, "", "", "")
 
         # ── Build receiver's new doc ──────────────────────────────────────────
         # Explicitly copy only the fields defined in database.py add_to_harem()
