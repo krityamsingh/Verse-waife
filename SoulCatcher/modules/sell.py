@@ -48,7 +48,7 @@ async def cmd_sell(client, message: Message):
     uid  = user.id
     iid  = message.command[1].upper()
 
-    await get_or_create_user(uid, user.username or "", user.first_name or "")
+    await get_or_create_user(uid, user.username or "", user.first_name or "", getattr(user, "last_name", "") or "")
 
     char = await _col("user_characters").find_one({"user_id": uid, "instance_id": iid})
     if not char:
