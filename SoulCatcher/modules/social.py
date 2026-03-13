@@ -1,7 +1,7 @@
 """SoulCatcher/modules/social.py — /marry /propose /epropose /basket"""
 import asyncio, random, time
 from datetime import datetime, timedelta
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from .. import app
 from ..database import get_or_create_user, get_user, add_balance, deduct_balance, get_balance, add_to_harem, get_random_character, add_xp
@@ -102,7 +102,7 @@ async def cmd_propose(_, message: Message):
         rem = PROPOSE_CD-(now-_propose_cds[uid])
         if rem.total_seconds()>0:
             m,s = divmod(int(rem.total_seconds()),60)
-            return await message.reply_text(f"⏳ **Rest your heart...** `{m}m {s}s`")
+            return await message.reply_text(f"⏳ **Rest your heart...** `{m}m {s}s`", parse_mode=enums.ParseMode.MARKDOWN)
     char = await get_random_character("cosmos") or await get_random_character("rare") or await get_random_character("common")
     if not char: return await message.reply_text("🌌 No candidates found. Try later!")
     _active_proposals[uid] = char
@@ -159,28 +159,28 @@ async def cmd_basket(client, message: Message):
     last = _basket_cds.get(uid)
     if last and now-last < ECONOMY["basket_cooldown"]:
         wait = int(ECONOMY["basket_cooldown"]-(now-last))
-        return await message.reply_text(f"⏳ **Too fast!** Wait `{wait}s`・o・")
+        return await message.reply_text(f"⏳ **Too fast!** Wait `{wait}s`・o・", parse_mode=enums.ParseMode.MARKDOWN)
     try:
         bet = int(message.command[1])
     except (IndexError,ValueError):
-        return await message.reply_text("❌ Use: `/basket <amount>`")
+        return await message.reply_text("❌ Use: `/basket <amount>`", parse_mode=enums.ParseMode.MARKDOWN)
     balance = await get_balance(uid)
     if balance is None: return await message.reply_text("⚠️ Use /start first.")
     min_bet = max(50, int(balance*ECONOMY["basket_min_bet_pct"]))
-    if bet<min_bet:  return await message.reply_text(f"💢 Min bet: `{min_bet}` coins")
+    if bet<min_bet:  return await message.reply_text(f"💢 Min bet: `{min_bet}` coins", parse_mode=enums.ParseMode.MARKDOWN)
     if bet>balance:  return await message.reply_text("💸 Not enough coins!")
     dice  = await client.send_dice(message.chat.id,"🏀")
     val   = dice.dice.value
     _basket_cds[uid] = now
     if val==6:
         win = bet*2; await add_balance(uid,win); await add_xp(uid,5)
-        await message.reply_text(f"✨ **SUPER SLAM DUNK!!**\n╰┈➤ 🏆 +`{win:,}` coins\n╰┈➤ 🌟 +5 xp\n\nLegendary! (•̀ᴗ•́)و")
+        await message.reply_text(f"✨ **SUPER SLAM DUNK!!**\n╰┈➤ 🏆 +`{win:,}` coins\n╰┈➤ 🌟 +5 xp\n\nLegendary! (•̀ᴗ•́)و", parse_mode=enums.ParseMode.MARKDOWN)
     elif val in [4,5]:
         win = int(bet*1.5); await add_balance(uid,win); await add_xp(uid,3)
-        await message.reply_text(f"🎯 **Nice Shot!**\n╰┈➤ 💰 +`{win:,}` coins\n╰┈➤ ✨ +3 xp\n\nKeep going! ٩(◕‿◕｡)۶")
+        await message.reply_text(f"🎯 **Nice Shot!**\n╰┈➤ 💰 +`{win:,}` coins\n╰┈➤ ✨ +3 xp\n\nKeep going! ٩(◕‿◕｡)۶", parse_mode=enums.ParseMode.MARKDOWN)
     elif val in [2,3]:
         loss = int(bet*0.5); await deduct_balance(uid,loss); await add_xp(uid,-2)
-        await message.reply_text(f"💢 **Close Miss!**\n╰┈➤ 🩹 -`{loss:,}` coins\n╰┈➤ 📉 -2 xp\n\nNext time! (╥﹏╥)")
+        await message.reply_text(f"💢 **Close Miss!**\n╰┈➤ 🩹 -`{loss:,}` coins\n╰┈➤ 📉 -2 xp\n\nNext time! (╥﹏╥)", parse_mode=enums.ParseMode.MARKDOWN)
     else:
         await deduct_balance(uid,bet); await add_xp(uid,-3)
-        await message.reply_text(f"💀 **AIRBALL!**\n╰┈➤ ☠️ -`{bet:,}` coins\n╰┈➤ ❌ -3 xp\n\nDisaster lol (≧﹏≦)")
+        await message.reply_text(f"💀 **AIRBALL!**\n╰┈➤ ☠️ -`{bet:,}` coins\n╰┈➤ ❌ -3 xp\n\nDisaster lol (≧﹏≦)", parse_mode=enums.ParseMode.MARKDOWN)
