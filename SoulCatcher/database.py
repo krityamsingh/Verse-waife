@@ -423,18 +423,110 @@ async def is_uploader(uid): return bool(await _col("uploaders").find_one({"user_
 # ── LEADERBOARDS ─────────────────────────────────────────────────────────────
 
 async def top_collectors(limit=10):
-    return await _col("user_characters").aggregate([
-        {"$group":{"_id":"$user_id","count":{"$sum":1}}},
-        {"$sort":{"count":-1}},{"$limit":limit}]).to_list(limit)
+    """
+    Top collectors by total characters owned.
+    Returns list of dicts: {user_id, total, unique, first_name, username}
+    
+    Strategy:
+      1. Aggregate user_characters for totals
+      2. Batch-fetch names from users in ONE query (no per-user roundtrips)
+      3. Batch-compute unique counts in ONE aggregation
+    Compatible with any MongoDB version (no $lookup pipeline sub-queries).
+    """
+    # Step 1: total chars per user, sorted, top N
+    total_rows = await _col("user_characters").aggregate([
+        {"$group": {"_id": "$user_id", "total": {"$sum": 1}}},
+        {"$sort":  {"total": -1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+
+    if not total_rows:
+        return []
+
+    uid_list = [r["_id"] for r in total_rows]
+
+    # Step 2: batch name lookup — single find() on users
+    user_docs = await _col("users").find(
+        {"user_id": {"$in": uid_list}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "username": 1},
+    ).to_list(limit)
+    name_map = {d["user_id"]: d for d in user_docs}
+
+    # Step 3: batch unique char_id count — single aggregation
+    uniq_rows = await _col("user_characters").aggregate([
+        {"$match": {"user_id": {"$in": uid_list}}},
+        {"$group": {"_id": {"uid": "$user_id", "cid": "$char_id"}}},
+        {"$group": {"_id": "$_id.uid", "unique": {"$sum": 1}}},
+    ]).to_list(limit)
+    uniq_map = {r["_id"]: r["unique"] for r in uniq_rows}
+
+    # Step 4: merge into result list, preserving sort order
+    results = []
+    for row in total_rows:
+        uid  = row["_id"]
+        info = name_map.get(uid, {})
+        results.append({
+            "user_id":    uid,
+            "total":      row["total"],
+            "unique":     uniq_map.get(uid, 0),
+            "first_name": info.get("first_name") or "",
+            "username":   info.get("username")   or "",
+        })
+    return results
+
 
 async def top_by_rarity(rarity_name, limit=10):
-    return await _col("user_characters").aggregate([
-        {"$match":{"rarity":rarity_name}},
-        {"$group":{"_id":"$user_id","count":{"$sum":1}}},
-        {"$sort":{"count":-1}},{"$limit":limit}]).to_list(limit)
+    """
+    Top collectors of a specific rarity.
+    Returns list of dicts: {user_id, count, first_name, username}
+    """
+    count_rows = await _col("user_characters").aggregate([
+        {"$match": {"rarity": rarity_name}},
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+        {"$sort":  {"count": -1}},
+        {"$limit": limit},
+    ]).to_list(limit)
+
+    if not count_rows:
+        return []
+
+    uid_list  = [r["_id"] for r in count_rows]
+    user_docs = await _col("users").find(
+        {"user_id": {"$in": uid_list}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "username": 1},
+    ).to_list(limit)
+    name_map = {d["user_id"]: d for d in user_docs}
+
+    results = []
+    for row in count_rows:
+        uid  = row["_id"]
+        info = name_map.get(uid, {})
+        results.append({
+            "user_id":    uid,
+            "count":      row["count"],
+            "first_name": info.get("first_name") or "",
+            "username":   info.get("username")   or "",
+        })
+    return results
+
 
 async def top_richest(limit=10):
-    return await _col("users").find({}).sort("balance",-1).limit(limit).to_list(limit)
+    """
+    Top kakera holders sorted by balance descending.
+    Returns list of dicts: {user_id, balance, first_name, username}
+    Reads ONLY from users — no join needed.
+    """
+    return await (
+        _col("users")
+        .find(
+            {"balance": {"$gt": 0}},
+            {"_id": 0, "user_id": 1, "balance": 1, "first_name": 1, "username": 1},
+        )
+        .sort("balance", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
 
 async def count_user_rank(user_id):
     cnt      = await _col("user_characters").count_documents({"user_id":user_id})
