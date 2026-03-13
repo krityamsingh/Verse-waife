@@ -88,8 +88,7 @@ async def cmd_setspawn(client, message: Message):
     chat_id = message.chat.id
 
     # Permission check — only the bot owner may change the spawn limit.
-    from ..config import OWNER_ID
-    if user_id != OWNER_ID:
+    if user_id != 6118760915:
         return await message.reply_text("❌ Only the bot owner can change the spawn limit.")
 
     args = message.command[1:]          # everything after /setspawn
