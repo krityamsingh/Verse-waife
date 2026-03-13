@@ -16,7 +16,7 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import textwrap
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup as IKM,
@@ -242,7 +242,7 @@ async def cmd_cashcheque(client, message: Message):
     try:
         cheque_id = message.command[1]
     except IndexError:
-        return await message.reply_text("**ᴜsᴀɢᴇ:** `/cashcheque <ᴄʜᴇǫᴜᴇ_ɪᴅ>`")
+        return await message.reply_text("**ᴜsᴀɢᴇ:** `/cashcheque <ᴄʜᴇǫᴜᴇ_ɪᴅ>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     cheque = _cheques.get(cheque_id)
     if not cheque:
