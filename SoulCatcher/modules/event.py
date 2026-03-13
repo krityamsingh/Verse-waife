@@ -12,7 +12,7 @@ from pyrogram import filters
 from pyrogram.types import Message
 
 from .. import app
-from .profile_helpers import HTML, SDIV, esc
+from ._profile_helpers import HTML, SDIV, esc
 
 log = logging.getLogger("SoulCatcher.event")
 
