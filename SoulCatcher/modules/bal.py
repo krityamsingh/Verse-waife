@@ -14,7 +14,7 @@ from pyrogram.types import Message
 
 from .. import app
 from ..database import get_or_create_user, get_user
-from .profile_helpers import HTML, DIV, SDIV, fmt, esc, mention
+from ._profile_helpers import HTML, DIV, SDIV, fmt, esc, mention
 
 log = logging.getLogger("SoulCatcher.bal")
 
