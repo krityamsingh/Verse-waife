@@ -138,7 +138,7 @@ async def cmd_pay(client, message: Message):
     # Process
     await deduct_balance(sender.id, amount)
     await add_balance(recipient.id, amount)
-    await get_or_create_user(recipient.id, recipient.username or "", recipient.first_name or "")
+    await get_or_create_user(recipient.id, recipient.username or "", recipient.first_name or "", getattr(recipient, "last_name", "") or "")
     _last_payment[sender.id] = time.time()
 
     txn_id    = f"TXN-{random.randint(100000, 999999)}"
