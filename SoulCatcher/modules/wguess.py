@@ -19,6 +19,7 @@ import random
 import string
 
 from pyrogram import filters, enums
+from pyrogram.handlers import MessageHandler
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -331,9 +332,12 @@ async def wg_hint_cb(client, cb: CallbackQuery):
 
 # ── Message listener ──────────────────────────────────────────────────────────
 
-@app.on_message(filters.group & filters.text & ~filters.command(["wguess"]))
 async def wg_listener(_, message: Message):
-    if not message.from_user:
+    """Catch guesses — registered via add_handler at module bottom for reliable priority."""
+    if not _games:
+        return
+
+    if not message.from_user or not message.text:
         return
 
     user    = message.from_user
@@ -343,6 +347,7 @@ async def wg_listener(_, message: Message):
     if key not in _games:
         return
 
+    # Strip to letters only — "fire!", "FIRE", " fire " all match correctly
     guess = "".join(c for c in message.text.strip().upper() if c in string.ascii_uppercase)
     game  = _games[key]
 
@@ -408,3 +413,7 @@ async def _timeout(client, chat_id: int, user_id: int, word: str, user):
         )
     except Exception as e:
         log.error("wguess timeout error uid=%s: %s", user_id, e)
+
+
+# Register guess listener with group=-1 so it fires before spawn's group=0 counter
+app.add_handler(MessageHandler(wg_listener, filters.group & filters.text), group=-1)
