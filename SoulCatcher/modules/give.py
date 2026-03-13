@@ -136,7 +136,7 @@ async def cmd_give(client, message: Message):
     if not char:
         return await message.reply_text(f"❌ Character `{char_id}` not found.")
 
-    await get_or_create_user(target_id)
+    await get_or_create_user(target_id, "", "", "")
     iid = await add_to_harem(target_id, char)
 
     from ..rarity import get_rarity
@@ -203,7 +203,7 @@ async def cmd_giveall(client, message: Message):
     if not all_chars:
         return await message.reply_text("❌ No characters in the database yet.")
 
-    await get_or_create_user(target_id)
+    await get_or_create_user(target_id, "", "", "")
 
     progress = await message.reply_text(
         f"⏳ Adding **{len(all_chars):,}** characters to `{target_id}`...\n"
@@ -281,7 +281,7 @@ async def cmd_kakera(client, message: Message):
     if amount == 0:
         return await message.reply_text("❌ Amount can't be zero.")
 
-    await get_or_create_user(target_id)
+    await get_or_create_user(target_id, "", "", "")
     await add_balance(target_id, amount)
 
     sign   = "+" if amount > 0 else ""
