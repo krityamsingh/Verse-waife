@@ -1,43 +1,3 @@
-"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║        SoulCatcher 🌸  autouploader.py  — FULLY FIXED                       ║
-║                                                                              ║
-║  BUGS FIXED:                                                                 ║
-║  [BUG-1] UPLOAD_CHANNEL_ID was hardcoded, ignoring config.py env var        ║
-║  [BUG-2] tempfile.mktemp() is deprecated + insecure (race condition).        ║
-║          Replaced with tempfile.mkstemp() throughout.                        ║
-║  [BUG-3] _download() missed reply.document — uploaders often forward         ║
-║          videos as files/documents; now detected correctly.                  ║
-║  [BUG-4] catbox URL validated with startswith("https://") only —             ║
-║          catbox sometimes returns http:// or bare filenames.                 ║
-║          Fixed: accept any files.catbox.moe URL (http or https).             ║
-║  [BUG-5] _upload_to_catbox swallowed all exceptions silently.                ║
-║          Now logs the real error and returns it so the uploader sees why.    ║
-║  [BUG-6] Temp file leaked on catbox failure — _cleanup() not called.         ║
-║          Fixed: _cleanup always called in finally blocks.                    ║
-║  [BUG-7] mention crashed when first_name is None (some Telegram accounts).   ║
-║          Fixed: safe fallback to username or user ID string.                 ║
-║  [BUG-8] File size not checked before download — huge videos crash           ║
-║          low-disk servers. Added 50 MB limit with clear error message.       ║
-║  [BUG-9] Channel post re-downloaded file from catbox URL which can fail      ║
-║          if catbox is slow. Now sends the local file directly as bytes,      ║
-║          then uses the returned Telegram file_id for the DB record.          ║
-║                                                                              ║
-║  COMMANDS (Owner + Uploaders):                                               ║
-║   /upload <name> | <anime> | <rarity_id>             — main rarities         ║
-║   /upload <name> | <anime> | <rarity_id> | <sub_tag> — with sub-rarity      ║
-║   /uchar media   <id>          — update media (reply to photo/video)         ║
-║   /uchar rarity  <id> <rid>    — change rarity tier                          ║
-║   /uchar name    <id> <name>   — rename character                            ║
-║   /uchar anime   <id> <anime>  — change anime                                ║
-║   /uchar season  <id> <key>    — set festival season (ID 51)                 ║
-║   /uchar sport   <id> <key>    — set sport type (ID 62)                      ║
-║   /uchar fantasy <id> <key>    — set fantasy archetype (ID 63)               ║
-║   /charinfo <id>               — show character details                      ║
-║   /rarities                    — list all rarity IDs & tags                  ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-"""
-
 import os
 import logging
 import tempfile
@@ -45,7 +5,7 @@ from typing import Optional, Dict, Any, Tuple
 from datetime import datetime
 
 import aiohttp
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message
 
 from .. import app, uploader_filter
@@ -354,7 +314,7 @@ async def _download(message: Message, reply: Message) -> Tuple[Optional[str], bo
             os.remove(tmp_path)
         except OSError:
             pass
-        await message.reply_text(f"❌ Download failed: `{e}`")
+        await message.reply_text(f"❌ Download failed: `{e}`", parse_mode=enums.ParseMode.MARKDOWN)
         return None, is_vid
 
 
@@ -394,7 +354,7 @@ async def _do_upload_and_save(
     tier = get_rarity_by_id(rarity_id)
     if not tier:
         _cleanup(file_path)
-        await message.reply_text(f"❌ Unknown rarity ID `{rarity_id}`.")
+        await message.reply_text(f"❌ Unknown rarity ID `{rarity_id}`.", parse_mode=enums.ParseMode.MARKDOWN)
         return None
 
     status = await message.reply_text(f"⏫ Uploading **{char_name}** to catbox...")
@@ -522,7 +482,7 @@ async def cmd_upload(client, message: Message):
 
     tier = get_rarity_by_id(rid)
     if not tier:
-        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`\n\n" + UPLOAD_HELP_TEXT)
+        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`\n\n" + UPLOAD_HELP_TEXT, parse_mode=enums.ParseMode.MARKDOWN)
 
     # Validate sub_tag if provided
     if sub_tag and rid in _NEEDS_TAG:
@@ -591,12 +551,12 @@ async def cmd_uchar(client, message: Message):
 
     char = await get_character(char_id)
     if not char:
-        return await message.reply_text(f"❌ Character `{char_id}` not found.")
+        return await message.reply_text(f"❌ Character `{char_id}` not found.", parse_mode=enums.ParseMode.MARKDOWN)
 
     # ── media ─────────────────────────────────────────────────────────────────
     if sub_cmd == "media":
         if not message.reply_to_message:
-            return await message.reply_text("Reply to a photo/video with `/uchar media <id>`")
+            return await message.reply_text("Reply to a photo/video with `/uchar media <id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
         reply  = message.reply_to_message
         tier   = get_rarity(char.get("rarity", ""))
@@ -639,7 +599,7 @@ async def cmd_uchar(client, message: Message):
     # ── rarity ────────────────────────────────────────────────────────────────
     elif sub_cmd == "rarity":
         if len(args) < 4:
-            return await message.reply_text("Usage: `/uchar rarity <id> <rarity_id>`")
+            return await message.reply_text("Usage: `/uchar rarity <id> <rarity_id>`", parse_mode=enums.ParseMode.MARKDOWN)
         try:
             rid = int(args[3])
         except ValueError:
@@ -647,7 +607,7 @@ async def cmd_uchar(client, message: Message):
 
         tier = get_rarity_by_id(rid)
         if not tier:
-            return await message.reply_text(f"❌ Unknown rarity ID `{rid}`.\n\n{RARITY_LIST_TEXT}")
+            return await message.reply_text(f"❌ Unknown rarity ID `{rid}`.\n\n{RARITY_LIST_TEXT}", parse_mode=enums.ParseMode.MARKDOWN)
 
         if tier.video_only and not char.get("video_url"):
             return await message.reply_text(
@@ -677,7 +637,7 @@ async def cmd_uchar(client, message: Message):
     # ── name ──────────────────────────────────────────────────────────────────
     elif sub_cmd == "name":
         if len(args) < 4:
-            return await message.reply_text("Usage: `/uchar name <id> <new_name>`")
+            return await message.reply_text("Usage: `/uchar name <id> <new_name>`", parse_mode=enums.ParseMode.MARKDOWN)
         new_name = " ".join(args[3:]).strip()
         if not new_name:
             return await message.reply_text("❌ Name cannot be empty.")
@@ -687,7 +647,7 @@ async def cmd_uchar(client, message: Message):
     # ── anime ─────────────────────────────────────────────────────────────────
     elif sub_cmd == "anime":
         if len(args) < 4:
-            return await message.reply_text("Usage: `/uchar anime <id> <new_anime>`")
+            return await message.reply_text("Usage: `/uchar anime <id> <new_anime>`", parse_mode=enums.ParseMode.MARKDOWN)
         new_anime = " ".join(args[3:]).strip()
         if not new_anime:
             return await message.reply_text("❌ Anime name cannot be empty.")
@@ -707,7 +667,7 @@ async def cmd_uchar(client, message: Message):
         key = args[3].lower()
         if key not in FESTIVAL_SEASONS:
             valid = ", ".join(FESTIVAL_SEASONS.keys())
-            return await message.reply_text(f"❌ Unknown season `{key}`.\nValid: `{valid}`")
+            return await message.reply_text(f"❌ Unknown season `{key}`.\nValid: `{valid}`", parse_mode=enums.ParseMode.MARKDOWN)
         s = FESTIVAL_SEASONS[key]
         await update_character(char_id, {"$set": {
             "sub_tag":         "festival",
@@ -730,7 +690,7 @@ async def cmd_uchar(client, message: Message):
         key = args[3].lower()
         if key not in MYTHIC_SPORTS:
             valid = ", ".join(MYTHIC_SPORTS.keys())
-            return await message.reply_text(f"❌ Unknown sport `{key}`.\nValid: `{valid}`")
+            return await message.reply_text(f"❌ Unknown sport `{key}`.\nValid: `{valid}`", parse_mode=enums.ParseMode.MARKDOWN)
         s = MYTHIC_SPORTS[key]
         await update_character(char_id, {"$set": {
             "sub_tag":     "sports",
@@ -752,7 +712,7 @@ async def cmd_uchar(client, message: Message):
         key = args[3].lower()
         if key not in MYTHIC_FANTASY:
             valid = ", ".join(MYTHIC_FANTASY.keys())
-            return await message.reply_text(f"❌ Unknown archetype `{key}`.\nValid: `{valid}`")
+            return await message.reply_text(f"❌ Unknown archetype `{key}`.\nValid: `{valid}`", parse_mode=enums.ParseMode.MARKDOWN)
         f_info = MYTHIC_FANTASY[key]
         await update_character(char_id, {"$set": {
             "sub_tag":         "fantasy",
@@ -779,11 +739,11 @@ async def cmd_uchar(client, message: Message):
 async def cmd_charinfo(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/charinfo <id>`")
+        return await message.reply_text("Usage: `/charinfo <id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     char = await get_character(args[1])
     if not char:
-        return await message.reply_text(f"❌ Character `{args[1]}` not found.")
+        return await message.reply_text(f"❌ Character `{args[1]}` not found.", parse_mode=enums.ParseMode.MARKDOWN)
 
     tier      = get_rarity(char.get("rarity", ""))
     tier_str  = f"{tier.emoji} {tier.display_name}" if tier else f"`{char.get('rarity', '?')}`"
