@@ -15,7 +15,7 @@ import logging
 import os
 import tempfile
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message
 
 from .. import app, owner_filter
@@ -134,7 +134,7 @@ async def cmd_give(client, message: Message):
     char_id = _pad(extra[0])
     char    = await get_character(char_id)
     if not char:
-        return await message.reply_text(f"❌ Character `{char_id}` not found.")
+        return await message.reply_text(f"❌ Character `{char_id}` not found.", parse_mode=enums.ParseMode.MARKDOWN)
 
     await get_or_create_user(target_id, "", "", "")
     iid = await add_to_harem(target_id, char)
