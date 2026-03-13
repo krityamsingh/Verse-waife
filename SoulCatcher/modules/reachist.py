@@ -13,7 +13,7 @@ from pyrogram.types import Message
 
 from .. import app
 from ..database import top_richest
-from .profile_helpers import HTML, DIV, MEDALS, fmt, esc
+from ._profile_helpers import HTML, DIV, MEDALS, fmt, esc
 
 log = logging.getLogger("SoulCatcher.richest")
 
