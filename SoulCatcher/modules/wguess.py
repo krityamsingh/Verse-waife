@@ -26,7 +26,7 @@ import random
 import string
 from typing import Optional
 
-from pyrogram import filters
+from pyrogram import filters, enums
 from pyrogram.types import (
     Message,
     InlineKeyboardMarkup,
@@ -37,7 +37,9 @@ from pyrogram.types import (
 from .. import app
 from ..database import get_or_create_user, add_balance
 
-log = logging.getLogger("SoulCatcher.wguess")
+log  = logging.getLogger("SoulCatcher.wguess")
+HTML = enums.ParseMode.HTML
+MD   = enums.ParseMode.MARKDOWN
 
 # ── Word Lists ─────────────────────────────────────────────────────────────────
 
@@ -144,7 +146,7 @@ async def cmd_wguess(_, message: Message):
             f"🎮 <b>A game is already running!</b>\n"
             f"<code>{'  '.join(masked)}</code>\n"
             f"<i>Guess the word before time runs out!</i>",
-            parse_mode="html",
+            parse_mode=HTML,
         )
 
     await message.reply_text(
@@ -153,7 +155,7 @@ async def cmd_wguess(_, message: Message):
         "Choose the word length to begin!\n"
         "<i>You have <b>15 seconds</b> to guess each word.</i>\n"
         "💰 Correct guess = <b>50–100 kakera</b> reward!",
-        parse_mode="html",
+        parse_mode=HTML,
         reply_markup=_main_kb(),
     )
 
@@ -199,7 +201,7 @@ async def wg_callback(client, cb: CallbackQuery):
     )
 
     try:
-        await cb.message.edit_text(game_text, parse_mode="html", reply_markup=None)
+        await cb.message.edit_text(game_text, parse_mode=HTML, reply_markup=None)
     except Exception:
         pass
 
@@ -268,7 +270,7 @@ async def wg_guess_listener(client, message: Message):
         f"🔤 The word was: <code>{game['word']}</code>\n"
         f"💰 Reward: <b>+{reward} 🌸 kakera</b>!\n"
         f"━━━━━━━━━━━━━━━━━━━━",
-        parse_mode="html",
+        parse_mode=HTML,
     )
 
 
@@ -296,7 +298,7 @@ async def _timeout(client, chat_id: int, word: str, game_msg):
             f"<code>{revealed}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<i>Use /wguess to play again!</i>",
-            parse_mode="html",
+            parse_mode=HTML,
         )
     except Exception as e:
         log.error("wguess timeout send error chat=%s: %s", chat_id, e)
