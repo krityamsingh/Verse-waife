@@ -1,5 +1,5 @@
 """SoulCatcher/modules/sudo.py — /addsudo /rmsudo /adddev /rmdev /adduploader /rmuploader /sudolist /devlist /uploaderlist"""
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
 from .. import app, dev_filter, sudo_filter, capsify
 from ..config import OWNER_IDS
@@ -30,7 +30,7 @@ async def cmd_addsudo(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🚧 **Reply to a user or provide a valid ID, senpai!** 🎀"))
     if uid in OWNER_IDS: return await message.reply_text(capsify("🎀 **That's the owner — they already have supreme powers!**"))
-    if await is_sudo(uid): return await message.reply_text(capsify(f"☘️ **Ehh?** `{name}` is already sudo! 🫧"))
+    if await is_sudo(uid): return await message.reply_text(capsify(f"☘️ **Ehh?** `{name}` is already sudo! 🫧"), parse_mode=enums.ParseMode.MARKDOWN)
     await add_sudo(uid); refresh_sudo([uid])
     await message.reply_text(
         capsify(f"🚧 **Woohoo!** `{name}` now has **sudo powers**! ✨"),
@@ -41,15 +41,15 @@ async def cmd_addsudo(client, message: Message):
 async def cb_rmsudo(_, cb: CallbackQuery):
     uid = int(cb.data.split(":")[1])
     await remove_sudo(uid)
-    await cb.message.edit_text(capsify(f"🎀 `{uid}` is no longer sudo!"))
+    await cb.message.edit_text(capsify(f"🎀 `{uid}` is no longer sudo!"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("rmsudo") & dev_filter)
 async def cmd_rmsudo(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🚧 Reply to a user or provide a valid ID! 🎀"))
-    if not await is_sudo(uid): return await message.reply_text(capsify(f"🚧 **Ehh~?!** `{name}` is not even sudo, senpai! 🎀"))
+    if not await is_sudo(uid): return await message.reply_text(capsify(f"🚧 **Ehh~?!** `{name}` is not even sudo, senpai! 🎀"), parse_mode=enums.ParseMode.MARKDOWN)
     await remove_sudo(uid)
-    await message.reply_text(capsify(f"🎀 **Bye-bye!** `{name}` is no longer sudo~! 🚧"))
+    await message.reply_text(capsify(f"🎀 **Bye-bye!** `{name}` is no longer sudo~! 🚧"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("sudolist") & sudo_filter)
 async def cmd_sudolist(client, message: Message):
@@ -70,17 +70,17 @@ async def cmd_sudolist(client, message: Message):
 async def cmd_adddev(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🚧 Reply to a user or provide valid ID! 🎀"))
-    if await is_dev(uid): return await message.reply_text(capsify(f"🎀 **Oops!** `{name}` is already a dev! 🚧"))
+    if await is_dev(uid): return await message.reply_text(capsify(f"🎀 **Oops!** `{name}` is already a dev! 🚧"), parse_mode=enums.ParseMode.MARKDOWN)
     await add_dev(uid); refresh_dev([uid])
-    await message.reply_text(capsify(f"🎀 **Congrats!** `{name}` is now a **Developer!** 🚧"))
+    await message.reply_text(capsify(f"🎀 **Congrats!** `{name}` is now a **Developer!** 🚧"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("rmdev") & dev_filter)
 async def cmd_rmdev(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🚧 Invalid! 🎀"))
-    if not await is_dev(uid): return await message.reply_text(capsify(f"🚧 `{name}` is not a dev! 🎀"))
+    if not await is_dev(uid): return await message.reply_text(capsify(f"🚧 `{name}` is not a dev! 🎀"), parse_mode=enums.ParseMode.MARKDOWN)
     await remove_dev(uid)
-    await message.reply_text(capsify(f"🚧 **Farewell!** `{name}` is no longer a dev! 🎀"))
+    await message.reply_text(capsify(f"🚧 **Farewell!** `{name}` is no longer a dev! 🎀"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("devlist") & dev_filter)
 async def cmd_devlist(client, message: Message):
@@ -100,17 +100,17 @@ async def cmd_devlist(client, message: Message):
 async def cmd_adduploader(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🎀 Reply to user or give valid ID! 🚧"))
-    if await is_uploader(uid): return await message.reply_text(capsify(f"🎀 `{name}` is already an uploader! 🚧"))
+    if await is_uploader(uid): return await message.reply_text(capsify(f"🎀 `{name}` is already an uploader! 🚧"), parse_mode=enums.ParseMode.MARKDOWN)
     await _add_uploader(uid); refresh_uploader([uid])
-    await message.reply_text(capsify(f"🚧 **Congrats!** `{name}` is now an **Uploader!** 🎀"))
+    await message.reply_text(capsify(f"🚧 **Congrats!** `{name}` is now an **Uploader!** 🎀"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("rmuploader") & sudo_filter)
 async def cmd_rmuploader(client, message: Message):
     uid, name = await _resolve(client, message)
     if not uid: return await message.reply_text(capsify("🚧 Invalid! 🎀"))
-    if not await is_uploader(uid): return await message.reply_text(capsify(f"🎀 `{name}` is not an uploader! 🚧"))
+    if not await is_uploader(uid): return await message.reply_text(capsify(f"🎀 `{name}` is not an uploader! 🚧"), parse_mode=enums.ParseMode.MARKDOWN)
     await remove_uploader(uid)
-    await message.reply_text(capsify(f"🚧 **Done!** `{name}` is no longer an uploader! 🎀"))
+    await message.reply_text(capsify(f"🚧 **Done!** `{name}` is no longer an uploader! 🎀"), parse_mode=enums.ParseMode.MARKDOWN)
 
 @app.on_message(filters.command("uploaderlist") & sudo_filter)
 async def cmd_uploaderlist(client, message: Message):
