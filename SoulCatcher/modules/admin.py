@@ -13,7 +13,7 @@ import asyncio, subprocess, sys, time, io, traceback, random, logging
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.errors import PeerIdInvalid, FloodWait, ChatAdminRequired, UserPrivacyRestricted
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -104,12 +104,12 @@ async def _resolve_target(client, message):
 @app.on_message(filters.command("gban") & sudo_filter)
 async def cmd_gban(client, message: Message):
     uid, name, reason = await _resolve_target(client, message)
-    if not uid: return await message.reply_text(capsify("Usage: `/gban <user_id/reply> <reason>`"))
+    if not uid: return await message.reply_text(capsify("Usage: `/gban <user_id/reply> <reason>`"), parse_mode=enums.ParseMode.MARKDOWN)
     if uid in OWNER_IDS: return await message.reply_text("❌ Can't gban the owner!")
     if await is_user_globally_banned(uid): return await message.reply_text(f"⚠️ [{name}](tg://user?id={uid}) is already gbanned!")
     await add_to_global_ban(uid, reason, message.from_user.id)
     all_chats = await get_all_chats(); total = len(all_chats); banned = 0; failed = 0
-    pm = await message.reply_text(f"🚀 **Starting Global Ban**\n• Target: [{name}](tg://user?id={uid})\n• Reason: `{reason}`\n• Chats: `{total}`\n⏳ Working...")
+    pm = await message.reply_text(f"🚀 **Starting Global Ban**\n• Target: [{name}](tg://user?id={uid})\n• Reason: `{reason}`\n• Chats: `{total}`\n⏳ Working...", parse_mode=enums.ParseMode.MARKDOWN)
     _active_gbans[uid] = True
     for i in range(0, total, 10):
         if not _active_gbans.get(uid): break
@@ -120,47 +120,47 @@ async def cmd_gban(client, message: Message):
             if isinstance(r, Exception): failed+=1
             else: banned+=1
         if i % 50 == 0:
-            try: await pm.edit_text(f"⚡ Banning... `{banned+failed}/{total}` ({int((banned+failed)/total*100)}%)")
+            try: await pm.edit_text(f"⚡ Banning... `{banned+failed}/{total}` ({int((banned+failed)/total*100)}%)", parse_mode=enums.ParseMode.MARKDOWN)
             except Exception: pass
         await asyncio.sleep(0.3)
     _active_gbans.pop(uid, None)
-    await pm.edit_text(f"✅ **Global Ban Complete!**\n• Banned in: `{banned}` chats\n• Failed: `{failed}`\n• Reason: `{reason}`")
+    await pm.edit_text(f"✅ **Global Ban Complete!**\n• Banned in: `{banned}` chats\n• Failed: `{failed}`\n• Reason: `{reason}`", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"GBAN: {name} ({uid}) by {message.from_user.id}")
 
 
 @app.on_message(filters.command("ungban") & sudo_filter)
 async def cmd_ungban(client, message: Message):
     uid, name, _ = await _resolve_target(client, message)
-    if not uid: return await message.reply_text("Usage: `/ungban <user_id/reply>`")
+    if not uid: return await message.reply_text("Usage: `/ungban <user_id/reply>`", parse_mode=enums.ParseMode.MARKDOWN)
     if not await is_user_globally_banned(uid): return await message.reply_text(f"⚠️ Not gbanned.")
     await remove_from_global_ban(uid)
     all_chats = await get_all_chats(); unbanned = 0
-    pm = await message.reply_text(f"🔓 Unbanning `{name}` from `{len(all_chats)}` chats...")
+    pm = await message.reply_text(f"🔓 Unbanning `{name}` from `{len(all_chats)}` chats...", parse_mode=enums.ParseMode.MARKDOWN)
     for cid in all_chats:
         try: await client.unban_chat_member(cid, uid); unbanned+=1
         except Exception: pass
         await asyncio.sleep(0.1)
-    await pm.edit_text(f"✅ `{name}` ungbanned from `{unbanned}` chats!")
+    await pm.edit_text(f"✅ `{name}` ungbanned from `{unbanned}` chats!", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"UNGBAN: {name} ({uid}) by {message.from_user.id}")
 
 
 @app.on_message(filters.command("gmute") & sudo_filter)
 async def cmd_gmute(client, message: Message):
     uid, name, reason = await _resolve_target(client, message)
-    if not uid: return await message.reply_text("Usage: `/gmute <user_id/reply> <reason>`")
+    if not uid: return await message.reply_text("Usage: `/gmute <user_id/reply> <reason>`", parse_mode=enums.ParseMode.MARKDOWN)
     if await is_user_globally_muted(uid): return await message.reply_text("⚠️ Already gmuted.")
     await add_to_global_mute(uid, reason, message.from_user.id)
-    await message.reply_text(f"🔇 **{name}** has been globally muted.\nReason: `{reason}`")
+    await message.reply_text(f"🔇 **{name}** has been globally muted.\nReason: `{reason}`", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"GMUTE: {name} ({uid}) by {message.from_user.id}")
 
 
 @app.on_message(filters.command("ungmute") & sudo_filter)
 async def cmd_ungmute(client, message: Message):
     uid, name, _ = await _resolve_target(client, message)
-    if not uid: return await message.reply_text("Usage: `/ungmute <user_id/reply>`")
+    if not uid: return await message.reply_text("Usage: `/ungmute <user_id/reply>`", parse_mode=enums.ParseMode.MARKDOWN)
     if not await is_user_globally_muted(uid): return await message.reply_text("⚠️ Not gmuted.")
     await remove_from_global_mute(uid)
-    await message.reply_text(f"✅ `{name}` has been globally unmuted.")
+    await message.reply_text(f"✅ `{name}` has been globally unmuted.", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"UNGMUTE: {name} ({uid}) by {message.from_user.id}")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,9 +183,9 @@ async def cmd_broadcast(client, message: Message):
             failed += 1
             log.warning(f"Broadcast failed to {cid}: {e}")
         if (i + 1) % 10 == 0:
-            await pm.edit_text(f"⚡ Sent to: `{success}` | Failed: `{failed}` | Progress: `{i+1}/{len(chats)}`")
+            await pm.edit_text(f"⚡ Sent to: `{success}` | Failed: `{failed}` | Progress: `{i+1}/{len(chats)}`", parse_mode=enums.ParseMode.MARKDOWN)
             await asyncio.sleep(0.5)
-    await pm.edit_text(f"✅ **Broadcast Complete!**\n• Success: `{success}`\n• Failed: `{failed}`")
+    await pm.edit_text(f"✅ **Broadcast Complete!**\n• Success: `{success}`\n• Failed: `{failed}`", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"BROADCAST by {message.from_user.id}: {success} success, {failed} failed")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,7 +196,7 @@ async def cmd_broadcast(client, message: Message):
 async def cmd_transfer(_, message: Message):
     args = message.command
     if len(args) < 3:
-        return await message.reply_text("Usage: `/transfer <from_user_id> <to_user_id>`")
+        return await message.reply_text("Usage: `/transfer <from_user_id> <to_user_id>`", parse_mode=enums.ParseMode.MARKDOWN)
     try:
         from_id, to_id = int(args[1]), int(args[2])
     except ValueError:
@@ -250,7 +250,7 @@ async def cmd_eval(_, message: Message):
     
     code = message.text.split(None, 1)
     if len(code) < 2:
-        return await message.reply_text("❌ No code provided.\nUsage: `/eval <python_code>`")
+        return await message.reply_text("❌ No code provided.\nUsage: `/eval <python_code>`", parse_mode=enums.ParseMode.MARKDOWN)
     
     code = code[1].strip().strip("`")
     if code.startswith("python"):
@@ -274,7 +274,7 @@ async def cmd_eval(_, message: Message):
         out = traceback.format_exc()
         log.error(f"EVAL error by {user_id}: {e}")
     
-    await message.reply_text(f"```\n{out[:4000]}\n```")
+    await message.reply_text(f"```\n{out[:4000]}\n```", parse_mode=enums.ParseMode.MARKDOWN)
 
 
 @app.on_message(filters.command(["shell","sh","bash"]) & dev_filter)
@@ -308,7 +308,7 @@ async def cmd_shell(_, message: Message):
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
         result = (out or b"").decode() + (err or b"").decode()
-        await pm.edit_text(f"```\n{result[:4000] or 'No output'}\n```")
+        await pm.edit_text(f"```\n{result[:4000] or 'No output'}\n```", parse_mode=enums.ParseMode.MARKDOWN)
     except asyncio.TimeoutError:
         await pm.edit_text("❌ Command timed out (60s).")
         log.warning(f"SHELL timeout by {user_id}: {cmd[1][:100]}...")
@@ -349,7 +349,7 @@ async def cmd_gitpull(_, message: Message):
 @app.on_message(filters.command("addchar") & sudo_filter)
 async def cmd_addchar(_, message: Message):
     if not message.reply_to_message:
-        return await message.reply_text("Reply to a photo/video with: `/addchar anime | name | rarity_id`")
+        return await message.reply_text("Reply to a photo/video with: `/addchar anime | name | rarity_id`", parse_mode=enums.ParseMode.MARKDOWN)
     text = message.text.split(None, 1)
     if len(text) < 2:
         return await message.reply_text("❌ Need: Name | Anime | RarityID")
@@ -365,7 +365,7 @@ async def cmd_addchar(_, message: Message):
     from ..rarity import get_rarity_by_id
     tier = get_rarity_by_id(rid)
     if not tier:
-        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`.")
+        return await message.reply_text(f"❌ Unknown rarity ID `{rid}`.", parse_mode=enums.ParseMode.MARKDOWN)
     if tier.video_only and not (message.reply_to_message and message.reply_to_message.video):
         return await message.reply_text(f"❌ Rarity **{tier.display_name}** is VIDEO ONLY. Reply to a video!")
     doc = {
@@ -389,9 +389,9 @@ async def cmd_addchar(_, message: Message):
 async def cmd_delchar(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/delchar <char_id>`")
+        return await message.reply_text("Usage: `/delchar <char_id>`", parse_mode=enums.ParseMode.MARKDOWN)
     await update_character(args[1], {"$set": {"enabled": False}})
-    await message.reply_text(f"🗑 Character `{args[1]}` disabled.")
+    await message.reply_text(f"🗑 Character `{args[1]}` disabled.", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"DELCHAR: {args[1]} disabled by {message.from_user.id}")
 
 
@@ -400,7 +400,7 @@ async def cmd_setmode(_, message: Message):
     args = message.command
     if len(args) < 2:
         modes = "\n".join(f"• `{k}` — {v['label']}" for k,v in GAME_MODES.items())
-        return await message.reply_text(f"🎮 **Available Modes:**\n{modes}\n\nUsage: `/setmode <mode>`")
+        return await message.reply_text(f"🎮 **Available Modes:**\n{modes}\n\nUsage: `/setmode <mode>`", parse_mode=enums.ParseMode.MARKDOWN)
     import SoulCatcher.rarity as _mod
     mode = args[1].lower()
     if mode not in GAME_MODES:
@@ -426,7 +426,7 @@ async def cmd_ban(_, message: Message):
     reason = " ".join(args[2:]) if len(args) > 2 else "Admin action"
     from ..database import ban_user_db
     await ban_user_db(uid, reason)
-    await message.reply_text(f"🚫 User `{uid}` banned. Reason: `{reason}`")
+    await message.reply_text(f"🚫 User `{uid}` banned. Reason: `{reason}`", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"BAN: {uid} banned by {message.from_user.id} (Reason: {reason})")
 
 
@@ -438,5 +438,5 @@ async def cmd_unban(_, message: Message):
     uid = message.reply_to_message.from_user.id if message.reply_to_message else int(args[1])
     from ..database import unban_user_db
     await unban_user_db(uid)
-    await message.reply_text(f"✅ User `{uid}` unbanned.")
+    await message.reply_text(f"✅ User `{uid}` unbanned.", parse_mode=enums.ParseMode.MARKDOWN)
     log.info(f"UNBAN: {uid} unbanned by {message.from_user.id}")
