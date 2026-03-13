@@ -29,6 +29,11 @@ FIXES APPLIED:
                  ImportError crash at bot startup.
   [FIX-IMPORT-2] Added top_collectors(limit) — used by the new
                  /topcollector command in profile.py.
+  [FIX-SPAWN-1]  Added set_group_spawn_limit(chat_id, limit) — persists
+                 the per-group spawn message threshold set via /setspawn.
+                 Stored as `spawn_msg_limit` on the group_settings doc.
+                 spawn.py reads group.get("spawn_msg_limit", <global default>)
+                 so existing groups without the field keep the old behaviour.
 """
 from __future__ import annotations
 import uuid, logging
@@ -313,6 +318,25 @@ async def reset_group_msg(chat_id):
     await _col("group_settings").update_one(
         {"chat_id": chat_id},
         {"$set": {"message_count": 0, "last_spawn": datetime.utcnow()}})
+
+async def set_group_spawn_limit(chat_id: int, limit: int) -> None:
+    """
+    [FIX-SPAWN-1] Persists the per-group spawn message threshold.
+
+    Stores `spawn_msg_limit` on the group_settings document.  spawn.py reads
+    it as group.get("spawn_msg_limit", SPAWN_SETTINGS["messages_per_spawn"])
+    so groups that have never called /setspawn keep the global default and
+    no migration is needed.
+
+    Called exclusively from spawn.py::cmd_setspawn() after admin validation
+    and range-checking (1 – 10 000) have already passed.
+    """
+    await _col("group_settings").update_one(
+        {"chat_id": chat_id},
+        {"$set": {"spawn_msg_limit": limit}},
+        upsert=True,
+    )
+    log.info(f"Group {chat_id}: spawn_msg_limit → {limit}")
 
 async def get_all_group_ids():
     docs = await _col("group_settings").find({}, {"chat_id": 1}).to_list(None)
