@@ -64,6 +64,7 @@ _ALL_COMMANDS = [
     "wish", "wishlist", "profile", "status", "rank", "top", "toprarity",
     "richest", "rarityinfo", "event",
     "topcollector", "topc", "tc",
+    "wguess",
     "gban", "ungban", "gmute", "ungmute", "broadcast", "transfer",
     "eval", "ev", "shell", "sh", "bash", "gitpull", "update",
     "addchar", "delchar", "setmode", "forcedrop", "ban", "unban",
