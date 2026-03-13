@@ -7,7 +7,7 @@ Split from collection.py.
 from __future__ import annotations
 import logging
 
-from pyrogram import filters
+from pyrogram import enums, filters
 from pyrogram.types import Message
 
 from .. import app
@@ -25,7 +25,7 @@ log = logging.getLogger("SoulCatcher.fav")
 async def cmd_setfav(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/setfav <instance_id>`")
+        return await message.reply_text("Usage: `/setfav <instance_id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     uid  = message.from_user.id
     iid  = args[1].upper()
@@ -51,7 +51,7 @@ async def cmd_setfav(_, message: Message):
 async def cmd_view(_, message: Message):
     args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/view <instance_id>`")
+        return await message.reply_text("Usage: `/view <instance_id>`", parse_mode=enums.ParseMode.MARKDOWN)
 
     uid  = message.from_user.id
     iid  = args[1].upper()
