@@ -43,7 +43,7 @@ from ..database import (
     is_user_banned,
     add_to_harem,
     add_balance,
-    _col,
+    get_db,
 )
 from ..rarity import rarity_display, get_rarity
 
@@ -120,7 +120,7 @@ async def _do_cache_refresh() -> None:
         log.info("Summon cache refresh starting…")
         t0 = time.monotonic()
 
-        docs = await _col("characters").find(
+        docs = await get_db()["characters"].find(
             {
                 "enabled":  True,
                 "img_url":  {"$exists": True, "$nin": [None, ""]},
@@ -214,14 +214,23 @@ async def _safe_edit_caption(
     caption: str,
     buttons: list | None = None,
 ) -> None:
+    from pyrogram import enums
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     try:
-        await message.edit_caption(caption, reply_markup=markup)
+        await message.edit_caption(
+            caption,
+            reply_markup=markup,
+            parse_mode=enums.ParseMode.MARKDOWN,
+        )
     except FloodWait as exc:
         log.warning("FloodWait on edit_caption: %ds", exc.value)
         await asyncio.sleep(exc.value)
         try:
-            await message.edit_caption(caption, reply_markup=markup)
+            await message.edit_caption(
+                caption,
+                reply_markup=markup,
+                parse_mode=enums.ParseMode.MARKDOWN,
+            )
         except Exception as e:
             log.error("edit_caption retry failed: %s", e)
     except Exception as e:
@@ -372,11 +381,16 @@ async def cmd_reloadsummon(_, message: Message) -> None:
 
 @app.on_message(filters.command("summon"))
 async def cmd_summon(_, message: Message) -> None:
+    # /summon is group-only — no DMs
     if message.chat.type == "private":
-        await _send_unauthorized(message, is_private=True)
-        return
-    if not _is_authorized(message.chat.id):
-        await _send_unauthorized(message, is_private=False)
+        await message.reply_text(
+            "**𖤍  Sealed Territory**\n\n"
+            "Soul rituals must be performed inside a group.\n"
+            f"› Community — @{SUPPORT_GROUP}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("↳ Enter the Sanctum", url=f"https://t.me/{SUPPORT_GROUP}")
+            ]]),
+        )
         return
 
     user_id = message.from_user.id
@@ -638,10 +652,7 @@ async def cb_summon_retreat(_, query) -> None:
 @app.on_message(filters.command("exitsummon"))
 async def cmd_exitsummon(_, message: Message) -> None:
     if message.chat.type == "private":
-        await _send_unauthorized(message, is_private=True)
-        return
-    if not _is_authorized(message.chat.id):
-        await _send_unauthorized(message, is_private=False)
+        await message.reply_text("⟡ No seal is active in private chats.")
         return
 
     user_id = message.from_user.id
