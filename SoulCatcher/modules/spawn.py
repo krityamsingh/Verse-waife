@@ -48,6 +48,7 @@ _ALL_COMMANDS = [
     "adduploader", "rmuploader", "uploaderlist",
     "upload", "il", "uchar",
     "setspawn",
+    "summon", "exitsummon", "reloadsummon",
 ]
 
 
