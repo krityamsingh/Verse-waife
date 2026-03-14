@@ -1,24 +1,11 @@
 """
 SoulCatcher/modules/summon.py
-/summon — ritual duel against a random character.
-
-Speed notes:
-  1. Cache fetches only 5 fields via server-side projection + filter.
-  2. Stale cache refreshes in background — current request never blocked.
-  3. Persistent aiohttp session — one TCP pool reused across all downloads.
-  4. Loading message sent instantly before download begins.
-  5. Ritual animation: 3 × 0.5 s = 1.5 s total.
+Commands: /summon  /exitsummon  /reloadsummon
 """
 
-from __future__ import annotations
-
 import asyncio
-import aiohttp
 import logging
-import os
 import random
-import tempfile
-import time
 from datetime import datetime
 
 from pyrogram import filters, enums
@@ -30,131 +17,64 @@ from pyrogram.types import (
 )
 
 from .. import app
-from ..config import OWNER_IDS, SUPPORT_GROUP, BOT_NAME
+from ..config import OWNER_IDS, SUPPORT_GROUP
 from ..database import (
     get_or_create_user,
     is_user_banned,
     add_to_harem,
     add_balance,
-    get_db,
+    get_random_character,
 )
-from ..rarity import rarity_display, get_rarity
+from ..rarity import (
+    rarity_display,
+    get_rarity,
+    get_all_rarities,
+    get_all_sub_rarities,
+)
 
-log  = logging.getLogger("SoulCatcher.summon")
-HTML = enums.ParseMode.HTML
+log = logging.getLogger("SoulCatcher.summon")
 
+# ── Config ────────────────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Internal rarity `name` keys to exclude (cartoon = video-only Verse tier)
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
-
 SUMMON_COOLDOWN_SECS = 10
-CACHE_MAX_AGE_SECS   = 1800
-DOWNLOAD_TIMEOUT     = 30
 MAX_RETRIES          = 5
 
+# ── In-memory state ───────────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  IN-MEMORY STATE
-# ══════════════════════════════════════════════════════════════════════════════
+_last_summon: dict[int, datetime] = {}
+_active:      dict[int, dict]     = {}
+_stats:       dict[int, dict]     = {}
 
-_last_summon_times: dict[int, datetime] = {}
-_active_summons:    dict[int, dict]     = {}
-_summon_stats:      dict[int, dict]     = {}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PERSISTENT HTTP SESSION
-# ══════════════════════════════════════════════════════════════════════════════
-
-_http_session: aiohttp.ClientSession | None = None
-
-
-def _get_http_session() -> aiohttp.ClientSession:
-    global _http_session
-    if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession(
-            headers={"User-Agent": "Mozilla/5.0"},
-            connector=aiohttp.TCPConnector(limit=10),
-            timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT),
-        )
-    return _http_session
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  CHARACTER CACHE
-# ══════════════════════════════════════════════════════════════════════════════
-
-_character_cache:  list[dict] = []
-_cache_loaded_at:  float      = 0.0
-_cache_refreshing: bool       = False
-
-
-async def _do_cache_refresh() -> None:
-    global _character_cache, _cache_loaded_at, _cache_refreshing
-    try:
-        log.info("Summon cache refresh starting…")
-        t0   = time.monotonic()
-        docs = await get_db()["characters"].find(
-            {
-                "enabled": True,
-                "img_url": {"$exists": True, "$nin": [None, ""]},
-                "rarity":  {"$nin": list(EXCLUDED_RARITIES)},
-            },
-            {"_id": 0, "id": 1, "name": 1, "anime": 1, "rarity": 1, "img_url": 1},
-        ).to_list(length=None)
-        _character_cache = [d for d in docs if d.get("img_url")]
-        _cache_loaded_at = time.monotonic()
-        log.info("Summon cache ready: %d chars in %.2fs",
-                 len(_character_cache), time.monotonic() - t0)
-    except Exception:
-        log.exception("Summon cache refresh failed")
-    finally:
-        _cache_refreshing = False
-
-
-async def _ensure_cache() -> None:
-    global _cache_refreshing
-    if not _character_cache:
-        _cache_refreshing = True
-        await _do_cache_refresh()
-        return
-    if time.monotonic() - _cache_loaded_at >= CACHE_MAX_AGE_SECS and not _cache_refreshing:
-        _cache_refreshing = True
-        asyncio.create_task(_do_cache_refresh())
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _is_owner(uid: int) -> bool:
-    return uid in OWNER_IDS
-
-
-def _stats(uid: int) -> dict:
-    return _summon_stats.get(uid, {
-        "wins": 0, "losses": 0,
-        "streak": 0, "max_streak": 0, "total": 0,
-    })
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _esc(t) -> str:
     return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _get_stats(uid: int) -> dict:
+    if uid not in _stats:
+        _stats[uid] = {"wins": 0, "losses": 0, "streak": 0, "max_streak": 0, "total": 0}
+    return _stats[uid]
+
+
 async def _safe_edit(msg: Message, text: str, buttons: list | None = None) -> None:
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     try:
-        await msg.edit_caption(text, reply_markup=markup, parse_mode=HTML)
+        await msg.edit_caption(
+            text,
+            reply_markup=markup,
+            parse_mode=enums.ParseMode.HTML,
+        )
     except FloodWait as e:
         log.warning("FloodWait edit_caption: %ds", e.value)
         await asyncio.sleep(e.value)
         try:
-            await msg.edit_caption(text, reply_markup=markup, parse_mode=HTML)
+            await msg.edit_caption(
+                text,
+                reply_markup=markup,
+                parse_mode=enums.ParseMode.HTML,
+            )
         except Exception as ex:
             log.error("edit_caption retry failed: %s", ex)
     except Exception as e:
@@ -167,61 +87,41 @@ async def _safe_answer(query, text: str, alert: bool = False) -> None:
     except QueryIdInvalid:
         pass
     except Exception as e:
-        log.warning("safe_answer error: %s", e)
+        log.warning("safe_answer: %s", e)
 
 
-async def _download_to_temp(url: str) -> str:
-    session = _get_http_session()
-    async with session.get(url) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status}")
-        data = await resp.read()
-    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    try:
-        tmp.write(data)
-    finally:
-        tmp.close()
-    return tmp.name
+def _eligible_rarities() -> list[str]:
+    all_r = [r.name for r in get_all_rarities() + get_all_sub_rarities()]
+    return [name for name in all_r if name not in EXCLUDED_RARITIES]
 
 
-def _del(path: str | None) -> None:
-    if path:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  OWNER COMMANDS
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Owner command ─────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("reloadsummon"))
 async def cmd_reloadsummon(_, message: Message) -> None:
-    if not _is_owner(message.from_user.id):
-        return await message.reply_text("𖤍 Not your seal to refresh.", parse_mode=HTML)
-    global _cache_loaded_at
-    _cache_loaded_at = 0.0
-    await _do_cache_refresh()
+    if message.from_user.id not in OWNER_IDS:
+        return await message.reply_text(
+            "𖤍 Not your seal to refresh.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    rarities = _eligible_rarities()
     await message.reply_text(
-        f"⟡ <b>Soul pool refreshed</b>\n"
-        f"<code>{len(_character_cache)} spirits standing by</code>",
-        parse_mode=HTML,
+        f"⟡ <b>Summon pool</b>\n"
+        f"<code>{len(rarities)} eligible tiers: {', '.join(rarities)}</code>",
+        parse_mode=enums.ParseMode.HTML,
     )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  /summon
-# ══════════════════════════════════════════════════════════════════════════════
+# ── /summon ───────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("summon"))
 async def cmd_summon(_, message: Message) -> None:
-    if message.chat.type == "private":
+    if message.chat.type == enums.ChatType.PRIVATE:
         return await message.reply_text(
             f"<b>𖤍  Sealed Territory</b>\n\n"
             f"Soul rituals must be performed inside a group.\n"
             f"› Community — @{_esc(SUPPORT_GROUP)}",
-            parse_mode=HTML,
+            parse_mode=enums.ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "↳ Enter the Sanctum",
@@ -229,6 +129,9 @@ async def cmd_summon(_, message: Message) -> None:
                 )
             ]]),
         )
+
+    if not message.from_user:
+        return
 
     user_id = message.from_user.id
 
@@ -241,17 +144,18 @@ async def cmd_summon(_, message: Message) -> None:
 
     if await is_user_banned(user_id):
         return await message.reply_text(
-            "𖤍 Your soul-binding rights have been revoked.", parse_mode=HTML
+            "𖤍 Your soul-binding rights have been revoked.",
+            parse_mode=enums.ParseMode.HTML,
         )
 
-    if user_id in _active_summons:
+    if user_id in _active:
         return await message.reply_text(
             "⟡ A spirit is already waiting on your seal.\n"
             "<code>Resolve it or use /exitsummon to release it.</code>",
-            parse_mode=HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
 
-    last = _last_summon_times.get(user_id)
+    last = _last_summon.get(user_id)
     if last:
         elapsed = (datetime.now() - last).total_seconds()
         if elapsed < SUMMON_COOLDOWN_SECS:
@@ -259,82 +163,79 @@ async def cmd_summon(_, message: Message) -> None:
             return await message.reply_text(
                 f"𖤍 The ritual circle is still recovering.\n"
                 f"<code>{remaining}s until the next seal</code>",
-                parse_mode=HTML,
+                parse_mode=enums.ParseMode.HTML,
             )
 
-    await _ensure_cache()
-    if not _character_cache:
+    eligible = _eligible_rarities()
+    if not eligible:
         return await message.reply_text(
-            "⟡ The spirit world is quiet right now.\n"
-            "<code>No souls could be reached — try again shortly.</code>",
-            parse_mode=HTML,
+            "⟡ The spirit world is quiet right now.",
+            parse_mode=enums.ParseMode.HTML,
         )
 
-    loading_msg = await message.reply_text("𖤍  <i>Drawing the seal…</i>", parse_mode=HTML)
+    loading_msg = await message.reply_text(
+        "𖤍  <i>Drawing the seal…</i>",
+        parse_mode=enums.ParseMode.HTML,
+    )
 
-    pool      = random.sample(_character_cache, min(MAX_RETRIES, len(_character_cache)))
-    character = None
-    last_exc  = None
+    character  = None
+    rarity_str = ""
 
-    for candidate in pool:
-        img_url  = candidate.get("img_url", "")
-        tmp_path = None
-        if not img_url:
+    for _ in range(MAX_RETRIES):
+        rarity_name = random.choice(eligible)
+        char = await get_random_character(rarity_name)
+        if not char or not char.get("img_url"):
             continue
-        try:
-            tmp_path   = await _download_to_temp(img_url)
-            rarity_str = rarity_display(candidate.get("rarity", ""))
-
-            caption = (
-                f"≺  Spirit Detected  ≻\n\n"
-                f"<b>{_esc(candidate.get('name', 'Unknown Spirit'))}</b>\n"
-                f"<code>{_esc(candidate.get('anime', 'Origin unknown'))}</code>\n\n"
-                f"Rarity  ·  {_esc(rarity_str)}\n\n"
-                f"<i>A restless soul stirs nearby.\n"
-                f"Draw the seal before it dissolves.</i>"
-            )
-            with open(tmp_path, "rb") as fh:
-                await message.reply_photo(
-                    photo=fh,
-                    caption=caption,
-                    parse_mode=HTML,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton(
-                            "✦  Draw the Seal",
-                            callback_data=f"summon_begin_{user_id}",
-                        )
-                    ]]),
-                )
-            character = candidate
-            _active_summons[user_id] = character
-            log.info("/summon  user=%d  char=%s  rarity=%s",
-                     user_id, character.get("name"), character.get("rarity"))
-            break
-
-        except Exception as exc:
-            log.warning("/summon URL failed  char=%s  url=%r  err=%s",
-                        candidate.get("name"), img_url, exc)
-            last_exc = exc
-        finally:
-            _del(tmp_path)
+        character  = char
+        rarity_str = rarity_display(character.get("rarity", rarity_name))
+        break
 
     try:
         await loading_msg.delete()
     except Exception:
         pass
 
-    if character is None:
-        log.error("/summon all %d candidates failed  user=%d", MAX_RETRIES, user_id)
-        await message.reply_text(
+    if not character:
+        return await message.reply_text(
             "⟡ The spirits would not answer.\n"
-            "<code>All seals dissolved — try again.</code>",
-            parse_mode=HTML,
+            "<code>No souls could be reached — try again.</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    caption = (
+        f"≺  Spirit Detected  ≻\n\n"
+        f"<b>{_esc(character.get('name', 'Unknown Spirit'))}</b>\n"
+        f"<code>{_esc(character.get('anime', 'Origin unknown'))}</code>\n\n"
+        f"Rarity  ·  {_esc(rarity_str)}\n\n"
+        f"<i>A restless soul stirs nearby.\n"
+        f"Draw the seal before it dissolves.</i>"
+    )
+
+    try:
+        await message.reply_photo(
+            photo=character["img_url"],
+            caption=caption,
+            parse_mode=enums.ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "✦  Draw the Seal",
+                    callback_data=f"summon_begin_{user_id}",
+                )
+            ]]),
+        )
+        _active[user_id] = character
+        log.info("/summon  user=%d  char=%s  rarity=%s",
+                 user_id, character.get("name"), character.get("rarity"))
+    except Exception as e:
+        log.error("/summon reply_photo failed  user=%d  err=%s", user_id, e)
+        await message.reply_text(
+            "⟡ The seal dissolved before it could form.\n"
+            "<code>Try again shortly.</code>",
+            parse_mode=enums.ParseMode.HTML,
         )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CALLBACKS
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^summon_begin_(\d+)$"))
 async def cb_summon_begin(_, query) -> None:
@@ -342,11 +243,11 @@ async def cb_summon_begin(_, query) -> None:
 
     if query.from_user.id != user_id:
         return await _safe_answer(query, "This seal was drawn by another hand.", alert=True)
-    if user_id not in _active_summons:
+    if user_id not in _active:
         return await _safe_answer(query, "The spirit dissolved before you could act.", alert=True)
 
     await query.answer()
-    char       = _active_summons[user_id]
+    char       = _active[user_id]
     rarity_str = rarity_display(char.get("rarity", ""))
 
     await _safe_edit(
@@ -368,12 +269,14 @@ async def cb_summon_engage(_, query) -> None:
 
     if query.from_user.id != user_id:
         return await _safe_answer(query, "This ritual belongs to another.", alert=True)
-    if user_id not in _active_summons:
+    if user_id not in _active:
         return await _safe_answer(query, "The seal closed before you could finish.", alert=True)
 
     await query.answer()
-    char       = _active_summons[user_id]
+    char       = _active.pop(user_id)
     rarity_str = rarity_display(char.get("rarity", ""))
+    stats      = _get_stats(user_id)
+    stats["total"] += 1
 
     for phase in [
         "⟡  <i>The sigil takes shape…</i>",
@@ -383,8 +286,6 @@ async def cb_summon_engage(_, query) -> None:
         await _safe_edit(query.message, phase)
         await asyncio.sleep(0.5)
 
-    stats = _stats(user_id)
-    stats["total"] += 1
     success = random.random() < 0.5
 
     if success:
@@ -397,8 +298,8 @@ async def cb_summon_engage(_, query) -> None:
         stats["wins"]      += 1
         stats["streak"]    += 1
         stats["max_streak"] = max(stats["streak"], stats["max_streak"])
-        log.info("summon WIN  user=%d  char=%s  rarity=%s  kakera+%d",
-                 user_id, char.get("name"), char.get("rarity"), kakera_bonus)
+        log.info("summon WIN  user=%d  char=%s  kakera+%d",
+                 user_id, char.get("name"), kakera_bonus)
 
         header = random.choice([
             f"≺  Soul Bound  ≻\n\n{_esc(char['name'])} has been sealed into your collection.",
@@ -429,9 +330,7 @@ async def cb_summon_engage(_, query) -> None:
             f"<i>Redraw the circle and try again.</i>",
         )
 
-    _summon_stats[user_id]      = stats
-    _last_summon_times[user_id] = datetime.now()
-    _active_summons.pop(user_id, None)
+    _last_summon[user_id] = datetime.now()
 
 
 @app.on_callback_query(filters.regex(r"^summon_retreat_(\d+)$"))
@@ -440,52 +339,49 @@ async def cb_summon_retreat(_, query) -> None:
 
     if query.from_user.id != user_id:
         return await _safe_answer(query, "This thread of fate is not yours.", alert=True)
-    if user_id not in _active_summons:
+    if user_id not in _active:
         return await _safe_answer(query, "The soul already drifted away.", alert=True)
 
     await query.answer()
-    char = _active_summons[user_id]
+    char = _active.pop(user_id)
     log.info("summon RETREAT  user=%d  char=%s", user_id, char.get("name"))
+
+    stats           = _get_stats(user_id)
+    stats["losses"] += 1
+    stats["streak"]  = 0
+    _last_summon[user_id] = datetime.now()
 
     await _safe_edit(
         query.message,
         random.choice([
-            f"<b>≺  Seal Released  ≻</b>\n\nYou unravelled the threads.\n{_esc(char['name'])} drifts back into the void.",
-            f"<b>≺  Ritual Abandoned  ≻</b>\n\nThe sigil fades.\n{_esc(char['name'])} slips through your fingers.",
-            f"<b>≺  The Circle Opens  ≻</b>\n\nYou let the seal dissolve.\n{_esc(char['name'])} is free.",
+            f"<b>≺  Seal Released  ≻</b>\n\n"
+            f"You unravelled the threads.\n{_esc(char['name'])} drifts back into the void.",
+            f"<b>≺  Ritual Abandoned  ≻</b>\n\n"
+            f"The sigil fades.\n{_esc(char['name'])} slips through your fingers.",
+            f"<b>≺  The Circle Opens  ≻</b>\n\n"
+            f"You let the seal dissolve.\n{_esc(char['name'])} is free.",
         ]),
     )
 
-    stats           = _stats(user_id)
-    stats["losses"] += 1
-    stats["streak"]  = 0
-    _summon_stats[user_id]      = stats
-    _last_summon_times[user_id] = datetime.now()
-    _active_summons.pop(user_id, None)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  /exitsummon
-# ══════════════════════════════════════════════════════════════════════════════
+# ── /exitsummon ───────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("exitsummon"))
 async def cmd_exitsummon(_, message: Message) -> None:
-    if message.chat.type == "private":
-        return await message.reply_text(
-            "⟡ No seal is active in private chats.", parse_mode=HTML
-        )
+    if not message.from_user:
+        return
 
     user_id = message.from_user.id
-    if user_id in _active_summons:
-        char = _active_summons.pop(user_id)
+    if user_id in _active:
+        char = _active.pop(user_id)
         log.info("/exitsummon  user=%d  abandoned=%s", user_id, char.get("name"))
         await message.reply_text(
             f"<b>≺  Ritual Severed  ≻</b>\n\n"
             f"<i>The seal crumbles. {_esc(char['name'])} returns to the void.</i>",
-            parse_mode=HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
     else:
         await message.reply_text(
             "⟡ No seal is active.\n<code>Use /summon to call a spirit.</code>",
-            parse_mode=HTML,
+            parse_mode=enums.ParseMode.HTML,
         )
