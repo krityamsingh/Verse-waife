@@ -656,4 +656,3 @@ async def cmd_exitsummon(_, message: Message) -> None:
         await message.reply_text(
             "⟡ No seal is active.\n`Use /summon to call a spirit.`"
         )
-      
