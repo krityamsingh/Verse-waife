@@ -19,11 +19,13 @@ from ..database import (
     add_to_harem, get_or_create_user, add_balance,
     count_rarity_in_harem, get_wishers, is_user_banned,
     get_character, set_group_spawn_limit,
-    # NOTE: claim_spawn is no longer used — guessing replaces the button flow.
-    # We keep expire_spawn / unclaim_spawn for cleanup paths.
 )
 
 log = logging.getLogger("SoulCatcher.spawn")
+
+# ── Default message threshold override ────────────────────────────────────────
+# If SPAWN_SETTINGS doesn't define messages_per_spawn we fall back to 100.
+_DEFAULT_SPAWN_THRESHOLD = 100
 
 # ── Active guess sessions ──────────────────────────────────────────────────────
 # Maps  chat_id  →  dict with all live-spawn metadata.
@@ -61,6 +63,26 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_text).strip().lower()
 
 
+def _name_tokens(name: str) -> list[str]:
+    """
+    Returns every normalized token (word) in a character name PLUS
+    the full normalized name itself.
+
+    'Monkey D Luffy'  →  ['monkey', 'd', 'luffy', 'monkey d luffy']
+
+    This lets users claim with just 'Luffy', 'Monkey', or the full name.
+    Single-character tokens (like the 'D' in 'Monkey D Luffy') are only
+    accepted when they are at least 2 characters long to avoid false
+    positives from stray letters in chat.
+    """
+    full_norm = _normalize(name)
+    parts = full_norm.split()
+    # Keep tokens that are at least 2 chars so lone initials don't trigger.
+    tokens = [p for p in parts if len(p) >= 2]
+    tokens.append(full_norm)           # always allow the full name too
+    return list(dict.fromkeys(tokens)) # deduplicate while preserving order
+
+
 def _obscure_name(name: str) -> str:
     """
     Shows only the first letter of each word; everything else becomes ░.
@@ -75,27 +97,34 @@ def _obscure_name(name: str) -> str:
     return " ".join(parts)
 
 
-# ── /setspawn — owner / admin command ─────────────────────────────────────────
+def _match_guess(guess_norm: str, session: dict) -> bool:
+    """
+    Returns True if the normalised guess matches any accepted token
+    stored in the session (full name or any individual name part).
+    """
+    return guess_norm in session["answer_tokens"]
+
+
+# ── /setspawn — owner command ──────────────────────────────────────────────────
 
 @app.on_message(filters.command("setspawn") & filters.group)
 async def cmd_setspawn(client, message: Message):
     """
     Usage:  /setspawn <number>
     Sets how many messages must be sent before a character spawns.
-    Restricted to group owner and admins.
+    Restricted to the bot owner.
     """
     user_id = message.from_user.id
     chat_id = message.chat.id
 
-    # Permission check — only the bot owner may change the spawn limit.
     if user_id != 6118760915:
         return await message.reply_text("❌ Only the bot owner can change the spawn limit.")
 
-    args = message.command[1:]          # everything after /setspawn
+    args = message.command[1:]
     if not args or not args[0].isdigit():
         return await message.reply_text(
             "⚙️ **Usage:** `/setspawn <messages>`\n"
-            "Example: `/setspawn 10` — spawn after every 10 messages.\n"
+            "Example: `/setspawn 100` — spawn after every 100 messages.\n"
             "Allowed values: **1 – 10 000**"
         )
 
@@ -120,7 +149,7 @@ async def on_group_message(client, message: Message):
     session = _active_spawns.get(chat_id)
     if session:
         await _check_guess(client, message, chat_id, session)
-        # Don't count guessing messages toward the spawn counter; return early.
+        # Don't count guessing messages toward the spawn counter.
         return
 
     # ── Guard: disabled / banned groups ─────────────────────────────────────
@@ -129,14 +158,17 @@ async def on_group_message(client, message: Message):
         return
 
     # ── Increment and check threshold ───────────────────────────────────────
-    # Use the group's custom limit if set, otherwise fall back to the global default.
-    threshold = group.get("spawn_msg_limit", SPAWN_SETTINGS["messages_per_spawn"])
+    # Priority: group custom limit → SPAWN_SETTINGS → hard default of 100
+    threshold = group.get(
+        "spawn_msg_limit",
+        SPAWN_SETTINGS.get("messages_per_spawn", _DEFAULT_SPAWN_THRESHOLD),
+    )
     count = await increment_group_msg(chat_id)
     if count < threshold:
         return
 
     last     = group.get("last_spawn")
-    cooldown = group.get("spawn_cooldown", SPAWN_SETTINGS["cooldown_seconds"])
+    cooldown = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
     if last and (datetime.utcnow() - last).total_seconds() < cooldown:
         await reset_group_msg(chat_id)
         return
@@ -159,7 +191,7 @@ async def cmd_drop(client, message: Message):
         return await message.reply_text("⚠️ A character is already waiting to be guessed!")
 
     last     = group.get("last_spawn")
-    cooldown = group.get("spawn_cooldown", SPAWN_SETTINGS["cooldown_seconds"])
+    cooldown = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
     if last and (datetime.utcnow() - last).total_seconds() < cooldown:
         rem = int(cooldown - (datetime.utcnow() - last).total_seconds())
         return await message.reply_text(f"⏳ Next drop in **{rem}s**")
@@ -176,7 +208,7 @@ async def _do_spawn(client, message: Message, chat_id: int):
 
     if tier.spawn_requires_activity:
         g = await get_group(chat_id)
-        if g.get("message_count", 0) < SPAWN_SETTINGS["activity_threshold"]:
+        if g.get("message_count", 0) < SPAWN_SETTINGS.get("activity_threshold", 0):
             tier = get_rarity("common")
 
     sub  = roll_sub_rarity(tier.name)
@@ -188,18 +220,25 @@ async def _do_spawn(client, message: Message, chat_id: int):
     if char["rarity"] != eff.name:
         eff = get_rarity(char["rarity"]) or eff
 
-    reveal      = SPAWN_SETTINGS["reveal_rarity_on_spawn"]
+    reveal      = SPAWN_SETTINGS.get("reveal_rarity_on_spawn", True)
     rarity_hint = rarity_display(eff.name) if reveal else "❓ **???**"
     claim_win   = get_claim_window(eff.name)
     banner      = f"🚨 **RARE SPAWN ALERT!** {eff.emoji}\n\n" if eff.announce_spawn else ""
     hidden_name = _obscure_name(char["name"])
+
+    # Build hint showing how many name parts there are.
+    name_parts  = char["name"].split()
+    part_hint   = " · ".join(
+        f"`{p[0]}{'░' * (len(p)-1)}`" for p in name_parts
+    )
 
     text = (
         f"{banner}✨ **A mystery soul has appeared!**\n\n"
         f"👤 **{hidden_name}**\n"
         f"📖 _{char.get('anime', 'Unknown')}_\n"
         f"⭐ {rarity_hint}\n\n"
-        f"🔤 **Type the character's name to claim!** (`{claim_win}s`)"
+        f"🔤 **Type the character's name to claim!**\n"
+        f"💡 _First, middle, or last name all work!_ (`{claim_win}s`)"
     )
 
     try:
@@ -215,37 +254,48 @@ async def _do_spawn(client, message: Message, chat_id: int):
 
     spawn_id = await create_spawn(chat_id, msg.id, char, eff.name)
 
+    # Build all accepted answer tokens for this character.
+    answer_tokens = _name_tokens(char["name"])
+
     # Register the active guessing session in memory.
     _active_spawns[chat_id] = {
-        "spawn_id":     spawn_id,
-        "char":         char,
-        "eff":          eff,
-        "msg":          msg,
-        "claim_win":    claim_win,
-        "answer_norm":  _normalize(char["name"]),
-        "locked":       False,   # True while a correct guess is being processed
+        "spawn_id":      spawn_id,
+        "char":          char,
+        "eff":           eff,
+        "msg":           msg,
+        "claim_win":     claim_win,
+        "answer_tokens": answer_tokens,   # list of accepted normalised strings
+        "locked":        False,           # True while a correct guess is being processed
     }
 
     asyncio.create_task(_expire(client, chat_id, msg, spawn_id, claim_win))
     asyncio.create_task(_ping_wishlist(client, char["id"], chat_id))
 
 
-# ── Guess handler (called from on_group_message when a session is active) ────
+# ── Guess handler (called from on_group_message when a session is active) ─────
 
 async def _check_guess(client, message: Message, chat_id: int, session: dict):
-    """Compares the incoming message text against the active spawn's answer."""
+    """
+    Compares the incoming message text against all accepted name tokens
+    for the active spawn.  A user can type:
+        • The full name   → 'Monkey D Luffy'
+        • The first name  → 'Monkey'
+        • A middle token  → (any word that is ≥2 chars)
+        • The last name   → 'Luffy'
+    All matches are accent-insensitive and case-insensitive.
+    """
     if session["locked"]:
-        return                          # already being processed
+        return
 
     guess = _normalize(message.text or "")
     if not guess:
         return
 
-    if guess != session["answer_norm"]:
+    if not _match_guess(guess, session):
         return                          # wrong — let the chat continue
 
     # ── Correct guess ────────────────────────────────────────────────────────
-    session["locked"] = True           # prevent race conditions
+    session["locked"] = True
 
     user = message.from_user
     if await is_user_banned(user.id):
@@ -254,15 +304,15 @@ async def _check_guess(client, message: Message, chat_id: int, session: dict):
 
     await get_or_create_user(
         user.id,
-        user.username  or "",
+        user.username   or "",
         user.first_name or "",
         getattr(user, "last_name", "") or "",
     )
 
-    char         = session["char"]
-    eff          = session["eff"]
-    rarity_name  = eff.name
-    spawn_id     = session["spawn_id"]
+    char        = session["char"]
+    eff         = session["eff"]
+    rarity_name = eff.name
+    spawn_id    = session["spawn_id"]
 
     # Rarity cap check
     if eff.max_per_user > 0:
@@ -273,18 +323,27 @@ async def _check_guess(client, message: Message, chat_id: int, session: dict):
                 f"{eff.display_name} characters allowed!"
             )
 
+    # Work out what the user actually typed vs. the full name
+    typed       = (message.text or "").strip()
+    full_name   = char["name"]
+    guessed_full = _normalize(typed) == _normalize(full_name)
+    name_label  = (
+        f"**{full_name}**"
+        if guessed_full
+        else f"**{full_name}** _(guessed as '{typed}')_"
+    )
+
     # Add to harem and reward kakera
     iid    = await add_to_harem(user.id, char)
     kakera = get_kakera_reward(rarity_name)
     await add_balance(user.id, kakera)
-    await expire_spawn(spawn_id)       # mark DB record as claimed / expired
+    await expire_spawn(spawn_id)
 
-    # Remove the session before any awaits that could race
+    # Remove the session before further awaits to avoid races
     _active_spawns.pop(chat_id, None)
 
-    # Edit the original spawn message to show "claimed" state
     result_text = (
-        f"🎉 **{user.first_name}** guessed correctly and claimed **{char['name']}**!\n\n"
+        f"🎉 **{user.first_name}** guessed correctly and claimed {name_label}!\n\n"
         f"{eff.emoji} **{eff.display_name}**\n"
         f"📖 _{char.get('anime', 'Unknown')}_\n"
         f"🆔 `{iid}`\n"
@@ -297,7 +356,6 @@ async def _check_guess(client, message: Message, chat_id: int, session: dict):
         else:
             await msg.edit_text(result_text)
     except Exception:
-        # Fall back to a plain reply if the edit fails
         await message.reply_text(result_text)
 
 
@@ -306,7 +364,6 @@ async def _check_guess(client, message: Message, chat_id: int, session: dict):
 async def _expire(client, chat_id: int, msg, spawn_id: str, delay: int):
     await asyncio.sleep(delay)
 
-    # Only act if the session is still present (not already claimed).
     session = _active_spawns.pop(chat_id, None)
     if not session or session["spawn_id"] != spawn_id:
         return                          # already claimed — nothing to do
@@ -340,7 +397,8 @@ async def _ping_wishlist(client, char_id, chat_id: int):
             name = char["name"] if char else "A character"
             await client.send_message(
                 uid,
-                f"💛 **{name}** (on your wishlist) just spawned in a group! Be the first to guess!"
+                f"💛 **{name}** (on your wishlist) just spawned!\n"
+                f"Type their first, middle, or last name to claim — fast! 🏃"
             )
         except Exception:
             pass
