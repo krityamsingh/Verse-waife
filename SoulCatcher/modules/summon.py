@@ -39,6 +39,7 @@ log = logging.getLogger("SoulCatcher.summon")
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
 SUMMON_COOLDOWN_SECS = 10
 MAX_RETRIES          = 5
+PITY_THRESHOLD       = 5
 
 # ── In-memory state ───────────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ def _esc(t) -> str:
 
 def _get_stats(uid: int) -> dict:
     if uid not in _stats:
-        _stats[uid] = {"wins": 0, "losses": 0, "streak": 0, "max_streak": 0, "total": 0}
+        _stats[uid] = {"wins": 0, "losses": 0, "streak": 0, "max_streak": 0, "total": 0, "pity": 0}
     return _stats[uid]
 
 
@@ -277,6 +278,7 @@ async def cb_summon_engage(_, query) -> None:
     rarity_str = rarity_display(char.get("rarity", ""))
     stats      = _get_stats(user_id)
     stats["total"] += 1
+    stats["pity"]  += 1
 
     for phase in [
         "⟡  <i>The sigil takes shape…</i>",
@@ -286,9 +288,10 @@ async def cb_summon_engage(_, query) -> None:
         await _safe_edit(query.message, phase)
         await asyncio.sleep(0.5)
 
-    success = random.random() < 0.5
+    success = stats["pity"] >= PITY_THRESHOLD or random.random() < 0.5
 
     if success:
+        stats["pity"] = 0
         await add_to_harem(user_id, char)
 
         robj         = get_rarity(char.get("rarity", ""))
