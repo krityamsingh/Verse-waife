@@ -98,12 +98,11 @@ async def cmd_spin(_, message: Message):
     uid = message.from_user.id
     now = time()
     
-    if uid in _spin_cooldown and (now - _spin_cooldown[uid]) < 3600:
-        remaining = 3600 - (now - _spin_cooldown[uid])
-        minutes = int(remaining / 60)
+    if uid in _spin_cooldown and (now - _spin_cooldown[uid]) < 3:
+        remaining = 3 - (now - _spin_cooldown[uid])
         return await message.reply_text(
             f"⏱️ **Wheel on cooldown!**\n"
-            f"⏳ Try again in `{minutes}m`"
+            f"⏳ Try again in `{remaining:.1f}s`"
         )
     
     import random
@@ -218,44 +217,3 @@ async def cmd_bal(_, message: Message):
         f"💰 **Your Balance**\n"
         f"```\n{balance:,} kakera\n```"
     )
-
-
-# ────────────────────────────────────────────────────────────────────────────────
-# NOTES ON THIS FIX:
-# ────────────────────────────────────────────────────────────────────────────────
-"""
-What was the problem?
-  /pay command had NO cooldown or rate limiting
-  User could do:
-    /pay 1 @user
-    /pay 1 @user
-    /pay 1 @user
-    ... 1000 times instantly
-  
-  This causes:
-    ❌ Database thrashing (1000 writes/second)
-    ❌ Spam in chats
-    ❌ Unfair advantage (free transactions with no delay)
-    ❌ Potential DoS vector
-
-How the fix works:
-  1. Track last /pay timestamp per user in _pay_cooldown dict
-  2. On each /pay attempt, check if (now - last_time) < 1 second
-  3. If under 1 second: reject with cooldown message
-  4. If clear: execute transfer and record timestamp
-  5. Cooldown is per-user, not global (fair to all users)
-
-Cooldown design:
-  ✅ 1 second between transfers
-  ✅ Allows ~60 transfers/minute (still generous)
-  ✅ Prevents spam/DoS (needs ~17 minutes for 1000 transfers)
-  ✅ Per-user (doesn't affect other users)
-  ✅ Resets on restart (simpler than persistent storage)
-
-Optional improvements for production:
-  - Increase cooldown to 2-5 seconds if needed
-  - Store cooldowns in MongoDB for persistence across restarts
-  - Add daily transfer limit (max 50,000 kakera/day)
-  - Log all transfers to audit trail
-  - Alert on unusual patterns (large transfers to new accounts)
-"""
