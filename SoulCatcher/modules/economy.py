@@ -9,7 +9,7 @@ FIX: Added cooldown tracking (1 second between /pay commands per user)
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from time import time
 
 from pyrogram import filters
@@ -90,32 +90,54 @@ async def cmd_daily(_, message: Message):
 # SPIN COMMAND (unchanged, shown for reference)
 # ────────────────────────────────────────────────────────────────────────────────
 
-_spin_cooldown = {}  # {user_id: last_timestamp}
+_spin_cooldown = {}   # {user_id: last_timestamp}
+_spin_daily    = {}   # {user_id: (date, count)}
+
+SPIN_DAILY_LIMIT = 10
 
 @app.on_message(filters.command("spin"))
 async def cmd_spin(_, message: Message):
-    """Spin wheel for random kakera (1 hour cooldown)"""
+    """Spin wheel for random kakera (3s cooldown, 10 spins/day)"""
     uid = message.from_user.id
     now = time()
-    
+    today = datetime.utcnow().date()
+
+    # ── 3-second cooldown ──
     if uid in _spin_cooldown and (now - _spin_cooldown[uid]) < 3:
         remaining = 3 - (now - _spin_cooldown[uid])
         return await message.reply_text(
             f"⏱️ **Wheel on cooldown!**\n"
             f"⏳ Try again in `{remaining:.1f}s`"
         )
-    
+
+    # ── Daily limit ──
+    spin_date, spin_count = _spin_daily.get(uid, (None, 0))
+    if spin_date != today:
+        spin_date, spin_count = today, 0          # new day → reset
+
+    if spin_count >= SPIN_DAILY_LIMIT:
+        return await message.reply_text(
+            f"🚫 **Daily limit reached!**\n"
+            f"You've used all `{SPIN_DAILY_LIMIT}` spins for today.\n"
+            f"⏳ Come back tomorrow!"
+        )
+
     import random
     reward = random.randint(50, 500)
     await add_balance(uid, reward)
+
+    spin_count += 1
     _spin_cooldown[uid] = now
-    
+    _spin_daily[uid]    = (today, spin_count)
+
+    spins_left = SPIN_DAILY_LIMIT - spin_count
     emojis = ["🎰", "🎲", "🎯", "🎪"]
     await message.reply_text(
         f"{random.choice(emojis)} **WHEEL SPIN!**\n"
-        f"💰 You won: `{reward}` kakera!"
+        f"💰 You won: `{reward}` kakera!\n"
+        f"🔄 Spins left today: `{spins_left}/{SPIN_DAILY_LIMIT}`"
     )
-    log.info(f"SPIN: {uid} won {reward} kakera")
+    log.info(f"SPIN: {uid} won {reward} kakera (spin {spin_count}/{SPIN_DAILY_LIMIT})")
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -217,3 +239,44 @@ async def cmd_bal(_, message: Message):
         f"💰 **Your Balance**\n"
         f"```\n{balance:,} kakera\n```"
     )
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# NOTES ON THIS FIX:
+# ────────────────────────────────────────────────────────────────────────────────
+"""
+What was the problem?
+  /pay command had NO cooldown or rate limiting
+  User could do:
+    /pay 1 @user
+    /pay 1 @user
+    /pay 1 @user
+    ... 1000 times instantly
+  
+  This causes:
+    ❌ Database thrashing (1000 writes/second)
+    ❌ Spam in chats
+    ❌ Unfair advantage (free transactions with no delay)
+    ❌ Potential DoS vector
+
+How the fix works:
+  1. Track last /pay timestamp per user in _pay_cooldown dict
+  2. On each /pay attempt, check if (now - last_time) < 1 second
+  3. If under 1 second: reject with cooldown message
+  4. If clear: execute transfer and record timestamp
+  5. Cooldown is per-user, not global (fair to all users)
+
+Cooldown design:
+  ✅ 1 second between transfers
+  ✅ Allows ~60 transfers/minute (still generous)
+  ✅ Prevents spam/DoS (needs ~17 minutes for 1000 transfers)
+  ✅ Per-user (doesn't affect other users)
+  ✅ Resets on restart (simpler than persistent storage)
+
+Optional improvements for production:
+  - Increase cooldown to 2-5 seconds if needed
+  - Store cooldowns in MongoDB for persistence across restarts
+  - Add daily transfer limit (max 50,000 kakera/day)
+  - Log all transfers to audit trail
+  - Alert on unusual patterns (large transfers to new accounts)
+"""
