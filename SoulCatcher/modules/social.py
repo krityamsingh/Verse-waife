@@ -5,10 +5,9 @@ from pyrogram import enums, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from .. import app
 from ..database import (
-    get_or_create_user, get_user, add_balance, deduct_balance,
-    get_balance, add_to_harem, get_random_character, add_xp,
+    get_or_create_user, get_user, add_balance,
+    add_to_harem, get_random_character, add_xp,
 )
-from ..rarity import ECONOMY
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  RARITY POOL
@@ -302,119 +301,3 @@ async def cmd_epropose(_, message: Message):
         await message.reply_text("🌪️ Encounter cancelled.")
     else:
         await message.reply_text("🌌 No active encounter.")
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  /basket  (bet deducted FIRST; winnings/partial-refunds applied after)
-#
-#  Dice value outcomes:
-#   6        → SUPER DUNK   → net +200 % of bet  (lose bet, gain bet×3)
-#   4 or 5   → NICE SHOT    → net +50 % of bet   (lose bet, gain bet×1.5)
-#   2 or 3   → CLOSE MISS   → net -50 % of bet   (lose bet, refund bet×0.5)
-#   1        → AIRBALL      → net -100 % of bet  (lose full bet, no refund)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-_basket_cds: dict[int, float] = {}
-
-
-@app.on_message(filters.command(["basket", "basketball"]))
-async def cmd_basket(client, message: Message):
-    uid = message.from_user.id
-    now = time.time()
-
-    # ── cooldown check ────────────────────────────────────────────────────────
-    last = _basket_cds.get(uid)
-    if last and now - last < ECONOMY["basket_cooldown"]:
-        wait = int(ECONOMY["basket_cooldown"] - (now - last))
-        return await message.reply_text(
-            f"⏳ **Too fast!** Wait `{wait}s`・o・",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    # ── parse bet ─────────────────────────────────────────────────────────────
-    try:
-        bet = int(message.command[1])
-        if bet <= 0:
-            raise ValueError
-    except (IndexError, ValueError):
-        return await message.reply_text(
-            "❌ Use: `/basket <amount>`",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    # ── balance checks ────────────────────────────────────────────────────────
-    balance = await get_balance(uid)
-    if balance is None:
-        return await message.reply_text("⚠️ Use /start first.")
-
-    min_bet = max(50, int(balance * ECONOMY["basket_min_bet_pct"]))
-    if bet < min_bet:
-        return await message.reply_text(
-            f"💢 Min bet: `{min_bet}` coins",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-    if bet > balance:
-        return await message.reply_text("💸 Not enough coins!")
-
-    # ── deduct bet BEFORE rolling ─────────────────────────────────────────────
-    deducted = await deduct_balance(uid, bet)
-    if not deducted:
-        return await message.reply_text("💸 Could not deduct coins. Try again!")
-
-    # ── roll dice ─────────────────────────────────────────────────────────────
-    dice           = await client.send_dice(message.chat.id, "🏀")
-    val            = dice.dice.value
-    _basket_cds[uid] = now
-
-    # ── resolve outcome ───────────────────────────────────────────────────────
-    if val == 6:
-        # Win 2× the bet on top of getting it back → add bet × 3
-        refund = bet * 3
-        await add_balance(uid, refund)
-        await add_xp(uid, 5)
-        net = bet * 2
-        await message.reply_text(
-            f"✨ **SUPER SLAM DUNK!!**\n"
-            f"╰┈➤ 🏆 +`{net:,}` coins\n"
-            f"╰┈➤ 🌟 +5 xp\n\n"
-            f"Legendary! (•̀ᴗ•́)و",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    elif val in [4, 5]:
-        # Win 50 % of bet on top of getting it back → add bet × 1.5
-        refund = int(bet * 1.5)
-        await add_balance(uid, refund)
-        await add_xp(uid, 3)
-        net = refund - bet          # = int(bet * 0.5) profit
-        await message.reply_text(
-            f"🎯 **Nice Shot!**\n"
-            f"╰┈➤ 💰 +`{net:,}` coins\n"
-            f"╰┈➤ ✨ +3 xp\n\n"
-            f"Keep going! ٩(◕‿◕｡)۶",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    elif val in [2, 3]:
-        # Partial refund of 50 % → add back half the bet (net -50 %)
-        refund = int(bet * 0.5)
-        await add_balance(uid, refund)
-        await add_xp(uid, -2)
-        net_loss = bet - refund
-        await message.reply_text(
-            f"💢 **Close Miss!**\n"
-            f"╰┈➤ 🩹 -`{net_loss:,}` coins\n"
-            f"╰┈➤ 📉 -2 xp\n\n"
-            f"Next time! (╥﹏╥)",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    else:  # val == 1 – AIRBALL, full loss (bet already deducted, no refund)
-        await add_xp(uid, -3)
-        await message.reply_text(
-            f"💀 **AIRBALL!**\n"
-            f"╰┈➤ ☠️ -`{bet:,}` coins\n"
-            f"╰┈➤ ❌ -3 xp\n\n"
-            f"Disaster lol (≧﹏≦)",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
