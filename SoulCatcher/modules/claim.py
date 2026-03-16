@@ -1,250 +1,214 @@
 """
-SoulCatcher/claim.py
-═══════════════════════════════════════════════════════════════════════
-Daily character claim module for Pyrogram — professional, sexy, weighted.
-
-Users get one random character every 24 hours. Rarity probability is inversely
-proportional to daily drop limits: rarer rarities appear much less often,
-exactly as requested ("don't give the 5–7 rarity so much"). Streak tracking
-with motivational messages, media fallback, and full error handling.
+SoulCatcher/modules/claim.py
+════════════════════════════════════════════════════════════════════════════════
+/claim  —  Daily character claim
+  • One free character every 24 hours
+  • Rarity is rolled with CLAIM-specific weights (tiers 5-7 are rare treats,
+    not guaranteed drops — see CLAIM_WEIGHTS below)
+  • Character is pulled at random from the DB for the rolled rarity
+  • Added straight to the user's harem
+════════════════════════════════════════════════════════════════════════════════
 """
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Tuple
+from datetime import datetime, timedelta
 
-from pyrogram import Client, filters
+from pyrogram import filters
 from pyrogram.types import Message
-from pyrogram.enums import ParseMode
 
-from SoulCatcher import database as db
-from SoulCatcher.rarity import get_drop_limit
+from .. import app
+from ..database import (
+    get_or_create_user,
+    update_user,
+    get_random_character,
+    add_to_harem,
+    count_user_rarity,
+)
+from ..rarity import RARITIES, get_rarity, roll_sub_rarity
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("SoulCatcher.claim")
 
-# ----------------------------------------------------------------------
-# Constants
-# ----------------------------------------------------------------------
-DAILY_COOLDOWN = timedelta(hours=24)
-BASE_WEIGHT_FOR_UNLIMITED = 100.0          # high weight for unlimited rarities
+# ─────────────────────────────────────────────────────────────────────────────
+# CLAIM-SPECIFIC RARITY WEIGHTS
+# These are intentionally different from spawn weights.
+# Tiers 5 / 6 / 7 are drastically reduced — they should feel like jackpots,
+# not something you reliably collect every few days.
+#
+#  Spawn weights (for reference):
+#    common=55  rare=22  cosmos=10  infernal=5  seasonal=2.5  mythic=0.8  eternal=0.10
+#
+#  Claim weights (this file):
+#    common=60  rare=26  cosmos=9.5  infernal=3.8  seasonal=0.45  mythic=0.20  eternal=0.05
+# ─────────────────────────────────────────────────────────────────────────────
 
+CLAIM_WEIGHTS: dict[str, float] = {
+    "common":   60.00,   # ⚫ Tier 1 — bulk of daily pulls
+    "rare":     26.00,   # 🔵 Tier 2 — comfortable runner-up
+    "cosmos":    9.50,   # 🌌 Tier 3 — Legendry, still reachable
+    "infernal":  3.80,   # 🔥 Tier 4 — Elite, exciting but not common
+    "seasonal":  0.45,   # 💎 Tier 5 — Seasonal, notably rare
+    "mythic":    0.20,   # 💀 Tier 6 — Mythic, very rare
+    "eternal":   0.05,   # ✨ Tier 7 — Eternal, near-impossible
+}
 
-# ----------------------------------------------------------------------
-# Weighted rarity selection (core logic)
-# ----------------------------------------------------------------------
-async def _get_rarity_weights() -> List[Tuple[str, float]]:
-    """
-    Build list of (rarity_name, normalized_weight) for all enabled rarities.
+# Max copies a user may obtain via /claim for capped rarities (0 = unlimited)
+CLAIM_MAX_PER_USER: dict[str, int] = {
+    "common":   0,
+    "rare":     0,
+    "cosmos":   0,
+    "infernal": 0,
+    "seasonal": 5,
+    "mythic":   3,
+    "eternal":  1,
+}
 
-    Weight = 1 / (drop_limit + 1)   where drop_limit is from rarity.py.
-    Rarities with drop_limit = 0 (unlimited) get a fixed high weight.
-    """
-    # Get distinct rarities from enabled characters
-    pipeline = [
-        {"$match": {"enabled": True}},
-        {"$group": {"_id": "$rarity"}},
-    ]
-    rarity_docs = await db._col("characters").aggregate(pipeline).to_list(None)
-    rarities = [doc["_id"] for doc in rarity_docs if doc["_id"]]
-
-    if not rarities:
-        log.error("No rarities found in enabled characters.")
-        return []
-
-    raw_weights = []
-    for rarity in rarities:
-        limit = get_drop_limit(rarity)
-        if limit == 0:
-            weight = BASE_WEIGHT_FOR_UNLIMITED
-        else:
-            weight = 1.0 / (limit + 1)
-        raw_weights.append((rarity, weight))
-
-    # Normalize
-    total = sum(w for _, w in raw_weights)
-    if total <= 0:
-        log.warning("Total weight <= 0, using equal weights.")
-        return [(r, 1.0 / len(raw_weights)) for r, _ in raw_weights]
-
-    return [(r, w / total) for r, w in raw_weights]
+CLAIM_COOLDOWN_SECONDS = 86_400  # 24 hours
 
 
-async def _select_daily_rarity() -> Optional[str]:
-    """Pick a rarity using weighted probability."""
-    weighted = await _get_rarity_weights()
-    if not weighted:
-        return None
-    rarities, weights = zip(*weighted)
-    return random.choices(rarities, weights=weights, k=1)[0]
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERNAL HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _roll_claim_rarity():
+    """Roll a rarity tier using claim-specific weights."""
+    names   = list(CLAIM_WEIGHTS.keys())
+    weights = [CLAIM_WEIGHTS[n] for n in names]
+    return RARITIES[random.choices(names, weights=weights, k=1)[0]]
 
 
-def _streak_message(streak: int) -> str:
-    """Return a motivational message based on streak length."""
-    if streak >= 30:
-        return "🔥🔥 **LEGENDARY STREAK!** 🔥🔥"
-    if streak >= 14:
-        return "🌟 **Incredible streak!** 🌟"
-    if streak >= 7:
-        return "✨ **Week‑long streak!** ✨"
-    if streak >= 3:
-        return "⭐ **Three days in a row!** ⭐"
-    return "⚡ Keep it up!"
-
-
-# ----------------------------------------------------------------------
-# Command handler
-# ----------------------------------------------------------------------
-@Client.on_message(filters.command("daily"))
-async def daily_claim(client: Client, message: Message) -> None:
-    """
-    Handle /daily command: award one random character with weighted rarity.
-    """
-    user = message.from_user
-    chat = message.chat
-    if not user or not chat:
-        return
-
-    user_id = user.id
-    first_name = user.first_name or ""
-    username = user.username or ""
-
-    # ------------------------------------------------------------------
-    # 1. User validation
-    # ------------------------------------------------------------------
-    try:
-        await db.get_or_create_user(user_id, username, first_name)
-    except Exception as e:
-        log.error(f"Failed to get/create user {user_id}: {e}")
-        await message.reply_text("❌ Database error. Try again later.")
-        return
-
-    if await db.is_user_banned(user_id):
-        await message.reply_text("🚫 You are banned from using the bot.")
-        return
-
-    # ------------------------------------------------------------------
-    # 2. Cooldown check
-    # ------------------------------------------------------------------
-    user_data = await db.get_user(user_id)
-    if not user_data:
-        await message.reply_text("⚠️ Could not load your profile.")
-        return
-
-    now = datetime.now(timezone.utc)
-    last_daily = user_data.get("last_daily")
-    if last_daily:
-        if isinstance(last_daily, datetime) and last_daily.tzinfo is None:
-            last_daily = last_daily.replace(tzinfo=timezone.utc)
-        if last_daily and (now - last_daily) < DAILY_COOLDOWN:
-            remaining = DAILY_COOLDOWN - (now - last_daily)
-            hours, remainder = divmod(remaining.seconds, 3600)
-            minutes = remainder // 60
-            await message.reply_text(
-                f"⏳ You've already claimed today!\n"
-                f"Next claim in **{hours}h {minutes}m**."
-            )
-            return
-
-    # ------------------------------------------------------------------
-    # 3. Streak calculation
-    # ------------------------------------------------------------------
-    yesterday = now - timedelta(days=1)
-    if last_daily and last_daily.date() == yesterday.date():
-        new_streak = user_data.get("daily_streak", 0) + 1
-    else:
-        new_streak = 1
-
-    # ------------------------------------------------------------------
-    # 4. Select rarity (weighted)
-    # ------------------------------------------------------------------
-    rarity = await _select_daily_rarity()
-    if not rarity:
-        log.error("No rarity could be selected.")
-        await message.reply_text("😵 No characters available right now.")
-        return
-
-    # ------------------------------------------------------------------
-    # 5. Fetch random character of that rarity
-    # ------------------------------------------------------------------
-    char = await db.get_random_character(rarity)
-    if not char:
-        log.warning(f"No enabled character for rarity '{rarity}'.")
-        await message.reply_text(
-            f"⚠️ No **{rarity}** characters available.\n"
-            f"Here's **50 gold** as consolation!"
-        )
-        await db.add_balance(user_id, 50)
-        # Still update last_daily to avoid abuse
-        await db.update_user(user_id, {
-            "$set": {
-                "last_daily": now.replace(tzinfo=None),
-                "daily_streak": new_streak,
-            }
-        })
-        return
-
-    # ------------------------------------------------------------------
-    # 6. Add to harem and update user
-    # ------------------------------------------------------------------
-    try:
-        instance_id = await db.add_to_harem(user_id, char)
-    except Exception as e:
-        log.error(f"Failed to add character to harem: {e}")
-        await message.reply_text("❌ Failed to save character. Please report.")
-        return
-
-    await db.update_user(user_id, {
-        "$set": {
-            "last_daily": now.replace(tzinfo=None),
-            "daily_streak": new_streak,
-        }
-    })
-
-    # ------------------------------------------------------------------
-    # 7. Prepare and send the response
-    # ------------------------------------------------------------------
-    name = char.get("name", "Unknown")
-    anime = char.get("anime", "Unknown")
-    img_url = char.get("img_url") or char.get("video_url")
-    rarity_display = char.get("rarity", rarity)
-
-    caption = (
-        f"🎁 **Daily Claim** 🎁\n\n"
-        f"**{name}** from **{anime}**\n"
-        f"Rarity: **{rarity_display}**\n"
-        f"Instance ID: `{instance_id}`\n\n"
-        f"🔥 **Streak:** {new_streak}\n"
-        f"{_streak_message(new_streak)}"
+def _build_card(char: dict, rarity_name: str, instance_id: str, is_sub: bool) -> str:
+    r       = get_rarity(rarity_name)
+    emoji   = r.emoji        if r else "❓"
+    display = r.display_name if r else rarity_name.title()
+    sub_tag = " *(sub-rarity!)*" if is_sub else ""
+    return (
+        f"🎁 **Daily Character Claimed!**\n\n"
+        f"**{char['name']}**\n"
+        f"📖 *{char.get('anime', 'Unknown')}*\n\n"
+        f"{emoji} **{display}**{sub_tag}\n"
+        f"🆔 Instance: `{instance_id}`\n\n"
+        f"⏳ Next claim in **24 hours**"
     )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /claim
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("claim"))
+async def cmd_claim(_, message: Message):
+    """Claim your free daily character."""
+    uid  = message.from_user.id
+    user = await get_or_create_user(
+        uid,
+        message.from_user.username   or "",
+        message.from_user.first_name or "",
+        message.from_user.last_name  or "",
+    )
+
+    # Ban check
+    if user.get("is_banned"):
+        return await message.reply_text("🚫 You are globally banned.")
+
+    # Cooldown check
+    now        = datetime.utcnow()
+    last_claim = user.get("last_claim")
+    if last_claim:
+        elapsed = (now - last_claim).total_seconds()
+        if elapsed < CLAIM_COOLDOWN_SECONDS:
+            remaining  = CLAIM_COOLDOWN_SECONDS - elapsed
+            h = int(remaining // 3600)
+            m = int((remaining % 3600) // 60)
+            return await message.reply_text(
+                f"⏳ **Already claimed today!**\n"
+                f"Come back in `{h}h {m}m` for your next character."
+            )
+
+    # Roll rarity
+    base_rarity = _roll_claim_rarity()
+    sub         = roll_sub_rarity(base_rarity.name)
+    rarity_name = sub.name if sub else base_rarity.name
+    is_sub      = sub is not None
+
+    # Per-user cap: if capped, fall back to Legendry
+    max_copies = CLAIM_MAX_PER_USER.get(base_rarity.name, 0)
+    if max_copies > 0:
+        owned = await count_user_rarity(uid, rarity_name)
+        if owned >= max_copies:
+            rarity_name = "cosmos"
+            is_sub      = False
+            log.info(f"CLAIM: {uid} capped on {base_rarity.name}, fell back to cosmos")
+
+    # Fetch a character for the rolled rarity
+    char = await get_random_character(rarity_name)
+    if not char:
+        char = await get_random_character("common")
+        if not char:
+            return await message.reply_text(
+                "⚠️ No characters in the database yet. Ask an admin to add some!"
+            )
+        rarity_name = "common"
+        is_sub      = False
+        log.warning(f"CLAIM: no chars for rarity={rarity_name}, fell back to common")
+
+    # Add to harem & stamp cooldown
+    instance_id = await add_to_harem(uid, char)
+    await update_user(uid, {"$set": {"last_claim": now}})
+
+    # Send reply with media if available
+    card = _build_card(char, rarity_name, instance_id, is_sub)
     try:
-        if img_url:
-            if char.get("video_url"):
-                await message.reply_animation(
-                    animation=img_url,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await message.reply_photo(
-                    photo=img_url,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+        if char.get("video_url"):
+            await message.reply_video(video=char["video_url"], caption=card)
+        elif char.get("img_url"):
+            await message.reply_photo(photo=char["img_url"], caption=card)
         else:
-            await message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        log.warning(f"Failed to send media: {e}")
-        await message.reply_text(caption, parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text(card)
+    except Exception:
+        await message.reply_text(card)
 
-    log.info(f"Daily claim: user {user_id} got {name} ({rarity}) streak {new_streak}")
+    log.info(
+        f"CLAIM: uid={uid} char={char['name']!r} "
+        f"rarity={rarity_name} instance={instance_id} sub={is_sub}"
+    )
 
 
-# ----------------------------------------------------------------------
-# Optional: function to manually register the handler (if not using decorator)
-# ----------------------------------------------------------------------
-def register(client: Client):
-    """Add the daily command handler to the client."""
-    client.add_handler(Client.on_message(filters.command("daily"))(daily_claim))
-    log.info("✅ Daily claim handler registered.")
+# ─────────────────────────────────────────────────────────────────────────────
+# /claiminfo  — shows cooldown status
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("claiminfo"))
+async def cmd_claiminfo(_, message: Message):
+    """Show when you can next use /claim."""
+    uid  = message.from_user.id
+    user = await get_or_create_user(
+        uid,
+        message.from_user.username   or "",
+        message.from_user.first_name or "",
+        message.from_user.last_name  or "",
+    )
+
+    now        = datetime.utcnow()
+    last_claim = user.get("last_claim")
+
+    if not last_claim or (now - last_claim).total_seconds() >= CLAIM_COOLDOWN_SECONDS:
+        return await message.reply_text(
+            "✅ **Ready to claim!**\nUse `/claim` to get your free character."
+        )
+
+    elapsed    = (now - last_claim).total_seconds()
+    remaining  = CLAIM_COOLDOWN_SECONDS - elapsed
+    h          = int(remaining // 3600)
+    m          = int((remaining % 3600) // 60)
+    next_time  = last_claim + timedelta(seconds=CLAIM_COOLDOWN_SECONDS)
+    pct        = int((elapsed / CLAIM_COOLDOWN_SECONDS) * 24)
+    bar        = "█" * pct + "░" * (24 - pct)
+
+    await message.reply_text(
+        f"⏳ **Claim Cooldown**\n\n"
+        f"`{bar}` {int(elapsed / CLAIM_COOLDOWN_SECONDS * 100)}%\n\n"
+        f"• Last claimed : `{last_claim.strftime('%H:%M UTC')}`\n"
+        f"• Next claim   : `{next_time.strftime('%H:%M UTC')}`\n"
+        f"• Remaining    : `{h}h {m}m`"
+    )
