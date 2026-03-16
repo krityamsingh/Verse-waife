@@ -1,196 +1,236 @@
-"""SoulCatcher/modules/market.py
-Commands: /market_list (list on market)  /buy  /market
-Note: Direct char selling for kakera is in sell.py.
-      This file handles the player-to-player market listing system.
-
-Split from collection.py.
+"""
+SoulCatcher/modules/burn.py
+════════════════════════════════════════════════════════════════════
+/burn <number>     burn that many characters from your harem
+/burn <id>         burn one specific character by ID
+/delh <user_id>    (owner only) delete a user's entire harem
+════════════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
-import uuid
 import logging
-from datetime import datetime
+from html import escape
 
-from pyrogram import enums, filters
-from pyrogram.types import Message
-
-from .. import app
-from ..rarity import ECONOMY, get_rarity, can_trade
-from ..database import (
-    get_harem_char, remove_from_harem,
-    add_balance, deduct_balance, get_balance,
-    count_rarity_in_harem,
-    create_listing, get_listing, get_active_listings, atomic_buy_listing,
-    add_to_harem,
+from pyrogram import filters, enums
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup as IKM,
+    InlineKeyboardButton as IKB,
 )
 
-log = logging.getLogger("SoulCatcher.market")
+from .. import app
+from ..rarity import get_rarity, get_kakera_reward
+from ..database import _col, add_balance
+
+log = logging.getLogger("SoulCatcher.burn")
+
+OWNER_ID = 123456789   # ← replace with your Telegram user ID
 
 
-def _fmt(n) -> str:
-    try:
-        return f"{int(n):,}"
-    except Exception:
-        return str(n)
+# ═══════════════════════════════════════════════════════════════════════════════
+# /burn <number>   or   /burn <id>
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /list — put a character on the market
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command(["list", "mlist"]))
-async def cmd_list(_, message: Message):
+@app.on_message(filters.command("burn"))
+async def cmd_burn(_, message: Message):
+    uid  = message.from_user.id
     args = message.command
-    if len(args) < 3:
-        return await message.reply_text(
-            "Usage: `/list <instance_id> <price>`\nExample: `/list A1B2C3 5000`"
-        )
 
-    uid = message.from_user.id
-    iid = args[1].upper()
-    try:
-        price = int(args[2])
-    except ValueError:
-        return await message.reply_text("❌ Price must be a number.")
-    if price < 1:
-        return await message.reply_text("❌ Price must be at least 1 kakera.")
-
-    char = await get_harem_char(uid, iid)
-    if not char:
-        return await message.reply_text("❌ Character not found in your harem.")
-    if not can_trade(char.get("rarity", "")):
-        return await message.reply_text("❌ This rarity cannot be listed on the market.")
-
-    listing_fee = ECONOMY.get("market_listing_fee", 50)
-    bal = await get_balance(uid)
-    if bal < listing_fee:
-        return await message.reply_text(
-            f"❌ Listing fee is `{listing_fee}` kakera. You only have `{_fmt(bal)}`."
-        )
-
-    removed = await remove_from_harem(uid, iid)
-    if not removed:
-        return await message.reply_text("❌ Failed to list — character may have moved.")
-
-    await deduct_balance(uid, listing_fee)
-    lid = str(uuid.uuid4())[:8].upper()
-    await create_listing({
-        "listing_id":  lid,
-        "seller_id":   uid,
-        "instance_id": iid,
-        "char_id":     char.get("char_id", ""),
-        "name":        char["name"],
-        "anime":       char.get("anime", ""),
-        "rarity":      char.get("rarity", ""),
-        "img_url":     char.get("img_url", ""),
-        "video_url":   char.get("video_url", ""),
-        "price":       price,
-        "status":      "active",
-        "listed_at":   datetime.utcnow(),
-    })
-
-    tier       = get_rarity(char.get("rarity", ""))
-    rarity_str = f"{tier.emoji} {tier.display_name}" if tier else char.get("rarity", "?")
-
-    await message.reply_text(
-        f"✅ **Listed on Market!**\n\n"
-        f"🆔 Listing: `{lid}`\n"
-        f"👤 **{char['name']}**\n"
-        f"{rarity_str}\n"
-        f"💰 Price: `{_fmt(price)}` kakera\n"
-        f"📋 Listing fee: `{listing_fee}` kakera"
-    )
-    log.info("LIST: uid=%d listed iid=%s for %d kakera (lid=%s)", uid, iid, price, lid)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /buy
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("buy"))
-async def cmd_buy(_, message: Message):
-    args = message.command
     if len(args) < 2:
-        return await message.reply_text("Usage: `/buy <listing_id>`", parse_mode=enums.ParseMode.MARKDOWN)
-
-    uid = message.from_user.id
-    lid = args[1].upper()
-
-    listing = await get_listing(lid)
-    if not listing or listing["status"] != "active":
-        return await message.reply_text("❌ Listing not found or already sold.")
-    if listing["seller_id"] == uid:
-        return await message.reply_text("❌ You can't buy your own listing!")
-
-    price = listing["price"]
-    bal   = await get_balance(uid)
-    if bal < price:
         return await message.reply_text(
-            f"❌ Not enough kakera! Need `{_fmt(price)}`, you have `{_fmt(bal)}`."
+            "🔥 <b>Burn Characters</b>\n\n"
+            "By count : <code>/burn 200</code>  — burn 200 chars from your harem\n"
+            "By ID    : <code>/burn A1B2</code>  — burn one specific character\n\n"
+            "Oldest characters are burned first when using a count.",
+            parse_mode=enums.ParseMode.HTML,
         )
 
-    tier = get_rarity(listing.get("rarity", ""))
-    if tier and tier.max_per_user > 0:
-        count = await count_rarity_in_harem(uid, listing["rarity"])
-        if count >= tier.max_per_user:
+    arg = args[1].strip()
+
+    # ── /burn <number> ────────────────────────────────────────────────────────
+    if arg.isdigit():
+        count = int(arg)
+        if count <= 0:
+            return await message.reply_text("❌ Number must be greater than 0.")
+
+        total_owned = await _col("user_characters").count_documents({"user_id": uid})
+        if total_owned == 0:
+            return await message.reply_text("❌ Your harem is empty.")
+
+        if count > total_owned:
             return await message.reply_text(
-                f"❌ You already have the max ({tier.max_per_user}) "
-                f"**{tier.display_name}** characters!"
+                f"❌ You only have <b>{total_owned}</b> characters.",
+                parse_mode=enums.ParseMode.HTML,
             )
 
-    sold = await atomic_buy_listing(lid, uid)
-    if not sold:
-        return await message.reply_text("❌ Listing already sold.")
+        # Confirm before bulk burn
+        markup = IKM([[
+            IKB(f"🔥 Burn {count}", callback_data=f"burn_count:{uid}:{count}"),
+            IKB("❌ Cancel",        callback_data=f"burn_cancel:{uid}"),
+        ]])
 
-    await deduct_balance(uid, price)
-    await add_balance(listing["seller_id"], price)
-
-    char_doc = {
-        "id":        listing.get("char_id", ""),
-        "name":      listing["name"],
-        "anime":     listing.get("anime", ""),
-        "rarity":    listing.get("rarity", "common"),
-        "img_url":   listing.get("img_url", ""),
-        "video_url": listing.get("video_url", ""),
-    }
-    await add_to_harem(uid, char_doc)
-
-    rarity_str = f"{tier.emoji} {tier.display_name}" if tier else listing.get("rarity", "?")
-    await message.reply_text(
-        f"✅ **Purchased!**\n\n"
-        f"👤 **{listing['name']}**\n"
-        f"{rarity_str}\n"
-        f"💰 Paid: `{_fmt(price)}` kakera"
-    )
-    log.info("BUY: uid=%d bought lid=%s for %d kakera", uid, lid, price)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /market — browse active listings
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("market"))
-async def cmd_market(_, message: Message):
-    args           = message.command
-    rarity_filter  = args[1].lower() if len(args) > 1 else None
-    listings       = await get_active_listings(rarity=rarity_filter, limit=10)
-
-    if not listings:
-        label = f" for **{rarity_filter}**" if rarity_filter else ""
-        return await message.reply_text(f"🛒 No active listings{label}.")
-
-    header = "🛒 **Market Listings**"
-    if rarity_filter:
-        header += f" — {rarity_filter}"
-    lines = [header + "\n"]
-
-    for listing in listings:
-        tier  = get_rarity(listing.get("rarity", ""))
-        emoji = tier.emoji if tier else "❓"
-        lines.append(
-            f"{emoji} **{listing['name']}** `{listing['listing_id']}`\n"
-            f"  _{listing.get('anime', '?')}_ | 💰 `{_fmt(listing['price'])}` kakera"
+        return await message.reply_text(
+            f"🔥 <b>Burn {count} characters?</b>\n\n"
+            f"Your harem has <b>{total_owned}</b> characters.\n"
+            f"Oldest <b>{count}</b> will be burned first.\n\n"
+            f"<b>This cannot be undone!</b>",
+            reply_markup=markup,
+            parse_mode=enums.ParseMode.HTML,
         )
 
-    lines.append("\nBuy with: `/buy <listing_id>`")
-    await message.reply_text("\n".join(lines))
+    # ── /burn <id> ────────────────────────────────────────────────────────────
+    cid  = arg
+    char = await _col("user_characters").find_one({
+        "user_id": uid,
+        "$or": [{"instance_id": cid}, {"char_id": cid}],
+    })
+
+    if not char:
+        return await message.reply_text(
+            f"❌ No character with ID <code>{escape(cid)}</code> in your harem.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    tier    = get_rarity(char.get("rarity") or "common")
+    r_emoji = tier.emoji if tier else "❓"
+    reward  = get_kakera_reward(char.get("rarity") or "common")
+    iid     = char.get("instance_id") or cid
+
+    markup = IKM([[
+        IKB("🔥 Burn", callback_data=f"burn_one:{uid}:{iid}:{reward}"),
+        IKB("❌ Cancel", callback_data=f"burn_cancel:{uid}"),
+    ]])
+
+    await message.reply_text(
+        f"🔥 <b>Burn {r_emoji} {escape(char.get('name', '?'))}?</b>\n\n"
+        f"Anime  : {escape(char.get('anime', '?'))}\n"
+        f"Reward : <b>{reward} kakera</b>",
+        reply_markup=markup,
+        parse_mode=enums.ParseMode.HTML,
+    )
+
+
+# ── Confirm burn by count ─────────────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r"^burn_count:"))
+async def burn_count_cb(_, cb):
+    _, uid_s, count_s = cb.data.split(":")
+    uid   = int(uid_s)
+    count = int(count_s)
+
+    if cb.from_user.id != uid:
+        return await cb.answer("Not your action!", show_alert=True)
+
+    # Fetch oldest 'count' characters (sorted by obtained_at ascending)
+    chars = await _col("user_characters").find(
+        {"user_id": uid}
+    ).sort("obtained_at", 1).limit(count).to_list(count)
+
+    if not chars:
+        return await cb.answer("Nothing to burn.", show_alert=True)
+
+    total_kakera = sum(get_kakera_reward(c.get("rarity") or "common") for c in chars)
+    ids_to_delete = [c.get("instance_id") or c.get("char_id") for c in chars if c.get("instance_id") or c.get("char_id")]
+
+    await _col("user_characters").delete_many({
+        "user_id": uid,
+        "instance_id": {"$in": ids_to_delete},
+    })
+    await add_balance(uid, total_kakera)
+
+    await cb.answer(f"🔥 Burned {len(chars)}! +{total_kakera} kakera")
+    try:
+        await cb.message.edit_text(
+            f"🔥 <b>Burned {len(chars)} characters!</b>\n\n"
+            f"💰 <b>+{total_kakera} kakera</b> added to your balance.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+# ── Confirm burn single by ID ─────────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r"^burn_one:"))
+async def burn_one_cb(_, cb):
+    _, uid_s, iid, reward_s = cb.data.split(":")
+    uid = int(uid_s)
+
+    if cb.from_user.id != uid:
+        return await cb.answer("Not your action!", show_alert=True)
+
+    char = await _col("user_characters").find_one({"user_id": uid, "instance_id": iid})
+    if not char:
+        await cb.answer("Already gone.", show_alert=True)
+        try:   await cb.message.delete()
+        except Exception: pass
+        return
+
+    await _col("user_characters").delete_one({"user_id": uid, "instance_id": iid})
+    await add_balance(uid, int(reward_s))
+
+    tier    = get_rarity(char.get("rarity") or "common")
+    r_emoji = tier.emoji if tier else "❓"
+
+    await cb.answer(f"🔥 +{reward_s} kakera")
+    try:
+        await cb.message.edit_text(
+            f"🔥 {r_emoji} <b>{escape(char.get('name', '?'))}</b> burned.\n"
+            f"💰 <b>+{reward_s} kakera</b>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+
+# ── Cancel ────────────────────────────────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r"^burn_cancel:"))
+async def burn_cancel_cb(_, cb):
+    uid = int(cb.data.split(":")[1])
+    if cb.from_user.id != uid:
+        return await cb.answer("Not your action!", show_alert=True)
+    await cb.answer("Cancelled.")
+    try:   await cb.message.delete()
+    except Exception: pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /delh <user_id>  — owner only
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("delh"))
+async def cmd_delh(_, message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    args = message.command
+    if len(args) < 2:
+        return await message.reply_text(
+            "Usage: <code>/delh &lt;user_id&gt;</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    try:
+        target_uid = int(args[1])
+    except ValueError:
+        return await message.reply_text("❌ Invalid user ID.")
+
+    count = await _col("user_characters").count_documents({"user_id": target_uid})
+    if count == 0:
+        return await message.reply_text(
+            f"❌ User <code>{target_uid}</code> has no characters.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    await _col("user_characters").delete_many({"user_id": target_uid})
+
+    user_doc = await _col("users").find_one({"user_id": target_uid})
+    name     = user_doc.get("first_name", str(target_uid)) if user_doc else str(target_uid)
+
+    await message.reply_text(
+        f"✅ Harem of <b>{escape(name)}</b> (<code>{target_uid}</code>) deleted.\n"
+        f"Removed <b>{count}</b> characters.",
+        parse_mode=enums.ParseMode.HTML,
+    )
+    log.warning("Owner deleted harem of %d (%s) — %d chars", target_uid, name, count)
