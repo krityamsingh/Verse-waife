@@ -1,12 +1,3 @@
-"""
-SoulCatcher/modules/burn.py
-════════════════════════════════════════════════════════════════════
-/burn <number>     burn that many characters from your harem
-/burn <id>         burn one specific character by ID
-/delh <user_id>    (owner only) delete a user's entire harem
-════════════════════════════════════════════════════════════════════
-"""
-
 from __future__ import annotations
 import logging
 from html import escape
@@ -24,12 +15,8 @@ from ..database import _col, add_balance
 
 log = logging.getLogger("SoulCatcher.burn")
 
-OWNER_ID = 123456789   # ← replace with your Telegram user ID
+OWNER_ID = 123456789   # replace with your Telegram user ID
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# /burn <number>   or   /burn <id>
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.on_message(filters.command("burn"))
 async def cmd_burn(_, message: Message):
@@ -39,15 +26,15 @@ async def cmd_burn(_, message: Message):
     if len(args) < 2:
         return await message.reply_text(
             "🔥 <b>Burn Characters</b>\n\n"
-            "By count : <code>/burn 200</code>  — burn 200 chars from your harem\n"
-            "By ID    : <code>/burn A1B2</code>  — burn one specific character\n\n"
-            "Oldest characters are burned first when using a count.",
+            "By count : <code>/burn 200</code>\n"
+            "By ID    : <code>/burn A1B2</code>\n\n"
+            "When burning by count, oldest characters go first.",
             parse_mode=enums.ParseMode.HTML,
         )
 
     arg = args[1].strip()
 
-    # ── /burn <number> ────────────────────────────────────────────────────────
+    # /burn <number>
     if arg.isdigit():
         count = int(arg)
         if count <= 0:
@@ -63,7 +50,6 @@ async def cmd_burn(_, message: Message):
                 parse_mode=enums.ParseMode.HTML,
             )
 
-        # Confirm before bulk burn
         markup = IKM([[
             IKB(f"🔥 Burn {count}", callback_data=f"burn_count:{uid}:{count}"),
             IKB("❌ Cancel",        callback_data=f"burn_cancel:{uid}"),
@@ -71,14 +57,14 @@ async def cmd_burn(_, message: Message):
 
         return await message.reply_text(
             f"🔥 <b>Burn {count} characters?</b>\n\n"
-            f"Your harem has <b>{total_owned}</b> characters.\n"
-            f"Oldest <b>{count}</b> will be burned first.\n\n"
-            f"<b>This cannot be undone!</b>",
+            f"You have <b>{total_owned}</b> total.\n"
+            f"Oldest <b>{count}</b> will be burned.\n\n"
+            f"<b>Cannot be undone!</b>",
             reply_markup=markup,
             parse_mode=enums.ParseMode.HTML,
         )
 
-    # ── /burn <id> ────────────────────────────────────────────────────────────
+    # /burn <id>
     cid  = arg
     char = await _col("user_characters").find_one({
         "user_id": uid,
@@ -110,18 +96,15 @@ async def cmd_burn(_, message: Message):
     )
 
 
-# ── Confirm burn by count ─────────────────────────────────────────────────────
-
 @app.on_callback_query(filters.regex(r"^burn_count:"))
 async def burn_count_cb(_, cb):
-    _, uid_s, count_s = cb.data.split(":")
-    uid   = int(uid_s)
-    count = int(count_s)
+    parts = cb.data.split(":")
+    uid   = int(parts[1])
+    count = int(parts[2])
 
     if cb.from_user.id != uid:
         return await cb.answer("Not your action!", show_alert=True)
 
-    # Fetch oldest 'count' characters (sorted by obtained_at ascending)
     chars = await _col("user_characters").find(
         {"user_id": uid}
     ).sort("obtained_at", 1).limit(count).to_list(count)
@@ -130,31 +113,30 @@ async def burn_count_cb(_, cb):
         return await cb.answer("Nothing to burn.", show_alert=True)
 
     total_kakera = sum(get_kakera_reward(c.get("rarity") or "common") for c in chars)
-    ids_to_delete = [c.get("instance_id") or c.get("char_id") for c in chars if c.get("instance_id") or c.get("char_id")]
+    iids = [c["instance_id"] for c in chars if c.get("instance_id")]
 
-    await _col("user_characters").delete_many({
-        "user_id": uid,
-        "instance_id": {"$in": ids_to_delete},
-    })
+    await _col("user_characters").delete_many(
+        {"user_id": uid, "instance_id": {"$in": iids}}
+    )
     await add_balance(uid, total_kakera)
 
-    await cb.answer(f"🔥 Burned {len(chars)}! +{total_kakera} kakera")
+    await cb.answer(f"Burned {len(chars)}! +{total_kakera} kakera")
     try:
         await cb.message.edit_text(
-            f"🔥 <b>Burned {len(chars)} characters!</b>\n\n"
-            f"💰 <b>+{total_kakera} kakera</b> added to your balance.",
+            f"🔥 <b>Burned {len(chars)} characters!</b>\n"
+            f"💰 <b>+{total_kakera} kakera</b>",
             parse_mode=enums.ParseMode.HTML,
         )
     except Exception:
         pass
 
 
-# ── Confirm burn single by ID ─────────────────────────────────────────────────
-
 @app.on_callback_query(filters.regex(r"^burn_one:"))
 async def burn_one_cb(_, cb):
-    _, uid_s, iid, reward_s = cb.data.split(":")
-    uid = int(uid_s)
+    parts  = cb.data.split(":")
+    uid    = int(parts[1])
+    iid    = parts[2]
+    reward = int(parts[3])
 
     if cb.from_user.id != uid:
         return await cb.answer("Not your action!", show_alert=True)
@@ -167,23 +149,21 @@ async def burn_one_cb(_, cb):
         return
 
     await _col("user_characters").delete_one({"user_id": uid, "instance_id": iid})
-    await add_balance(uid, int(reward_s))
+    await add_balance(uid, reward)
 
     tier    = get_rarity(char.get("rarity") or "common")
     r_emoji = tier.emoji if tier else "❓"
 
-    await cb.answer(f"🔥 +{reward_s} kakera")
+    await cb.answer(f"+{reward} kakera")
     try:
         await cb.message.edit_text(
             f"🔥 {r_emoji} <b>{escape(char.get('name', '?'))}</b> burned.\n"
-            f"💰 <b>+{reward_s} kakera</b>",
+            f"💰 <b>+{reward} kakera</b>",
             parse_mode=enums.ParseMode.HTML,
         )
     except Exception:
         pass
 
-
-# ── Cancel ────────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^burn_cancel:"))
 async def burn_cancel_cb(_, cb):
@@ -194,10 +174,6 @@ async def burn_cancel_cb(_, cb):
     try:   await cb.message.delete()
     except Exception: pass
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# /delh <user_id>  — owner only
-# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.on_message(filters.command("delh"))
 async def cmd_delh(_, message: Message):
