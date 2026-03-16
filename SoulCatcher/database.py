@@ -1,1007 +1,650 @@
 """
-SoulCatcher/modules/harem.py
-════════════════════════════════════════════════════════════════════
-Commands  : /harem  /sort  /setfav  /gallery
-Callbacks : harem:  filter:  apply_filter:
-            joined_check:  gallery:  gallery_filter:  setfav_hint:
-════════════════════════════════════════════════════════════════════
+SoulCatcher/database.py
+═══════════════════════════════════════════════════════════════════════
+Complete MongoDB async layer. Every data operation lives here.
 
-Rarity keys matched to rarity.py
-  Main  : common · rare · cosmos · infernal · seasonal · mythic · eternal
-  Sub   : festival · limited_edition · sports · fantasy · cartoon (Verse)
-
-DB collections used (database.py)
-  users            – harem_sort, collection_mode, favorites
-  user_characters  – instance_id, char_id, name, anime, rarity,
-                     img_url, video_url, obtained_at, is_favorite
-  characters       – master catalogue  (for /gallery)
+COLLECTIONS:
+  users              profile, economy, streaks, badges
+  characters         master catalogue
+  user_characters    harem (owned instances)
+  active_spawns      live unclaimed spawns
+  drop_logs          per-group daily counters
+  group_settings     per-group config
+  market_listings    active/sold market
+  wishlists          user wishlists (max 25)
+  trades             trade sessions
+  marriages          active marriages
+  global_bans
+  global_mutes
+  sudo_users
+  dev_users
+  uploaders
+  sequences          auto-increment char IDs
+  top_groups         tracked group IDs
+═══════════════════════════════════════════════════════════════════════
 """
-
 from __future__ import annotations
-
-import asyncio
-import logging
-import math
-import random
-import time
-from html import escape
-
-from pyrogram import filters, enums
-from pyrogram.types import (
-    Message,
-    InlineKeyboardMarkup as IKM,
-    InlineKeyboardButton as IKB,
-    InputMediaPhoto,
-    InputMediaVideo,
-)
-
-from .. import app
-from ..config import SUPPORT_GROUP, UPDATE_CHANNEL
-from ..rarity import RARITIES, SUB_RARITIES, get_rarity
-from ..database import get_or_create_user, update_user, _col
-
-log = logging.getLogger("SoulCatcher.harem")
-
-# ── Constants ─────────────────────────────────────────────────────────────────
-CHARS_PER_PAGE   = 15
-GALLERY_PER_PAGE = 12
-FAV_MAX          = 10
-RATE_COOLDOWN    = 3          # seconds between page-flip callbacks
-
-# ── Rarity ordering: id-based so common(1) comes before eternal(7)
-#    Main  tiers: id * 100  → 100, 200, 300 … 700
-#    Sub   tiers: id * 10   → 510, 610, 611, 612, 710  (sorts within parent)
-def _build_rarity_order() -> dict[str, int]:
-    out: dict[str, int] = {}
-    for r in RARITIES.values():
-        out[r.name] = r.id * 100
-    for s in SUB_RARITIES.values():
-        out[s.name] = s.id * 10
-    return out
-
-RARITY_ORDER: dict[str, int] = _build_rarity_order()
-
-# per-user rate-limit store
-_rate: dict[int, float] = {}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Membership gate helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def _check_one(client, chat_id: str, user_id: int) -> bool:
-    from pyrogram.errors import (
-        UserNotParticipant, ChatAdminRequired,
-        ChannelPrivate, PeerIdInvalid, UsernameNotOccupied,
-    )
-    from pyrogram.enums import ChatMemberStatus as S
-
-    target = chat_id if str(chat_id).startswith("@") else f"@{chat_id}"
-    try:
-        member = await client.get_chat_member(target, user_id)
-        return member.status not in (S.BANNED, S.LEFT)
-    except UserNotParticipant:
-        return False
-    except (ChatAdminRequired, ChannelPrivate, PeerIdInvalid, UsernameNotOccupied) as e:
-        log.warning("_check_one(%s): %s — failing open", chat_id, e)
-        return True
-    except Exception as e:
-        log.warning("_check_one unexpected (%s, %d): %s", chat_id, user_id, e)
-        return True
-
-
-async def check_membership(user_id: int, client) -> tuple[bool, bool]:
-    """Run both checks in parallel; returns (group_ok, channel_ok)."""
-    g, c = await asyncio.gather(
-        _check_one(client, SUPPORT_GROUP,  user_id),
-        _check_one(client, UPDATE_CHANNEL, user_id),
-    )
-    return g, c
-
-
-def _join_card(
-    user_id: int,
-    name: str,
-    group_ok: bool,
-    channel_ok: bool,
-    context: str,
-) -> tuple[str, IKM]:
-    g_icon = "✅" if group_ok   else "❌"
-    c_icon = "✅" if channel_ok else "❌"
-
-    missing = []
-    if not group_ok:   missing.append("Support Group")
-    if not channel_ok: missing.append("Updates Channel")
-
-    if len(missing) == 2:
-        header = "You haven't joined either chat yet."
-    elif missing:
-        header = f"Almost there — join the **{missing[0]}** to continue."
-    else:
-        header = "All joined!"
-
-    text = (
-        "🔐 **Access Required**\n"
-        "──────────────────────\n"
-        f"Hey **{escape(name)}**!\n\n"
-        f"⚠️ {header}\n\n"
-        f"  {g_icon} Support Group\n"
-        f"  {c_icon} Updates Channel\n\n"
-        "Join below, then tap **🔄 Verify**."
-    )
-
-    rows = []
-    if not group_ok:
-        rows.append([IKB("🫂 Join Support Group",  url=f"https://t.me/{SUPPORT_GROUP}")])
-    else:
-        rows.append([IKB("✅ Support Group — Joined", callback_data="noop")])
-
-    if not channel_ok:
-        rows.append([IKB("📢 Join Updates Channel", url=f"https://t.me/{UPDATE_CHANNEL}")])
-    else:
-        rows.append([IKB("✅ Updates Channel — Joined", callback_data="noop")])
-
-    rows.append([IKB("🔄 Verify Membership", callback_data=f"joined_check:{user_id}:{context}")])
-    return text, IKM(rows)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Data helpers
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def _fetch_user_characters(user_id: int):
-    """
-    Returns (unique_chars, counts, user_doc).
-
-    unique_chars  list[dict]      – one entry per char_id, sorted per prefs
-    counts        dict[str, int]  – {char_id: total owned}
-    user_doc      dict | None
-
-    Returns (None, None, None)  when user not found in DB.
-    Returns ([], {}, user_doc)  when harem is empty.
-    """
-    user_doc = await _col("users").find_one({"user_id": user_id})
-    if not user_doc:
-        return None, None, None
-
-    all_inst = await _col("user_characters").find({"user_id": user_id}).to_list(None)
-    if not all_inst:
-        return [], {}, user_doc
-
-    cmode      = (user_doc.get("collection_mode") or "all").lower().strip()
-    sort_field = (user_doc.get("harem_sort")       or "rarity").lower().strip()
-
-    # ── collection_mode: filter or pre-sort ───────────────────────────────────
-    if cmode in ("anime", "anime sorted"):
-        filtered = sorted(all_inst, key=lambda x: x.get("anime", "").lower())
-    elif cmode in ("characters", "characters sorted"):
-        filtered = sorted(all_inst, key=lambda x: x.get("name", "").lower())
-    elif cmode == "all":
-        filtered = all_inst
-    else:
-        # rarity-name mode (e.g. "common", "cosmos", "cartoon" …)
-        filtered = [
-            c for c in all_inst
-            if (c.get("rarity") or "").lower() == cmode
-        ]
-
-    if not filtered:
-        return [], {}, user_doc
-
-    # ── harem_sort (only when cmode didn't impose its own order) ──────────────
-    if cmode == "all":
-        if sort_field == "name":
-            filtered = sorted(filtered, key=lambda x: x.get("name", "").lower())
-        elif sort_field == "anime":
-            filtered = sorted(filtered, key=lambda x: x.get("anime", "").lower())
-        elif sort_field == "recent":
-            filtered = sorted(
-                filtered,
-                key=lambda x: x.get("obtained_at") or "",
-                reverse=True,
-            )
-        else:  # "rarity" default — common(100) first … eternal(700) last
-            filtered = sorted(
-                filtered,
-                key=lambda x: RARITY_ORDER.get(x.get("rarity", ""), 9999),
-            )
-
-    # ── Deduplicate by char_id, count duplicates ──────────────────────────────
-    counts:   dict[str, int]  = {}
-    char_map: dict[str, dict] = {}
-    for c in filtered:
-        cid = c.get("char_id") or c.get("id") or c.get("instance_id")
-        if not cid:
-            continue
-        counts[cid] = counts.get(cid, 0) + 1
-        if cid not in char_map:
-            char_map[cid] = c
-
-    return list(char_map.values()), counts, user_doc
-
-
-async def _best_cover(user_doc: dict, unique_chars: list) -> dict | None:
-    """First favourited character becomes cover; otherwise a random pick."""
-    if not unique_chars:
-        return None
-    favs = user_doc.get("favorites") or []
-    if isinstance(favs, list):
-        for fav_id in favs:
-            for c in unique_chars:
-                cid = str(c.get("char_id") or c.get("id") or "")
-                if cid == str(fav_id):
-                    return c
-    return random.choice(unique_chars)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Text / keyboard builders
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def _build_harem_text(
-    unique_chars: list,
-    counts: dict,
-    user_doc: dict,
-    page: int,
-    total_pages: int,
-    user_name: str,
-    filter_rarity: str | None,
-) -> str:
-    start  = page * CHARS_PER_PAGE
-    sliced = unique_chars[start: start + CHARS_PER_PAGE]
-    favs   = {str(f) for f in (user_doc.get("favorites") or [])}
-
-    lines = [f"<b>❤️ {escape(user_name)}'s Harem</b>  〔{page + 1}/{total_pages}〕"]
-    if filter_rarity:
-        tier  = get_rarity(filter_rarity)
-        emoji = tier.emoji if tier else "❓"
-        lines.append(f"<i>Filter: {emoji} {filter_rarity.title()}</i>")
-    lines.append("")
-
-    # Group this slice by anime
-    grouped: dict[str, list] = {}
-    for c in sliced:
-        grouped.setdefault(c.get("anime") or "Unknown", []).append(c)
-
-    for anime, chars in grouped.items():
-        try:
-            total_in_db = await _col("characters").count_documents({"anime": anime})
-        except Exception:
-            total_in_db = "?"
-        lines.append(
-            f"<b>🎴 {escape(anime)}</b>  "
-            f"<code>{len(chars)}/{total_in_db}</code>"
-        )
-        for char in chars:
-            cid        = char.get("char_id") or char.get("id") or ""
-            count      = counts.get(cid, 1)
-            tier       = get_rarity(char.get("rarity") or "common")
-            r_emoji    = tier.emoji if tier else "❓"
-            fav_tag    = "⭐" if str(cid) in favs else ""
-            dup_tag    = f" ×{count}" if count > 1 else ""
-            display_id = char.get("instance_id") or cid
-            lines.append(
-                f"  {r_emoji}{fav_tag} <code>{display_id}</code>"
-                f"  {escape(char.get('name', 'Unknown'))}{dup_tag}"
-            )
-        lines.append("")
-
-    lines.append(
-        f"<b>Unique:</b> <code>{len(unique_chars)}</code>  •  "
-        f"<b>Page:</b> <code>{page + 1}/{total_pages}</code>"
-    )
-    return "\n".join(lines)
-
-
-def _build_nav_markup(
-    user_id: int,
-    page: int,
-    total_pages: int,
-    filter_rarity: str | None,
-    total_chars: int,
-) -> IKM:
-    fr = filter_rarity or "None"
-
-    def nb(label: str, target: int) -> IKB:
-        if 0 <= target < total_pages:
-            return IKB(label, callback_data=f"harem:{target}:{user_id}:{fr}")
-        return IKB("·", callback_data="noop")
-
-    return IKM([
-        [nb("⬅️", page - 1),
-         IKB(f"📖 {page + 1}/{total_pages}", callback_data="noop"),
-         nb("➡️", page + 1)],
-        [nb("⏪ ×2", page - 2), nb("×2 ⏩", page + 2)],
-        [
-            IKB(
-                f"🎴 Collection ({total_chars})",
-                switch_inline_query_current_chat=f"collection.{user_id}.",
-            ),
-            IKB(
-                "🎠 Verse of",
-                switch_inline_query_current_chat=f"collection.{user_id}.VerseSeries",
-            ),
-        ],
-        [
-            IKB("🔎 Filter",  callback_data=f"filter:{user_id}"),
-            IKB("⭐ Set Fav", callback_data=f"setfav_hint:{user_id}"),
-        ],
-    ])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Core display engine
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def display_harem(
-    client,
-    source,
-    user_id: int,
-    page: int,
-    filter_rarity: str | None = None,
-    is_initial: bool = False,
-    callback_query=None,
-):
-    try:
-        unique_chars, counts, user_doc = await _fetch_user_characters(user_id)
-        cmode = user_doc.get("collection_mode", "All") if user_doc else "All"
-
-        # Optional rarity filter on top of collection_mode
-        if filter_rarity and unique_chars:
-            unique_chars = [
-                c for c in unique_chars if c.get("rarity") == filter_rarity
-            ]
-            counts = {
-                (c.get("char_id") or c.get("id") or ""): counts.get(
-                    c.get("char_id") or c.get("id") or "", 1
-                )
-                for c in unique_chars
-            }
-
-        if not unique_chars:
-            empty_msg = (
-                f"❌ No <b>{escape(filter_rarity)}</b> characters in your collection!"
-                if filter_rarity
-                else (
-                    "🌸 Your harem is empty!\n"
-                    f"<i>Collection mode: {escape(cmode)}</i>\n"
-                    "Claim characters when they spawn by pressing ❤️"
-                )
-            )
-            if callback_query:
-                try:
-                    await callback_query.message.edit_text(
-                        empty_msg, parse_mode=enums.ParseMode.HTML
-                    )
-                except Exception:
-                    pass
-            else:
-                await source.reply_text(empty_msg, parse_mode=enums.ParseMode.HTML)
-            return
-
-        total_pages = max(1, math.ceil(len(unique_chars) / CHARS_PER_PAGE))
-        page        = max(0, min(page, total_pages - 1))
-
-        user_name = (
-            callback_query.from_user.first_name
-            if callback_query else source.from_user.first_name
-        )
-
-        text   = await _build_harem_text(
-            unique_chars, counts, user_doc,
-            page, total_pages, user_name, filter_rarity,
-        )
-        markup = _build_nav_markup(
-            user_id, page, total_pages, filter_rarity, len(unique_chars)
-        )
-        cover  = await _best_cover(user_doc, unique_chars)
-
-        if is_initial:
-            await _send_new(source, cover, text, markup)
-        else:
-            await _edit_existing(callback_query, cover, text, markup)
-
-    except Exception:
-        log.exception("display_harem error user=%d", user_id)
-        err = "❌ Something went wrong. Please try again."
-        if callback_query:
-            try:   await callback_query.message.edit_text(err)
-            except Exception: pass
-        else:
-            await source.reply_text(err)
-
-
-async def _send_new(source: Message, cover: dict | None, text: str, markup: IKM):
-    if cover:
-        vid = cover.get("video_url") or (
-            cover["img_url"]
-            if str(cover.get("img_url", "")).endswith((".mp4", ".gif"))
-            else None
-        )
-        try:
-            if vid:
-                await source.reply_video(
-                    vid, caption=text, reply_markup=markup,
-                    parse_mode=enums.ParseMode.HTML,
-                )
-                return
-            if cover.get("img_url"):
-                await source.reply_photo(
-                    cover["img_url"], caption=text, reply_markup=markup,
-                    parse_mode=enums.ParseMode.HTML,
-                )
-                return
-        except Exception:
-            pass
-    await source.reply_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
-
-
-async def _edit_existing(cb, cover: dict | None, text: str, markup: IKM):
-    if cover:
-        vid = cover.get("video_url") or (
-            cover["img_url"]
-            if str(cover.get("img_url", "")).endswith((".mp4", ".gif"))
-            else None
-        )
-        try:
-            if vid:
-                await cb.message.edit_media(
-                    InputMediaVideo(
-                        vid, caption=text, parse_mode=enums.ParseMode.HTML
-                    ),
-                    reply_markup=markup,
-                )
-                return
-            if cover.get("img_url"):
-                await cb.message.edit_media(
-                    InputMediaPhoto(
-                        cover["img_url"], caption=text,
-                        parse_mode=enums.ParseMode.HTML,
-                    ),
-                    reply_markup=markup,
-                )
-                return
-        except Exception:
-            pass
-    try:
-        await cb.message.edit_text(
-            text, reply_markup=markup, parse_mode=enums.ParseMode.HTML
-        )
-    except Exception:
-        pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# /harem
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.on_message(filters.command("harem"))
-async def cmd_harem(client, message: Message):
-    uid = message.from_user.id
-
-    if uid in _rate and _rate[uid] > time.time():
-        return await message.reply_text("⏳ Slow down! Try again in a moment.")
-
-    await get_or_create_user(
-        uid,
-        message.from_user.username   or "",
-        message.from_user.first_name or "",
-        getattr(message.from_user, "last_name", "") or "",
-    )
-
-    group_ok, channel_ok = await check_membership(uid, client)
-    if not (group_ok and channel_ok):
-        text, markup = _join_card(
-            uid,
-            message.from_user.first_name or "there",
-            group_ok, channel_ok, "harem",
-        )
-        return await message.reply_text(text, reply_markup=markup)
-
-    await display_harem(client, message, uid, page=0, is_initial=True)
-
-
-@app.on_callback_query(filters.regex(r"^harem:"))
-async def harem_cb(client, cb):
-    data = cb.data
-
-    # Legacy close button: "harem:close_<uid>"
-    if "close" in data:
-        parts = data.split("_")
-        if len(parts) == 2 and cb.from_user.id == int(parts[1]):
-            await cb.answer()
-            try:   await cb.message.delete()
-            except Exception: pass
-        else:
-            await cb.answer("This is not your Harem!", show_alert=True)
-        return
-
-    try:
-        _, page_s, uid_s, fr_s = data.split(":")
-        page          = int(page_s)
-        uid           = int(uid_s)
-        filter_rarity = None if fr_s == "None" else fr_s
-    except ValueError:
-        return await cb.answer("Invalid data.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("It's not your Harem!", show_alert=True)
-
-    now = time.time()
-    if uid in _rate and _rate[uid] > now:
-        return await cb.answer("⏳ Too fast!", show_alert=False)
-    _rate[uid] = now + RATE_COOLDOWN
-
-    group_ok, channel_ok = await check_membership(uid, client)
-    if not (group_ok and channel_ok):
-        return await cb.answer(
-            "Please join our group & updates channel first!", show_alert=True
-        )
-
-    await cb.answer()
-    await display_harem(
-        client, cb.message, uid, page,
-        filter_rarity, is_initial=False, callback_query=cb,
-    )
-
-
-# "⭐ Set Fav" button in harem nav just shows usage hint
-@app.on_callback_query(filters.regex(r"^setfav_hint:"))
-async def setfav_hint_cb(_, cb):
-    try:
-        uid = int(cb.data.split(":")[1])
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("Not your harem!", show_alert=True)
-
-    await cb.answer(
-        "Use /setfav <character_id> to set a favourite cover!",
-        show_alert=True,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Rarity filter  (inside harem)
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.on_callback_query(filters.regex(r"^filter:"))
-async def filter_cb(_, cb):
-    try:
-        uid = int(cb.data.split(":")[1])
-    except (IndexError, ValueError):
-        return await cb.answer("Invalid.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("It's not your Harem!", show_alert=True)
-
-    all_tiers = {**RARITIES, **SUB_RARITIES}
-    keyboard, row = [], []
-    for i, tier in enumerate(
-        sorted(all_tiers.values(), key=lambda t: RARITY_ORDER.get(t.name, 9999)),
-        start=1,
-    ):
-        row.append(
-            IKB(
-                f"{tier.emoji} {tier.display_name}",
-                callback_data=f"apply_filter:{uid}:{tier.name}",
-            )
-        )
-        if i % 3 == 0:
-            keyboard.append(row); row = []
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([IKB("✖️ Clear Filter", callback_data=f"apply_filter:{uid}:None")])
-    keyboard.append([IKB("🔙 Back", callback_data=f"harem:0:{uid}:None")])
-
-    await cb.answer()
-    try:
-        await cb.message.edit_text(
-            "🔎 <b>Filter by Rarity:</b>",
-            reply_markup=IKM(keyboard),
-            parse_mode=enums.ParseMode.HTML,
-        )
-    except Exception:
-        pass
-
-
-@app.on_callback_query(filters.regex(r"^apply_filter:"))
-async def apply_filter_cb(client, cb):
-    try:
-        _, uid_s, fr_s = cb.data.split(":", 2)
-        uid           = int(uid_s)
-        filter_rarity = None if fr_s == "None" else fr_s
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("It's not your Harem!", show_alert=True)
-
-    await cb.answer()
-    await display_harem(
-        client, cb.message, uid, 0,
-        filter_rarity, is_initial=False, callback_query=cb,
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# /setfav  —  toggle a favourite / harem cover
-# Usage: /setfav <instance_id or char_id>
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.on_message(filters.command("setfav"))
-async def cmd_setfav(_, message: Message):
-    args = message.command
-    if len(args) < 2:
-        return await message.reply_text(
-            "⭐ **Set Favourite**\n"
-            "Usage: `/setfav <character_id>`\n\n"
-            "• The first favourite becomes your harem cover.\n"
-            f"• Up to **{FAV_MAX}** favourites allowed.\n"
-            "• Running the command again on the same ID removes it.",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-
-    uid = message.from_user.id
-    cid = args[1].strip()
-
-    # Verify ownership — accept both instance_id and char_id
-    char = await _col("user_characters").find_one(
-        {
-            "user_id": uid,
-            "$or": [{"instance_id": cid}, {"char_id": cid}],
+import uuid, logging
+from datetime import datetime, date
+from motor.motor_asyncio import AsyncIOMotorClient
+from .config import MONGO_URI, DB_NAME
+
+log = logging.getLogger("SoulCatcher.db")
+_client = None
+_db     = None
+
+
+async def init_db():
+    global _client, _db
+    _client = AsyncIOMotorClient(MONGO_URI)
+    _db     = _client[DB_NAME]
+    await _create_indexes()
+    log.info(f"✅ MongoDB → {DB_NAME}")
+
+def get_db():   return _db
+def _col(name): return _db[name]
+
+
+async def _create_indexes():
+    await _col("users").create_index("user_id", unique=True)
+    await _col("users").create_index("balance")
+    await _col("characters").create_index("id", unique=True)
+    await _col("characters").create_index("rarity")
+    await _col("characters").create_index([("name", "text"), ("anime", "text")])
+    await _col("user_characters").create_index([("user_id", 1), ("instance_id", 1)])
+    await _col("user_characters").create_index([("user_id", 1), ("rarity", 1)])
+    await _col("market_listings").create_index("listing_id", unique=True)
+    await _col("market_listings").create_index([("status", 1), ("rarity", 1)])
+    await _col("wishlists").create_index([("user_id", 1), ("char_id", 1)])
+    await _col("active_spawns").create_index("spawn_id", unique=True)
+    await _col("active_spawns").create_index("chat_id")
+    await _col("group_settings").create_index("chat_id", unique=True)
+    await _col("top_groups").create_index("group_id", unique=True)
+    await _col("drop_logs").create_index([("chat_id", 1), ("rarity", 1), ("date", 1)])
+    await _col("global_bans").create_index("user_id", unique=True)
+    await _col("global_mutes").create_index("user_id", unique=True)
+    log.info("✅ Indexes ready")
+
+
+# ── USERS ─────────────────────────────────────────────────────────────────────
+
+async def get_or_create_user(user_id, username="", first_name="", last_name=""):
+    col  = _col("users")
+    user = await col.find_one({"user_id": user_id})
+    if not user:
+        now  = datetime.utcnow()
+        user = {
+            "user_id": user_id, "username": username,
+            "first_name": first_name, "last_name": last_name,
+            "balance": 0, "gold": 0.0, "rubies": 0.0,
+            "saved_amount": 0, "loan_amount": 0,
+            "total_claimed": 0, "total_married": 0, "marriage_count": 0,
+            "xp": 0, "level": 1, "daily_streak": 0,
+            "last_daily": None, "last_spin": None,
+            "badges": [], "harem_sort": "rarity",
+            "collection_mode": "all", "favorites": [],
+            "custom_media": None,
+            "is_banned": False, "ban_reason": "",
+            "joined_at": now, "last_seen": now, "created_at": now,
         }
-    )
-    if not char:
-        return await message.reply_text(
-            "❌ Character not found in your collection.\n"
-            "Check the ID with /harem."
-        )
+        await col.insert_one(user)
+    else:
+        await col.update_one({"user_id": user_id}, {"$set": {
+            "username": username, "first_name": first_name,
+            "last_name": last_name, "last_seen": datetime.utcnow(),
+        }})
+    return user
 
-    user_doc  = await _col("users").find_one({"user_id": uid}) or {}
-    favs      = list(user_doc.get("favorites") or [])
-    char_cid  = char.get("char_id") or char.get("id") or cid
-    char_name = char.get("name", "Unknown")
-    tier      = get_rarity(char.get("rarity") or "common")
-    r_emoji   = tier.emoji if tier else "❓"
+async def get_user(user_id):
+    return await _col("users").find_one({"user_id": user_id})
 
-    # Toggle off if already a favourite
-    if char_cid in favs:
-        favs.remove(char_cid)
-        await _col("users").update_one(
-            {"user_id": uid}, {"$set": {"favorites": favs}}, upsert=True
-        )
-        return await message.reply_text(
-            f"💔 **{r_emoji} {escape(char_name)}** removed from favourites."
-        )
+async def update_user(uid, upd):
+    await _col("users").update_one({"user_id": uid}, upd, upsert=True)
 
-    if len(favs) >= FAV_MAX:
-        return await message.reply_text(
-            f"⭐ You already have **{FAV_MAX}** favourites.\n"
-            "Remove one first with `/setfav <id>`.",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
+async def get_balance(uid):
+    u = await _col("users").find_one({"user_id": uid}, {"balance": 1})
+    return u["balance"] if u else 0
 
-    favs.insert(0, char_cid)      # first item = cover character
+async def add_balance(uid, amt):
     await _col("users").update_one(
-        {"user_id": uid}, {"$set": {"favorites": favs}}, upsert=True
-    )
-    cover_note = "  _— now your harem cover!_" if len(favs) == 1 else ""
-    await message.reply_text(
-        f"⭐ **{r_emoji} {escape(char_name)}** added to favourites!{cover_note}"
+        {"user_id": uid}, {"$inc": {"balance": amt}}, upsert=True
     )
 
+async def deduct_balance(uid, amt):
+    if await get_balance(uid) < amt:
+        return False
+    await _col("users").update_one({"user_id": uid}, {"$inc": {"balance": -amt}})
+    return True
 
-# ══════════════════════════════════════════════════════════════════════════════
-# /gallery  —  browse all characters in the bot's database
-# Usage: /gallery [rarity_name]
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.on_message(filters.command("gallery"))
-async def cmd_gallery(client, message: Message):
-    uid = message.from_user.id
-
-    group_ok, channel_ok = await check_membership(uid, client)
-    if not (group_ok and channel_ok):
-        text, markup = _join_card(
-            uid,
-            message.from_user.first_name or "there",
-            group_ok, channel_ok, "gallery",
-        )
-        return await message.reply_text(text, reply_markup=markup)
-
-    rarity_filter = (
-        message.command[1].strip().lower()
-        if len(message.command) > 1 else None
-    )
-    if rarity_filter and not get_rarity(rarity_filter):
-        valid = " · ".join(
-            r.name for r in sorted(
-                {**RARITIES, **SUB_RARITIES}.values(),
-                key=lambda t: RARITY_ORDER.get(t.name, 9999),
-            )
-        )
-        return await message.reply_text(
-            f"❌ Unknown rarity `{escape(rarity_filter)}`.\n"
-            f"<i>Valid: {valid}</i>",
-            parse_mode=enums.ParseMode.HTML,
-        )
-
-    await _display_gallery(
-        client, message, uid,
-        page=0, rarity_filter=rarity_filter, is_initial=True,
+async def add_xp(uid, xp):
+    await _col("users").update_one(
+        {"user_id": uid}, {"$inc": {"xp": xp}}, upsert=True
     )
 
+async def is_user_banned(uid):
+    u = await _col("users").find_one({"user_id": uid}, {"is_banned": 1})
+    return bool(u and u.get("is_banned"))
 
-@app.on_callback_query(filters.regex(r"^gallery:"))
-async def gallery_cb(client, cb):
-    try:
-        parts         = cb.data.split(":")    # gallery:page:uid:rarity
-        page          = int(parts[1])
-        uid           = int(parts[2])
-        r_str         = parts[3] if len(parts) > 3 else "None"
-        rarity_filter = None if r_str == "None" else r_str
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
+async def ban_user_db(uid, reason=""):
+    await _col("users").update_one(
+        {"user_id": uid},
+        {"$set": {"is_banned": True, "ban_reason": reason}},
+        upsert=True,
+    )
 
-    if cb.from_user.id != uid:
-        return await cb.answer("Not your session!", show_alert=True)
+async def unban_user_db(uid):
+    await _col("users").update_one(
+        {"user_id": uid}, {"$set": {"is_banned": False, "ban_reason": ""}}
+    )
 
-    await cb.answer()
-    await _display_gallery(
-        client, cb.message, uid,
-        page=page, rarity_filter=rarity_filter,
-        is_initial=False, callback_query=cb,
+async def get_all_user_ids():
+    docs = await _col("users").find({}, {"user_id": 1}).to_list(None)
+    return [d["user_id"] for d in docs]
+
+async def count_all_users():
+    return await _col("users").count_documents({})
+
+
+# ── CHARACTERS ────────────────────────────────────────────────────────────────
+
+async def next_char_id():
+    docs     = await _col("characters").find(
+        {"id": {"$exists": True}}, {"id": 1}
+    ).to_list(None)
+    existing = [int(c["id"]) for c in docs if str(c.get("id", "")).isdigit()]
+    seq      = await _col("sequences").find_one({"_id": "character_id"})
+    nxt      = max(max(existing, default=0), seq["v"] if seq else 0) + 1
+    await _col("sequences").update_one(
+        {"_id": "character_id"}, {"$set": {"v": nxt}}, upsert=True
+    )
+    return str(nxt).zfill(4)
+
+async def insert_character(doc):
+    doc["id"]       = await next_char_id()
+    doc["enabled"]  = doc.get("enabled", True)
+    doc["added_at"] = doc.get("added_at", datetime.utcnow())
+    await _col("characters").insert_one(doc)
+    return doc["id"]
+
+async def get_character(char_id):
+    return await _col("characters").find_one({"id": char_id})
+
+async def update_character(cid, upd):
+    await _col("characters").update_one({"id": cid}, upd)
+
+async def count_characters(enabled=True):
+    return await _col("characters").count_documents(
+        {"enabled": True} if enabled else {}
+    )
+
+async def get_random_character(rarity_name):
+    from .rarity import is_video_only
+    match_filter: dict = {"rarity": rarity_name, "enabled": True}
+    if is_video_only(rarity_name):
+        match_filter["video_url"] = {"$nin": [None, ""]}
+    res = await _col("characters").aggregate([
+        {"$match": match_filter},
+        {"$sample": {"size": 1}},
+    ]).to_list(1)
+    return res[0] if res else None
+
+async def search_characters(query, limit=10):
+    return await _col("characters").find(
+        {"$text": {"$search": query}, "enabled": True}
+    ).limit(limit).to_list(limit)
+
+
+# ── USER CHARACTERS (HAREM) ───────────────────────────────────────────────────
+
+async def add_to_harem(user_id, char):
+    iid = str(uuid.uuid4())[:8].upper()
+    await _col("user_characters").insert_one({
+        "instance_id": iid,
+        "user_id":     user_id,
+        "char_id":     char["id"],
+        "name":        char["name"],
+        "anime":       char.get("anime", "Unknown"),
+        "rarity":      char["rarity"],
+        "img_url":     char.get("img_url", ""),
+        "video_url":   char.get("video_url", ""),
+        "is_favorite": False,
+        "note":        "",
+        "obtained_at": datetime.utcnow(),
+    })
+    await _col("users").update_one(
+        {"user_id": user_id}, {"$inc": {"total_claimed": 1}}, upsert=True
+    )
+    return iid
+
+async def get_harem(user_id, page=1, per_page=10, sort_by="rarity"):
+    SORT_MAP = {
+        "rarity": [("rarity", 1), ("name", 1)],
+        "name":   [("name", 1)],
+        "anime":  [("anime", 1)],
+        "recent": [("obtained_at", -1)],
+    }
+    col   = _col("user_characters")
+    total = await col.count_documents({"user_id": user_id})
+    skip  = (page - 1) * per_page
+    chars = (
+        await col.find({"user_id": user_id})
+        .sort(SORT_MAP.get(sort_by, SORT_MAP["rarity"]))
+        .skip(skip)
+        .limit(per_page)
+        .to_list(per_page)
+    )
+    return chars, total
+
+async def get_harem_char(user_id, instance_id):
+    return await _col("user_characters").find_one(
+        {"user_id": user_id, "instance_id": instance_id}
+    )
+
+async def count_rarity_in_harem(user_id, rarity_name):
+    return await _col("user_characters").count_documents(
+        {"user_id": user_id, "rarity": rarity_name}
+    )
+
+async def remove_from_harem(user_id, instance_id):
+    res = await _col("user_characters").delete_one(
+        {"user_id": user_id, "instance_id": instance_id}
+    )
+    return res.deleted_count > 0
+
+async def transfer_harem_char(instance_id, from_uid, to_uid):
+    res = await _col("user_characters").update_one(
+        {"instance_id": instance_id, "user_id": from_uid},
+        {"$set": {"user_id": to_uid}},
+    )
+    return res.modified_count > 0
+
+async def get_all_harem(user_id):
+    return await _col("user_characters").find({"user_id": user_id}).to_list(9999)
+
+async def get_harem_rarity_counts(user_id):
+    rows = await _col("user_characters").aggregate([
+        {"$match": {"user_id": user_id}},
+        {"$group": {"_id": "$rarity", "count": {"$sum": 1}}},
+    ]).to_list(50)
+    return {r["_id"]: r["count"] for r in rows}
+
+async def get_harem_char_by_name(user_id, name):
+    return await _col("user_characters").find_one(
+        {"user_id": user_id, "name": {"$regex": name, "$options": "i"}}
     )
 
 
-@app.on_callback_query(filters.regex(r"^gallery_filter:"))
-async def gallery_filter_cb(_, cb):
-    try:
-        _, uid_s = cb.data.split(":", 1)
-        uid = int(uid_s)
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
+# ── SPAWNS ────────────────────────────────────────────────────────────────────
 
-    if cb.from_user.id != uid:
-        return await cb.answer("Not your session!", show_alert=True)
+async def create_spawn(chat_id, message_id, char, rarity_name):
+    spawn_id = str(uuid.uuid4())[:10].upper()
+    await _col("active_spawns").insert_one({
+        "spawn_id":   spawn_id,
+        "chat_id":    chat_id,
+        "message_id": message_id,
+        "char_id":    char["id"],
+        "char_name":  char["name"],
+        "rarity":     rarity_name,
+        "claimed":    False,
+        "claimed_by": None,
+        "expired":    False,
+        "spawned_at": datetime.utcnow(),
+    })
+    return spawn_id
 
-    all_tiers = {**RARITIES, **SUB_RARITIES}
-    keyboard, row = [], []
-    for i, tier in enumerate(
-        sorted(all_tiers.values(), key=lambda t: RARITY_ORDER.get(t.name, 9999)),
-        start=1,
-    ):
-        row.append(
-            IKB(
-                f"{tier.emoji} {tier.display_name}",
-                callback_data=f"gallery:0:{uid}:{tier.name}",
-            )
+async def claim_spawn(spawn_id, user_id):
+    return await _col("active_spawns").find_one_and_update(
+        {"spawn_id": spawn_id, "claimed": False, "expired": False},
+        {"$set": {
+            "claimed":    True,
+            "claimed_by": user_id,
+            "claimed_at": datetime.utcnow(),
+        }},
+        return_document=True,
+    )
+
+async def expire_spawn(spawn_id):
+    await _col("active_spawns").update_one(
+        {"spawn_id": spawn_id}, {"$set": {"expired": True}}
+    )
+
+async def unclaim_spawn(spawn_id):
+    """Roll back a claim blocked by max_per_user."""
+    await _col("active_spawns").update_one(
+        {"spawn_id": spawn_id},
+        {"$set": {"claimed": False, "claimed_by": None, "claimed_at": None}},
+    )
+
+
+# ── DROP LOGS ─────────────────────────────────────────────────────────────────
+
+async def check_and_record_drop(chat_id, rarity_name):
+    from .rarity import get_drop_limit
+    limit = get_drop_limit(rarity_name)
+    today = str(date.today())
+    if limit == 0:
+        await _col("drop_logs").update_one(
+            {"chat_id": chat_id, "rarity": rarity_name, "date": today},
+            {"$inc": {"count": 1}},
+            upsert=True,
         )
-        if i % 3 == 0:
-            keyboard.append(row); row = []
-    if row:
-        keyboard.append(row)
+        return True
+    doc   = await _col("drop_logs").find_one(
+        {"chat_id": chat_id, "rarity": rarity_name, "date": today}
+    )
+    count = doc["count"] if doc else 0
+    if count >= limit:
+        return False
+    await _col("drop_logs").update_one(
+        {"chat_id": chat_id, "rarity": rarity_name, "date": today},
+        {"$inc": {"count": 1}},
+        upsert=True,
+    )
+    return True
 
-    keyboard.append([IKB("✖️ All Rarities", callback_data=f"gallery:0:{uid}:None")])
-
-    await cb.answer()
-    try:
-        await cb.message.edit_text(
-            "🔎 <b>Filter Gallery by Rarity:</b>",
-            reply_markup=IKM(keyboard),
-            parse_mode=enums.ParseMode.HTML,
-        )
-    except Exception:
-        pass
-
-
-async def _display_gallery(
-    client,
-    source,
-    user_id: int,
-    page: int,
-    rarity_filter: str | None = None,
-    is_initial: bool = False,
-    callback_query=None,
-):
-    query: dict = {"enabled": True}
-    if rarity_filter:
-        query["rarity"] = rarity_filter
-
-    try:
-        total       = await _col("characters").count_documents(query)
-        total_pages = max(1, math.ceil(total / GALLERY_PER_PAGE))
-        page        = max(0, min(page, total_pages - 1))
-
-        char_list = (
-            await _col("characters")
-            .find(query)
-            .skip(page * GALLERY_PER_PAGE)
-            .limit(GALLERY_PER_PAGE)
-            .to_list(None)
-        )
-    except Exception:
-        log.exception("_display_gallery DB error")
-        err = "❌ Error fetching gallery. Please try again."
-        if callback_query:
-            try:   await callback_query.message.edit_text(err)
-            except Exception: pass
-        else:
-            await source.reply_text(err)
-        return
-
-    if not char_list:
-        msg = (
-            f"🖼️ No characters found for <b>{escape(rarity_filter)}</b>."
-            if rarity_filter
-            else "🖼️ No characters in the database yet."
-        )
-        if callback_query:
-            try:   await callback_query.message.edit_text(msg, parse_mode=enums.ParseMode.HTML)
-            except Exception: pass
-        else:
-            await source.reply_text(msg, parse_mode=enums.ParseMode.HTML)
-        return
-
-    rf_str = rarity_filter or "None"
-
-    lines = [f"🖼️ <b>Global Gallery</b>  〔{page + 1}/{total_pages}〕"]
-    if rarity_filter:
-        tier  = get_rarity(rarity_filter)
-        emoji = tier.emoji if tier else "❓"
-        lines.append(f"<i>Filter: {emoji} {rarity_filter.title()}</i>")
-    lines.append(f"<i>{total} characters total</i>\n")
-
-    for i, char in enumerate(char_list, start=page * GALLERY_PER_PAGE + 1):
-        tier    = get_rarity(char.get("rarity") or "common")
-        r_emoji = tier.emoji if tier else "❓"
-        cid     = char.get("id") or char.get("char_id") or "?"
-        vid_tag = " 🎬" if char.get("video_url") else ""
-        lines.append(
-            f"  {i}. {r_emoji} <code>{cid}</code>  "
-            f"<b>{escape(char.get('name', 'Unknown'))}</b>"
-            f"  <i>{escape(char.get('anime', '?'))}</i>{vid_tag}"
-        )
-
-    text = "\n".join(lines)
-
-    def gnb(label: str, target: int) -> IKB:
-        if 0 <= target < total_pages:
-            return IKB(label, callback_data=f"gallery:{target}:{user_id}:{rf_str}")
-        return IKB("·", callback_data="noop")
-
-    markup = IKM([
-        [gnb("⬅️ Prev", page - 1),
-         IKB(f"📖 {page + 1}/{total_pages}", callback_data="noop"),
-         gnb("Next ➡️", page + 1)],
-        [gnb("⏪ ×5", page - 5), gnb("×5 ⏩", page + 5)],
-        [IKB("🔎 Filter Rarity", callback_data=f"gallery_filter:{user_id}")],
-    ])
-
-    cover_img = None
-    try:
-        cover_char = random.choice(char_list)
-        cover_img  = cover_char.get("img_url") or None
-    except Exception:
-        pass
-
-    if is_initial:
-        try:
-            if cover_img:
-                await source.reply_photo(
-                    cover_img, caption=text, reply_markup=markup,
-                    parse_mode=enums.ParseMode.HTML,
-                )
-                return
-        except Exception:
-            pass
-        await source.reply_text(
-            text, reply_markup=markup, parse_mode=enums.ParseMode.HTML
-        )
-    else:
-        try:
-            if cover_img:
-                await callback_query.message.edit_media(
-                    InputMediaPhoto(
-                        cover_img, caption=text,
-                        parse_mode=enums.ParseMode.HTML,
-                    ),
-                    reply_markup=markup,
-                )
-                return
-        except Exception:
-            pass
-        try:
-            await callback_query.message.edit_text(
-                text, reply_markup=markup, parse_mode=enums.ParseMode.HTML
-            )
-        except Exception:
-            pass
+async def get_drop_counts_today(chat_id):
+    today = str(date.today())
+    rows  = await _col("drop_logs").find(
+        {"chat_id": chat_id, "date": today}
+    ).to_list(50)
+    return {r["rarity"]: r["count"] for r in rows}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# /sort
-# ══════════════════════════════════════════════════════════════════════════════
+# ── GROUP SETTINGS ────────────────────────────────────────────────────────────
 
-SORT_OPTIONS = ["rarity", "name", "anime", "recent"]
+async def get_group(chat_id):
+    g = await _col("group_settings").find_one({"chat_id": chat_id})
+    if not g:
+        from .rarity import SPAWN_SETTINGS
+        g = {
+            "chat_id":       chat_id,
+            "spawn_enabled": True,
+            "spawn_cooldown": SPAWN_SETTINGS["cooldown_seconds"],
+            "message_count": 0,
+            "last_spawn":    None,
+            "banned":        False,
+        }
+        await _col("group_settings").insert_one(g)
+    return g
 
-@app.on_message(filters.command("sort"))
-async def cmd_sort(_, message: Message):
-    args = message.command
-    if len(args) < 2 or args[1].lower() not in SORT_OPTIONS:
-        opts = " | ".join(SORT_OPTIONS)
-        return await message.reply_text(
-            f"🔃 **Sort Harem**\n`/sort <{opts}>`",
-            parse_mode=enums.ParseMode.MARKDOWN,
-        )
-    val = args[1].lower()
-    await update_user(message.from_user.id, {"$set": {"harem_sort": val}})
-    await message.reply_text(f"✅ Harem sorted by **{val}**!")
+async def increment_group_msg(chat_id):
+    res = await _col("group_settings").find_one_and_update(
+        {"chat_id": chat_id},
+        {"$inc": {"message_count": 1}},
+        upsert=True,
+        return_document=True,
+    )
+    return res["message_count"] if res else 1
+
+async def reset_group_msg(chat_id):
+    await _col("group_settings").update_one(
+        {"chat_id": chat_id},
+        {"$set": {"message_count": 0, "last_spawn": datetime.utcnow()}},
+    )
+
+async def set_group_spawn_limit(chat_id: int, limit: int) -> None:
+    """Persist per-group spawn message threshold (read by spawn.py)."""
+    await _col("group_settings").update_one(
+        {"chat_id": chat_id},
+        {"$set": {"spawn_msg_limit": limit}},
+        upsert=True,
+    )
+    log.info("Group %s: spawn_msg_limit → %s", chat_id, limit)
+
+async def get_all_group_ids():
+    docs = await _col("group_settings").find({}, {"chat_id": 1}).to_list(None)
+    return [d["chat_id"] for d in docs]
+
+async def track_group(group_id, title=""):
+    await _col("top_groups").update_one(
+        {"group_id": group_id},
+        {"$set": {"group_id": group_id, "title": title}},
+        upsert=True,
+    )
+
+async def get_all_tracked_group_ids():
+    docs = await _col("top_groups").find({}, {"group_id": 1}).to_list(None)
+    return [d["group_id"] for d in docs]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# joined_check  —  "🔄 Verify Membership" button
-# ══════════════════════════════════════════════════════════════════════════════
+# ── WISHLIST ──────────────────────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^joined_check:"))
-async def joined_check_cb(client, cb):
-    try:
-        _, uid_s, context = cb.data.split(":", 2)
-        uid = int(uid_s)
-    except Exception:
-        return await cb.answer("Invalid request.", show_alert=True)
+async def add_wish(user_id, char_id, char_name, rarity):
+    if await _col("wishlists").find_one({"user_id": user_id, "char_id": char_id}):
+        return False
+    if await _col("wishlists").count_documents({"user_id": user_id}) >= 25:
+        return False
+    await _col("wishlists").insert_one({
+        "user_id": user_id, "char_id": char_id,
+        "char_name": char_name, "rarity": rarity,
+    })
+    return True
 
-    if cb.from_user.id != uid:
-        return await cb.answer("⛔ Not your button.", show_alert=True)
+async def remove_wish(user_id, char_id):
+    res = await _col("wishlists").delete_one({"user_id": user_id, "char_id": char_id})
+    return res.deleted_count > 0
 
-    await cb.answer("🔄 Verifying…", show_alert=False)
+async def get_wishlist(user_id):
+    return await _col("wishlists").find({"user_id": user_id}).to_list(25)
 
-    try:
-        group_ok, channel_ok = await check_membership(uid, client)
-    except Exception as e:
-        log.warning("joined_check error uid=%d: %s", uid, e)
-        return await cb.answer("⚠️ Verification failed. Try again.", show_alert=True)
+async def get_wishers(char_id, exclude_uid=0):
+    docs = await _col("wishlists").find(
+        {"char_id": char_id, "user_id": {"$ne": exclude_uid}}
+    ).to_list(20)
+    return [d["user_id"] for d in docs]
 
-    name = cb.from_user.first_name or "there"
 
-    # Still missing at least one chat
-    if not (group_ok and channel_ok):
-        text, markup = _join_card(uid, name, group_ok, channel_ok, context)
-        try:   await cb.message.edit_text(text, reply_markup=markup)
-        except Exception: pass
-        return
+# ── TRADES ────────────────────────────────────────────────────────────────────
 
-    # All joined — route to the correct feature
-    if context == "harem":
-        try:
-            await cb.message.edit_text(
-                f"✅ Verified, <b>{escape(name)}</b>! Loading your harem…",
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
-        await display_harem(
-            client, cb.message, uid, 0,
-            None, is_initial=False, callback_query=cb,
-        )
+async def create_trade(doc):
+    await _col("trades").insert_one(doc)
 
-    elif context == "gallery":
-        try:
-            await cb.message.edit_text("✅ Verified! Loading gallery…")
-        except Exception: pass
-        await _display_gallery(
-            client, cb.message, uid,
-            page=0, rarity_filter=None,
-            is_initial=False, callback_query=cb,
-        )
+async def get_trade(tid):
+    return await _col("trades").find_one({"trade_id": tid})
 
-    else:
-        try:
-            await cb.message.edit_text(
-                f"✅ <b>All set, {escape(name)}!</b>\n"
-                "Use the command again to continue.",
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
+async def update_trade(tid, u):
+    await _col("trades").update_one({"trade_id": tid}, u)
+
+
+# ── MARKET ────────────────────────────────────────────────────────────────────
+
+async def create_listing(doc):
+    await _col("market_listings").insert_one(doc)
+
+async def get_listing(lid):
+    return await _col("market_listings").find_one({"listing_id": lid})
+
+async def update_listing(lid, u):
+    await _col("market_listings").update_one({"listing_id": lid}, u)
+
+async def get_active_listings(rarity=None, limit=10):
+    filt = {"status": "active"}
+    if rarity:
+        filt["rarity"] = rarity
+    return (
+        await _col("market_listings")
+        .find(filt)
+        .sort("listed_at", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+async def atomic_buy_listing(listing_id, buyer_id):
+    return await _col("market_listings").find_one_and_update(
+        {"listing_id": listing_id, "status": "active"},
+        {"$set": {
+            "status":   "sold",
+            "buyer_id": buyer_id,
+            "sold_at":  datetime.utcnow(),
+        }},
+        return_document=True,
+    )
+
+
+# ── MARRIAGES ─────────────────────────────────────────────────────────────────
+
+async def get_marriage(uid):
+    return await _col("marriages").find_one(
+        {"$or": [{"user1": uid}, {"user2": uid}]}
+    )
+
+async def create_marriage(u1, u2):
+    await _col("marriages").insert_one(
+        {"user1": u1, "user2": u2, "married_at": datetime.utcnow()}
+    )
+
+async def divorce(uid):
+    res = await _col("marriages").delete_one(
+        {"$or": [{"user1": uid}, {"user2": uid}]}
+    )
+    return res.deleted_count > 0
+
+
+# ── GLOBAL BAN / MUTE ─────────────────────────────────────────────────────────
+
+async def add_to_global_ban(uid, reason, banned_by):
+    await _col("global_bans").update_one(
+        {"user_id": uid},
+        {"$set": {
+            "user_id":   uid,
+            "reason":    reason,
+            "banned_by": banned_by,
+            "banned_at": datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+
+async def remove_from_global_ban(uid):
+    await _col("global_bans").delete_one({"user_id": uid})
+
+async def is_user_globally_banned(uid):
+    return bool(await _col("global_bans").find_one({"user_id": uid}))
+
+async def fetch_globally_banned_users():
+    return await _col("global_bans").find({}).to_list(None)
+
+async def add_to_global_mute(uid, reason, muted_by):
+    await _col("global_mutes").update_one(
+        {"user_id": uid},
+        {"$set": {
+            "user_id":  uid,
+            "reason":   reason,
+            "muted_by": muted_by,
+            "muted_at": datetime.utcnow(),
+        }},
+        upsert=True,
+    )
+
+async def remove_from_global_mute(uid):
+    await _col("global_mutes").delete_one({"user_id": uid})
+
+async def is_user_globally_muted(uid):
+    return bool(await _col("global_mutes").find_one({"user_id": uid}))
+
+async def fetch_globally_muted_users():
+    return await _col("global_mutes").find({}).to_list(None)
+
+async def get_all_chats():
+    uids   = await get_all_user_ids()
+    grpids = await get_all_tracked_group_ids()
+    return list(set(uids + grpids))
+
+
+# ── SUDO / DEV / UPLOADER ─────────────────────────────────────────────────────
+
+async def add_sudo(uid):
+    await _col("sudo_users").update_one(
+        {"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True
+    )
+
+async def remove_sudo(uid):
+    await _col("sudo_users").delete_one({"user_id": uid})
+
+async def get_sudo_ids():
+    docs = await _col("sudo_users").find({}).to_list(None)
+    return [d["user_id"] for d in docs]
+
+async def is_sudo(uid):
+    return bool(await _col("sudo_users").find_one({"user_id": uid}))
+
+async def add_dev(uid):
+    await _col("dev_users").update_one(
+        {"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True
+    )
+
+async def remove_dev(uid):
+    await _col("dev_users").delete_one({"user_id": uid})
+
+async def get_dev_ids():
+    docs = await _col("dev_users").find({}).to_list(None)
+    return [d["user_id"] for d in docs]
+
+async def is_dev(uid):
+    return bool(await _col("dev_users").find_one({"user_id": uid}))
+
+async def add_uploader(uid):
+    await _col("uploaders").update_one(
+        {"user_id": uid},
+        {"$set": {"user_id": uid, "added_at": datetime.utcnow()}},
+        upsert=True,
+    )
+
+async def remove_uploader(uid):
+    await _col("uploaders").delete_one({"user_id": uid})
+
+async def get_uploader_ids():
+    docs = await _col("uploaders").find({}).to_list(None)
+    return [d["user_id"] for d in docs]
+
+async def is_uploader(uid):
+    return bool(await _col("uploaders").find_one({"user_id": uid}))
+
+
+# ── RANK ──────────────────────────────────────────────────────────────────────
+
+async def count_user_rank(user_id) -> int:
+    """Returns collector rank (1 = most characters)."""
+    cnt = await _col("user_characters").count_documents({"user_id": user_id})
+    pipeline = [
+        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": cnt}}},
+        {"$count": "ahead"},
+    ]
+    res = await _col("user_characters").aggregate(pipeline).to_list(1)
+    return (res[0]["ahead"] if res else 0) + 1
+
+
+# ── LEADERBOARDS ──────────────────────────────────────────────────────────────
+
+async def top_richest(limit: int = 10) -> list:
+    """Top users by kakera balance."""
+    return (
+        await _col("users")
+        .find({"balance": {"$gt": 0}})
+        .sort("balance", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+async def top_collectors(limit: int = 10) -> list:
+    """Top users by total characters owned, with display names joined in."""
+    pipeline = [
+        {"$group": {"_id": "$user_id", "char_count": {"$sum": 1}}},
+        {"$sort": {"char_count": -1}},
+        {"$limit": limit},
+        {"$lookup": {
+            "from":         "users",
+            "localField":   "_id",
+            "foreignField": "user_id",
+            "as":           "user_info",
+        }},
+        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "_id":        0,
+            "user_id":    "$_id",
+            "char_count": 1,
+            "first_name": {"$ifNull": ["$user_info.first_name", ""]},
+            "username":   {"$ifNull": ["$user_info.username",   ""]},
+        }},
+    ]
+    return await _col("user_characters").aggregate(pipeline).to_list(limit)
