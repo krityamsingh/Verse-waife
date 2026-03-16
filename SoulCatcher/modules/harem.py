@@ -227,28 +227,11 @@ async def _best_cover(user_doc: dict, unique_chars: list) -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Cute decorators
+# Decorators
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Rotating flower/heart dividers — one picked per page so it stays consistent
-_DIVIDERS = [
-    "✿ ❀ ✿ ❀ ✿ ❀ ✿ ❀ ✿",
-    "💮 ꕤ 💮 ꕤ 💮 ꕤ 💮",
-    "🌸 ° 🌸 ° 🌸 ° 🌸",
-    "❤️ ꧁ ❤️ ꧁ ❤️ ꧁ ❤️",
-    "ʚ♡ɞ ˖ ʚ♡ɞ ˖ ʚ♡ɞ",
-    "🌺 · 🌺 · 🌺 · 🌺",
-    "♡ ˗ˏˋ ♡ ˗ˏˋ ♡ ˗ˏˋ ♡",
-]
-
+_DIVIDER = "·˚ ༘ ♡ ₊˚ ✿ ₊˚ ♡ ༘ ˚·"
 _ANIME_FLOWERS = ["🌸", "🌺", "💐", "🌼", "🌻", "💮", "🪷"]
-
-_PAGE_HEADERS = [
-    "𝒔𝒐𝒖𝒍𝒄𝒂𝒕𝒄𝒉𝒆𝒓 ✦ 𝒉𝒂𝒓𝒆𝒎",
-    "𝓱𝓪𝓻𝓮𝓶 𝓬𝓸𝓵𝓵𝓮𝓬𝓽𝓲𝓸𝓷 ✿",
-    "❀ 𝒎𝒚 𝒔𝒐𝒖𝒍𝒔 ❀",
-    "𝑐𝑜𝑙𝑙𝑒𝑐𝑡𝑖𝑜𝑛 𝑜𝑓 𝑙𝑜𝑣𝑒 🌸",
-]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -268,24 +251,16 @@ async def _build_harem_text(
     sliced = unique_chars[start: start + CHARS_PER_PAGE]
     favs   = {str(f) for f in (user_doc.get("favorites") or [])}
 
-    # Pick decorators seeded by page so they stay stable on re-renders
-    divider  = _DIVIDERS[page % len(_DIVIDERS)]
-    header   = _PAGE_HEADERS[page % len(_PAGE_HEADERS)]
-
     lines = [
-        f"╔══「 🌸 {header} 🌸 」══╗",
-        f"",
-        f"  ʚ♡ɞ  <b>{escape(user_name)}</b>'s precious souls  ʚ♡ɞ",
-        f"  <i>page {page + 1} of {total_pages}</i>",
-        f"",
-        f"{divider}",
+        f"❀ <b>{escape(user_name)}'s Harem</b> ❀",
+        f"<i>{_DIVIDER}</i>",
         f"",
     ]
 
     if filter_rarity:
         tier  = get_rarity(filter_rarity)
         emoji = tier.emoji if tier else "❓"
-        lines.append(f"  🔎 showing: <b>{emoji} {filter_rarity.title()}</b> only\n")
+        lines.append(f"🔎 <i>showing {emoji} {filter_rarity.title()} only</i>\n")
 
     grouped: dict[str, list] = {}
     for c in sliced:
@@ -298,10 +273,7 @@ async def _build_harem_text(
         except Exception:
             total_in_db = "?"
 
-        lines.append(
-            f"{flower} <b>{escape(anime)}</b>  "
-            f"<code>({len(chars)}/{total_in_db})</code>"
-        )
+        lines.append(f"{flower} <b>{escape(anime)}</b>  ({len(chars)}/{total_in_db})")
 
         for char in chars:
             cid        = char.get("char_id") or char.get("id") or ""
@@ -309,22 +281,16 @@ async def _build_harem_text(
             tier       = get_rarity(char.get("rarity") or "common")
             r_emoji    = tier.emoji if tier else "❓"
             fav_tag    = " 💗" if str(cid) in favs else ""
-            dup_tag    = f"  <i>×{count}</i>" if count > 1 else ""
-            display_id = char.get("instance_id") or cid
+            dup_tag    = f" ×{count}" if count > 1 else ""
             lines.append(
-                f"  ❥ {r_emoji}{fav_tag} {escape(char.get('name', 'Unknown'))}"
-                f"  <code>{display_id}</code>{dup_tag}"
+                f"  ❥ {r_emoji}{fav_tag} {escape(char.get('name', 'Unknown'))}{dup_tag}"
             )
 
         lines.append("")
 
     lines += [
-        f"{divider}",
-        f"",
-        f"  🌷 <b>unique souls:</b> <code>{len(unique_chars)}</code>"
-        f"   💌 <b>page:</b> <code>{page + 1}/{total_pages}</code>",
-        f"",
-        f"╚══「 ♡ 」══╝",
+        f"<i>{_DIVIDER}</i>",
+        f"🌷 <b>{len(unique_chars)}</b> unique souls  ·  page <b>{page + 1}</b> of <b>{total_pages}</b>",
     ]
     return "\n".join(lines)
 
