@@ -19,7 +19,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from pyrogram import filters
@@ -145,7 +145,27 @@ def _obscure_name(name: str) -> str:
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+    """Current UTC time as a **timezone-naive** datetime.
+
+    MongoDB / most ORMs store datetimes without tzinfo, so we stay naive
+    throughout to avoid "can't subtract offset-naive and offset-aware
+    datetimes" TypeErrors.
+    """
+    return datetime.utcnow()
+
+
+def _seconds_since(dt: "Optional[datetime]") -> float:
+    """Seconds elapsed since *dt*, which may be naive **or** aware.
+
+    Normalises *dt* to naive UTC before subtracting so callers never
+    have to worry about what the database returned.
+    Returns ``inf`` when *dt* is ``None`` (i.e. never happened).
+    """
+    if dt is None:
+        return float("inf")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return (_now_utc() - dt).total_seconds()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,7 +228,7 @@ async def on_group_message(client, message: Message) -> None:
 
     cooldown: int = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
     last: Optional[datetime] = group.get("last_spawn")
-    if last and (_now_utc() - last).total_seconds() < cooldown:
+    if _seconds_since(last) < cooldown:
         await reset_group_msg(chat_id)
         return
 
@@ -233,8 +253,9 @@ async def cmd_drop(client, message: Message) -> None:
 
     cooldown: int = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
     last: Optional[datetime] = group.get("last_spawn")
-    if last and (_now_utc() - last).total_seconds() < cooldown:
-        remaining = int(cooldown - (_now_utc() - last).total_seconds())
+    elapsed = _seconds_since(last)
+    if elapsed < cooldown:
+        remaining = int(cooldown - elapsed)
         return await message.reply_text(f"⏳ Next drop in **{remaining}s**")
 
     await _do_spawn(client, message, chat_id)
