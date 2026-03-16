@@ -23,7 +23,7 @@ from ..database import (
     update_user,
     get_random_character,
     add_to_harem,
-    count_user_rarity,
+    count_rarity_in_harem,
 )
 from ..rarity import RARITIES, get_rarity, roll_sub_rarity
 
@@ -134,7 +134,7 @@ async def cmd_claim(_, message: Message):
     # Per-user cap: if capped, fall back to Legendry
     max_copies = CLAIM_MAX_PER_USER.get(base_rarity.name, 0)
     if max_copies > 0:
-        owned = await count_user_rarity(uid, rarity_name)
+        owned = await count_rarity_in_harem(uid, rarity_name)
         if owned >= max_copies:
             rarity_name = "cosmos"
             is_sub      = False
