@@ -1,11 +1,9 @@
 """
 SoulCatcher/modules/harem.py
 ════════════════════════════════════════════════════════════════════
-Commands  : /harem  /collection  /cmode  /collectionmode
-            /sort   /setfav      /gallery
+Commands  : /harem  /sort  /setfav  /gallery
 Callbacks : harem:  filter:  apply_filter:
-            cmode_main:  cmode:  joined_check:
-            gallery:  gallery_filter:  setfav_hint:
+            joined_check:  gallery:  gallery_filter:  setfav_hint:
 ════════════════════════════════════════════════════════════════════
 
 Rarity keys matched to rarity.py
@@ -474,10 +472,10 @@ async def _edit_existing(cb, cover: dict | None, text: str, markup: IKM):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /harem  /collection
+# /harem
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.on_message(filters.command(["harem", "collection"]))
+@app.on_message(filters.command("harem"))
 async def cmd_harem(client, message: Message):
     uid = message.from_user.id
 
@@ -925,191 +923,6 @@ async def _display_gallery(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /cmode  /collectionmode
-# ══════════════════════════════════════════════════════════════════════════════
-
-@app.on_message(filters.command(["cmode", "collectionmode"]) & filters.group)
-async def cmd_cmode(client, message: Message):
-    uid = message.from_user.id
-
-    group_ok, channel_ok = await check_membership(uid, client)
-    if not (group_ok and channel_ok):
-        text, markup = _join_card(
-            uid,
-            message.from_user.first_name or "there",
-            group_ok, channel_ok, "cmode",
-        )
-        return await message.reply_text(text, reply_markup=markup)
-
-    user_doc     = await _col("users").find_one({"user_id": uid}) or {}
-    current_mode = user_doc.get("collection_mode", "All")
-    full_name    = escape(
-        (message.from_user.first_name or "")
-        + (
-            " " + message.from_user.last_name
-            if getattr(message.from_user, "last_name", None)
-            else ""
-        )
-    )
-
-    await message.reply_text(
-        f"<b>🗂️ Collection Mode — {full_name}</b>\n\n"
-        f"Current: <code>{current_mode}</code>\n\n"
-        "Choose how your harem is displayed:",
-        reply_markup=IKM(_cmode_main_buttons(uid)),
-        parse_mode=enums.ParseMode.HTML,
-    )
-
-
-def _cmode_main_buttons(user_id: int) -> list:
-    return [
-        [
-            IKB("🌀 By Rarity",     callback_data=f"cmode_main:rarity:{user_id}"),
-            IKB("📋 All (Default)", callback_data=f"cmode_main:all:{user_id}"),
-        ],
-        [
-            IKB("🎴 By Anime",      callback_data=f"cmode_main:anime:{user_id}"),
-            IKB("👤 By Character",  callback_data=f"cmode_main:character:{user_id}"),
-        ],
-        [IKB("✖️ Cancel", callback_data=f"cmode_main:cancel:{user_id}")],
-    ]
-
-
-@app.on_callback_query(filters.regex(r"^cmode_main:"))
-async def cmode_main_cb(client, cb):
-    try:
-        _, mode, uid_s = cb.data.split(":")
-        uid = int(uid_s)
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("⚠️ Not your collection!", show_alert=True)
-
-    full_name = escape(
-        (cb.from_user.first_name or "")
-        + (
-            " " + cb.from_user.last_name
-            if getattr(cb.from_user, "last_name", None)
-            else ""
-        )
-    )
-
-    if mode == "cancel":
-        await cb.answer()
-        try:   await cb.message.delete()
-        except Exception: pass
-
-    elif mode == "rarity":
-        tiers = sorted(
-            {**RARITIES, **SUB_RARITIES}.values(),
-            key=lambda t: RARITY_ORDER.get(t.name, 9999),
-        )
-        rows, row = [], []
-        for i, tier in enumerate(tiers, start=1):
-            row.append(
-                IKB(
-                    f"{tier.emoji} {tier.display_name}",
-                    callback_data=f"cmode:{tier.name}:{uid}",
-                )
-            )
-            if i % 3 == 0:
-                rows.append(row); row = []
-        if row: rows.append(row)
-        rows.append([IKB("🔙 Back", callback_data=f"cmode_main:back:{uid}")])
-        await cb.answer()
-        try:
-            await cb.message.edit_text(
-                f"<b>{full_name}, select rarity filter mode:</b>",
-                reply_markup=IKM(rows),
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
-
-    elif mode in ("all", "anime", "character"):
-        mode_map = {
-            "all":       ("All",               "📋 All items"),
-            "anime":     ("Anime Sorted",       "🎴 Anime A-Z"),
-            "character": ("Characters Sorted",  "👤 Character A-Z"),
-        }
-        db_val, label = mode_map[mode]
-        await _col("users").update_one(
-            {"user_id": uid},
-            {"$set": {"collection_mode": db_val}},
-            upsert=True,
-        )
-        await cb.answer(f"✅ {label}")
-        try:
-            await cb.message.edit_text(
-                f"<b>{full_name}</b>, collection mode updated!\n"
-                f"▸ Now showing: <b>{label}</b>",
-                reply_markup=IKM(
-                    [[IKB("🔙 Back", callback_data=f"cmode_main:back:{uid}")]]
-                ),
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
-
-    elif mode == "back":
-        await cb.answer()
-        user_doc     = await _col("users").find_one({"user_id": uid}) or {}
-        current_mode = user_doc.get("collection_mode", "All")
-        try:
-            await cb.message.edit_text(
-                f"<b>🗂️ Collection Mode — {full_name}</b>\n\n"
-                f"Current: <code>{current_mode}</code>\n\n"
-                "Choose a mode:",
-                reply_markup=IKM(_cmode_main_buttons(uid)),
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
-
-
-@app.on_callback_query(filters.regex(r"^cmode:"))
-async def cmode_cb(_, cb):
-    try:
-        _, rarity_name, uid_s = cb.data.split(":")
-        uid = int(uid_s)
-    except Exception:
-        return await cb.answer("Invalid.", show_alert=True)
-
-    if cb.from_user.id != uid:
-        return await cb.answer("⚠️ Not your collection!", show_alert=True)
-
-    # Validate against actual rarity.py keys
-    tier = get_rarity(rarity_name)
-    if not tier:
-        return await cb.answer("⚠️ Invalid rarity!", show_alert=True)
-
-    display   = f"{tier.emoji} {tier.display_name}"
-    full_name = escape(
-        (cb.from_user.first_name or "")
-        + (
-            " " + cb.from_user.last_name
-            if getattr(cb.from_user, "last_name", None)
-            else ""
-        )
-    )
-
-    await _col("users").update_one(
-        {"user_id": uid},
-        {"$set": {"collection_mode": rarity_name}},
-        upsert=True,
-    )
-    await cb.answer(f"✅ {display}")
-    try:
-        await cb.message.edit_text(
-            f"<b>{full_name}</b>, collection mode updated!\n"
-            f"▸ Now showing: <b>{display}</b>",
-            reply_markup=IKM(
-                [[IKB("🔙 Back", callback_data=f"cmode_main:back:{uid}")]]
-            ),
-            parse_mode=enums.ParseMode.HTML,
-        )
-    except Exception: pass
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # /sort
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1183,19 +996,6 @@ async def joined_check_cb(client, cb):
             page=0, rarity_filter=None,
             is_initial=False, callback_query=cb,
         )
-
-    elif context == "cmode":
-        user_doc     = await _col("users").find_one({"user_id": uid}) or {}
-        current_mode = user_doc.get("collection_mode", "All")
-        try:
-            await cb.message.edit_text(
-                f"<b>🗂️ Collection Mode — {escape(name)}</b>\n\n"
-                f"Current: <code>{current_mode}</code>\n\n"
-                "Choose a mode:",
-                reply_markup=IKM(_cmode_main_buttons(uid)),
-                parse_mode=enums.ParseMode.HTML,
-            )
-        except Exception: pass
 
     else:
         try:
