@@ -1,4 +1,4 @@
-"""SoulCatcher/modules/burn.py
+"""SoulCatcher/modules/burn.py"""
 Command: /burn
 Callbacks: burn:
 
@@ -122,5 +122,3 @@ async def burn_cb(_, cb):
             pass
 
     await cb.answer()
-
-"""
