@@ -97,11 +97,14 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
             return IKB(label, callback_data=f"h:{uid}:{target}")
         return IKB("·", callback_data="noop")
 
-    markup = IKM([[
-        nb("⬅️", page - 1),
-        IKB(f"{page + 1}/{total_pages}", callback_data="noop"),
-        nb("➡️", page + 1),
-    ]])
+    markup = IKM([
+        [
+            nb("⬅️", page - 1),
+            IKB(f"{page + 1}/{total_pages}", callback_data="noop"),
+            nb("➡️", page + 1),
+        ],
+        [IKB("📊 Rarity", callback_data=f"h_rarity:{uid}")],
+    ])
 
     # cover image — fav if set, else random from full harem
     user_doc = await _col("users").find_one({"user_id": uid}) or {}
@@ -217,5 +220,40 @@ async def cmd_fav(_, message: Message):
     r_emoji = tier.emoji if tier else "❓"
     await message.reply_text(
         f"⭐ {r_emoji} <b>{escape(char.get('name', '?'))}</b> set as your harem cover!",
+        parse_mode=enums.ParseMode.HTML,
+    )
+
+
+@app.on_callback_query(filters.regex(r"^h_rarity:"))
+async def harem_rarity_cb(_, cb):
+    uid = int(cb.data.split(":")[1])
+
+    if cb.from_user.id != uid:
+        return await cb.answer("Not your harem!", show_alert=True)
+
+    rows = await _col("user_characters").aggregate([
+        {"$match": {"user_id": uid}},
+        {"$group": {"_id": "$rarity", "count": {"$sum": 1}}},
+    ]).to_list(50)
+
+    if not rows:
+        return await cb.answer("No characters found.", show_alert=True)
+
+    total = sum(r["count"] for r in rows)
+    rows.sort(key=lambda r: r["count"], reverse=True)
+
+    lines = [f"<b>📊 Rarity Distribution</b>  ({total} total)\n"]
+    for r in rows:
+        rkey    = r["_id"] or "unknown"
+        count   = r["count"]
+        tier    = get_rarity(rkey)
+        r_emoji = tier.emoji if tier else "❓"
+        r_name  = tier.display_name if tier else rkey.title()
+        pct     = count / total * 100
+        lines.append(f"{r_emoji} <b>{r_name}</b>  {count}  <i>({pct:.1f}%)</i>")
+
+    await cb.answer()
+    await cb.message.reply_text(
+        "\n".join(lines),
         parse_mode=enums.ParseMode.HTML,
     )
