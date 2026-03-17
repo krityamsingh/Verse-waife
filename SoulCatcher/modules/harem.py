@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+import random
 import logging
 from html import escape
 
@@ -96,16 +97,18 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
         nb("➡️", page + 1),
     ]])
 
-    # cover: fav first, else random from full harem
-    import random
+    # cover image — fav if set, else random from full harem
     user_doc = await _col("users").find_one({"user_id": uid}) or {}
     favs     = user_doc.get("favorites") or []
     cover    = None
+
     if favs:
+        fav_id = str(favs[0])
         for c in chars:
-            if str(c.get("char_id") or c.get("id") or "") == str(favs[0]):
+            if str(c.get("char_id") or c.get("id") or "") == fav_id:
                 cover = c
                 break
+
     if not cover:
         cover = random.choice(chars)
 
