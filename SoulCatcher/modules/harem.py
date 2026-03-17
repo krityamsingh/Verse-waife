@@ -75,14 +75,20 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
         "",
     ]
 
+    # group by anime
+    grouped: dict[str, list] = {}
     for char in sliced:
-        cid     = char.get("char_id") or char.get("id") or "????"
-        tier    = get_rarity(char.get("rarity") or "common")
-        r_emoji = tier.emoji if tier else "❓"
-        lines.append(
-            f"{r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}"
-            f"  <i>{escape(char.get('anime', '?'))}</i>"
-        )
+        anime = char.get("anime") or "Unknown"
+        grouped.setdefault(anime, []).append(char)
+
+    for anime, anime_chars in grouped.items():
+        lines.append(f"<b>{escape(anime)}</b>")
+        for char in anime_chars:
+            cid     = char.get("char_id") or char.get("id") or "????"
+            tier    = get_rarity(char.get("rarity") or "common")
+            r_emoji = tier.emoji if tier else "❓"
+            lines.append(f"  {r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}")
+        lines.append("")
 
     text = "\n".join(lines)
 
