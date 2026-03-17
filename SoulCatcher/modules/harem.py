@@ -61,11 +61,21 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
             await source.reply_text(msg)
         return
 
-    total       = len(chars)
+    # deduplicate by char_id, count dupes
+    seen: dict[str, int] = {}
+    unique: list = []
+    for c in chars:
+        cid = c.get("char_id") or c.get("id") or ""
+        if cid not in seen:
+            seen[cid] = 0
+            unique.append(c)
+        seen[cid] += 1
+
+    total       = len(unique)
     total_pages = max(1, math.ceil(total / CHARS_PER_PAGE))
     page        = max(0, min(page, total_pages - 1))
 
-    sliced = chars[page * CHARS_PER_PAGE: (page + 1) * CHARS_PER_PAGE]
+    sliced = unique[page * CHARS_PER_PAGE: (page + 1) * CHARS_PER_PAGE]
 
     name = cb.from_user.first_name if cb else source.from_user.first_name
 
@@ -85,9 +95,11 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
         lines.append(f"<b>{escape(anime)}</b>")
         for char in anime_chars:
             cid     = char.get("char_id") or char.get("id") or "????"
+            count   = seen.get(cid, 1)
             tier    = get_rarity(char.get("rarity") or "common")
             r_emoji = tier.emoji if tier else "❓"
-            lines.append(f"  {r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}")
+            dup     = f"  ×{count}" if count > 1 else ""
+            lines.append(f"  {r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}{dup}")
         lines.append("")
 
     text = "\n".join(lines)
@@ -300,10 +312,20 @@ async def harem_filter_cb(_, cb):
     if not chars:
         return await cb.answer(f"No {r_name} characters.", show_alert=True)
 
-    total       = len(chars)
+    # deduplicate by char_id, count dupes
+    seen: dict[str, int] = {}
+    unique: list = []
+    for c in chars:
+        cid = c.get("char_id") or c.get("id") or ""
+        if cid not in seen:
+            seen[cid] = 0
+            unique.append(c)
+        seen[cid] += 1
+
+    total       = len(unique)
     total_pages = max(1, math.ceil(total / CHARS_PER_PAGE))
     page        = max(0, min(page, total_pages - 1))
-    sliced      = chars[page * CHARS_PER_PAGE: (page + 1) * CHARS_PER_PAGE]
+    sliced      = unique[page * CHARS_PER_PAGE: (page + 1) * CHARS_PER_PAGE]
 
     name  = cb.from_user.first_name
     lines = [
@@ -319,8 +341,10 @@ async def harem_filter_cb(_, cb):
     for anime, anime_chars in grouped.items():
         lines.append(f"<b>{escape(anime)}</b>")
         for char in anime_chars:
-            cid = char.get("char_id") or char.get("id") or "????"
-            lines.append(f"  {r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}")
+            cid   = char.get("char_id") or char.get("id") or "????"
+            count = seen.get(cid, 1)
+            dup   = f"  ×{count}" if count > 1 else ""
+            lines.append(f"  {r_emoji} <code>{cid}</code>  {escape(char.get('name', 'Unknown'))}{dup}")
         lines.append("")
 
     text = "\n".join(lines)
