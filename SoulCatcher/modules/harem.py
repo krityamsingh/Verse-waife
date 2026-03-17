@@ -96,8 +96,18 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
         nb("➡️", page + 1),
     ]])
 
-    # pick cover from first char on page
-    cover = sliced[0] if sliced else None
+    # cover: fav first, else random from full harem
+    import random
+    user_doc = await _col("users").find_one({"user_id": uid}) or {}
+    favs     = user_doc.get("favorites") or []
+    cover    = None
+    if favs:
+        for c in chars:
+            if str(c.get("char_id") or c.get("id") or "") == str(favs[0]):
+                cover = c
+                break
+    if not cover:
+        cover = random.choice(chars)
 
     if is_initial:
         if cover and cover.get("img_url"):
@@ -124,3 +134,79 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
             await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
         except Exception:
             pass
+
+
+# /fav <char_id>  — set or remove a favourite (cover character)
+@app.on_message(filters.command("fav"))
+async def cmd_fav(_, message: Message):
+    uid  = message.from_user.id
+    args = message.command
+
+    if len(args) < 2:
+        # show current fav
+        user_doc = await _col("users").find_one({"user_id": uid}) or {}
+        favs     = user_doc.get("favorites") or []
+        if not favs:
+            return await message.reply_text(
+                "You have no favourite set.\n"
+                "Use <code>/fav &lt;char_id&gt;</code> to set one.",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        char = await _col("user_characters").find_one({
+            "user_id": uid,
+            "$or": [{"char_id": favs[0]}, {"id": favs[0]}],
+        })
+        if not char:
+            return await message.reply_text(
+                f"Current fav ID: <code>{favs[0]}</code> (not found in harem).",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        tier    = get_rarity(char.get("rarity") or "common")
+        r_emoji = tier.emoji if tier else "❓"
+        return await message.reply_text(
+            f"⭐ Current fav: {r_emoji} <b>{escape(char.get('name', '?'))}</b>"
+            f"  <code>{favs[0]}</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    cid  = args[1].strip()
+    char = await _col("user_characters").find_one({
+        "user_id": uid,
+        "$or": [{"instance_id": cid}, {"char_id": cid}, {"id": cid}],
+    })
+
+    if not char:
+        return await message.reply_text(
+            f"❌ <code>{escape(cid)}</code> not found in your harem.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    char_cid = char.get("char_id") or char.get("id") or cid
+
+    user_doc = await _col("users").find_one({"user_id": uid}) or {}
+    favs     = list(user_doc.get("favorites") or [])
+
+    # toggle off
+    if char_cid in favs:
+        favs.remove(char_cid)
+        await _col("users").update_one(
+            {"user_id": uid}, {"$set": {"favorites": favs}}, upsert=True
+        )
+        return await message.reply_text(
+            f"💔 <b>{escape(char.get('name', '?'))}</b> removed from favourites.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    # set as fav (only keep one — first position = cover)
+    if char_cid not in favs:
+        favs.insert(0, char_cid)
+    await _col("users").update_one(
+        {"user_id": uid}, {"$set": {"favorites": favs}}, upsert=True
+    )
+
+    tier    = get_rarity(char.get("rarity") or "common")
+    r_emoji = tier.emoji if tier else "❓"
+    await message.reply_text(
+        f"⭐ {r_emoji} <b>{escape(char.get('name', '?'))}</b> set as your harem cover!",
+        parse_mode=enums.ParseMode.HTML,
+    )
