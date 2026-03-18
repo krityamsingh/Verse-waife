@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import tempfile
 from typing import Optional, Dict, Any, Tuple
@@ -10,6 +11,13 @@ from pyrogram.types import Message
 
 from .. import app, uploader_filter
 from ..config import UPLOAD_CHANNEL_ID as _CFG_UPLOAD_CHANNEL_ID
+
+# Optional — won't crash if not set in config
+try:
+    from ..config import CATBOX_USERHASH
+except ImportError:
+    CATBOX_USERHASH = None
+
 from ..rarity import (
     RARITY_LIST_TEXT, FESTIVAL_SEASONS, MYTHIC_SPORTS, MYTHIC_FANTASY,
     get_rarity_by_id, get_rarity, RARITIES, SUB_RARITIES,
@@ -21,6 +29,10 @@ log = logging.getLogger("SoulCatcher.autouploader")
 UPLOAD_CHANNEL_ID: int = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003869604435
 CATBOX_API        = "https://catbox.moe/user/api.php"
 MAX_FILE_BYTES    = 50 * 1024 * 1024  # 50 MB
+
+# Retry config for Catbox 412 "Uploads paused"
+_CATBOX_MAX_RETRIES = 3
+_CATBOX_RETRY_BASE  = 10  # seconds (doubles each attempt: 10 → 20 → 40)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -42,13 +54,17 @@ def _bold(text: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def _upload_to_catbox(file_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """Upload a local file to catbox anonymously.
+    """Upload a local file to catbox.
+    Uses userhash if CATBOX_USERHASH is set in config, otherwise uploads anonymously.
     Returns (url, None) on success or (None, error) on failure."""
     try:
         async with aiohttp.ClientSession() as session:
             with open(file_path, "rb") as f:
                 form = aiohttp.FormData()
                 form.add_field("reqtype", "fileupload")
+                # Only attach userhash if configured — reduces rate limiting
+                if CATBOX_USERHASH:
+                    form.add_field("userhash", CATBOX_USERHASH)
                 form.add_field(
                     "fileToUpload", f,
                     filename=os.path.basename(file_path),
@@ -56,7 +72,9 @@ async def _upload_to_catbox(file_path: str) -> Tuple[Optional[str], Optional[str
                 )
                 async with session.post(
                     CATBOX_API, data=form,
-                    timeout=aiohttp.ClientTimeout(total=180),
+                    timeout=aiohttp.ClientTimeout(
+                        total=300, connect=15, sock_read=270
+                    ),
                 ) as resp:
                     text = (await resp.text()).strip()
                     if resp.status != 200:
@@ -73,6 +91,39 @@ async def _upload_to_catbox(file_path: str) -> Tuple[Optional[str], Optional[str
         return None, f"File error: {e}"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
+
+
+async def _upload_with_retry(file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Wrap _upload_to_catbox with exponential-backoff retry on HTTP 412.
+
+    Catbox returns 412 when it temporarily pauses uploads.
+    Retries up to 3 times: 10s → 20s → 40s wait between attempts.
+    """
+    delay    = _CATBOX_RETRY_BASE
+    last_err: Optional[str] = None
+
+    for attempt in range(1, _CATBOX_MAX_RETRIES + 1):
+        url, err = await _upload_to_catbox(file_path)
+        if url:
+            return url, None
+
+        last_err = err
+        is_412   = err and ("412" in err or "paused" in err.lower())
+
+        if is_412 and attempt < _CATBOX_MAX_RETRIES:
+            log.warning(
+                f"Catbox 412 'Uploads paused' — retry {attempt}/{_CATBOX_MAX_RETRIES} "
+                f"in {delay}s"
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
+            continue
+
+        # Non-412 error or final attempt — stop retrying
+        log.error(f"Catbox upload failed (attempt {attempt}): {err}")
+        break
+
+    return None, last_err
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -198,8 +249,9 @@ async def _download(message: Message, reply: Message) -> Tuple[Optional[str], bo
         )
         return None, is_vid
 
-    fd, tmp_path = tempfile.mkstemp(suffix=".mp4" if is_vid else ".jpg")
-    os.close(fd)
+    # Use a temp directory so Pyrogram writes a fresh file (avoids mkstemp locking issues)
+    tmp_dir  = tempfile.mkdtemp()
+    tmp_path = os.path.join(tmp_dir, "media.mp4" if is_vid else "media.jpg")
 
     try:
         path = await reply.download(tmp_path)
@@ -286,14 +338,13 @@ async def _do_upload(
     status = await message.reply_text(f"⏫ Uploading {_bold(char_name)}…")
 
     try:
-        # 1. Upload to catbox
-        url, err = await _upload_to_catbox(file_path)
+        # 1. Upload to catbox (with retry on 412)
+        url, err = await _upload_with_retry(file_path)
         if not url:
             await status.edit_text(
                 f"❌ Catbox upload failed for {_bold(char_name)}\n"
                 f"Reason: `{err}`"
             )
-            log.error(f"Catbox upload failed: {err}")
             return None
 
         log.info(f"Catbox OK: {url}")
@@ -370,7 +421,6 @@ async def _do_upload(
 
             except Exception as media_exc:
                 log.warning(f"Channel media post failed (char_id={char_id}): {media_exc}")
-                # Fallback: try sending the caption as a plain text message
                 try:
                     await client.send_message(UPLOAD_CHANNEL_ID, caption)
                     log.info(f"Channel text fallback OK — char_id={char_id}")
@@ -427,7 +477,7 @@ async def cmd_upload(client, message: Message):
                 f"Valid: `{valid}`"
             )
 
-    # Media type check
+    # Detect media type once and reuse — avoids mismatch between pre-check and download
     reply  = message.reply_to_message
     is_vid = bool(
         reply.video or reply.animation
@@ -508,7 +558,7 @@ async def cmd_uchar(client, message: Message):
 
         status = await message.reply_text("⏫ Uploading new media…")
         try:
-            url, err = await _upload_to_catbox(file_path)
+            url, err = await _upload_with_retry(file_path)
         finally:
             _cleanup(file_path)
 
