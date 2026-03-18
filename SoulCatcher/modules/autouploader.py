@@ -11,13 +11,6 @@ from pyrogram.types import Message
 
 from .. import app, uploader_filter
 from ..config import UPLOAD_CHANNEL_ID as _CFG_UPLOAD_CHANNEL_ID
-
-# Optional — won't crash if not set in config
-try:
-    from ..config import CATBOX_USERHASH
-except ImportError:
-    CATBOX_USERHASH = None
-
 from ..rarity import (
     RARITY_LIST_TEXT, FESTIVAL_SEASONS, MYTHIC_SPORTS, MYTHIC_FANTASY,
     get_rarity_by_id, get_rarity, RARITIES, SUB_RARITIES,
@@ -28,6 +21,7 @@ log = logging.getLogger("SoulCatcher.autouploader")
 
 UPLOAD_CHANNEL_ID: int = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003869604435
 CATBOX_API        = "https://catbox.moe/user/api.php"
+CATBOX_USERHASH   = "de47eb51da1e8bc98c5ca9cf3"   # catbox.moe authenticated uploads
 MAX_FILE_BYTES    = 50 * 1024 * 1024  # 50 MB
 
 # Retry config for Catbox 412 "Uploads paused"
@@ -54,17 +48,14 @@ def _bold(text: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 async def _upload_to_catbox(file_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """Upload a local file to catbox.
-    Uses userhash if CATBOX_USERHASH is set in config, otherwise uploads anonymously.
+    """Upload a local file to catbox using authenticated userhash.
     Returns (url, None) on success or (None, error) on failure."""
     try:
         async with aiohttp.ClientSession() as session:
             with open(file_path, "rb") as f:
                 form = aiohttp.FormData()
                 form.add_field("reqtype", "fileupload")
-                # Only attach userhash if configured — reduces rate limiting
-                if CATBOX_USERHASH:
-                    form.add_field("userhash", CATBOX_USERHASH)
+                form.add_field("userhash", CATBOX_USERHASH)
                 form.add_field(
                     "fileToUpload", f,
                     filename=os.path.basename(file_path),
@@ -119,7 +110,6 @@ async def _upload_with_retry(file_path: str) -> Tuple[Optional[str], Optional[st
             delay *= 2
             continue
 
-        # Non-412 error or final attempt — stop retrying
         log.error(f"Catbox upload failed (attempt {attempt}): {err}")
         break
 
