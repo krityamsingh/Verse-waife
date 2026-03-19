@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from pyrogram import filters, enums
 from pyrogram.types import Message
-from .. import app, sudo_filter, owner_filter
+from .. import app, _sudo_cache
 from ..config import OWNER_IDS
 from ..database import top_collectors, get_balance
 
@@ -25,6 +25,9 @@ def _fmt(n) -> str:
 
 def _esc(t: str) -> str:
     return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+
+def _is_privileged(uid: int) -> bool:
+    return uid in OWNER_IDS or uid in _sudo_cache
 
 
 # =============================================================================
@@ -72,21 +75,25 @@ async def cmd_topcollector(_, message: Message):
 #  /infotop <rank>   —  sudo / owner only
 # =============================================================================
 
-@app.on_message(filters.command("infotop") & (sudo_filter | owner_filter))
+@app.on_message(filters.command("infotop"))
 async def cmd_infotop(client, message: Message):
     """
     Usage:  /infotop <rank>
-    Shows detailed info (user ID, name, collection size, kakera balance)
-    for the player at that position on the top-collector leaderboard.
-    Restricted to sudo users and owners.
+    Shows user ID, name, collection count and kakera balance
+    for the player at that leaderboard position.
     """
+    uid = message.from_user.id if message.from_user else 0
+
+    # manual privilege check — avoids filter-chain issues
+    if not _is_privileged(uid):
+        return  # silently ignore non-privileged users
+
     args = message.command
 
-    # ── parse rank ────────────────────────────────────────────────────────────
     if len(args) < 2:
         return await message.reply_text(
             "ℹ️ <b>Usage:</b> <code>/infotop &lt;rank&gt;</code>\n"
-            "Example: <code>/infotop 1</code>  (shows #1 collector)",
+            "<b>Example:</b> <code>/infotop 1</code>",
             parse_mode=HTML,
         )
 
@@ -96,54 +103,53 @@ async def cmd_infotop(client, message: Message):
             raise ValueError
     except ValueError:
         return await message.reply_text(
-            "❌ Rank must be a positive number. Example: <code>/infotop 3</code>",
+            "❌ Rank must be a positive number.\n"
+            "<b>Example:</b> <code>/infotop 3</code>",
             parse_mode=HTML,
         )
 
     wait = await message.reply_text(
-        f"⏳ <i>Fetching info for rank #{rank}…</i>", parse_mode=HTML
+        f"⏳ <i>Fetching rank #{rank}…</i>", parse_mode=HTML
     )
 
     try:
-        # fetch enough rows to reach the requested rank
         results = await top_collectors(rank)
+
         if not results or len(results) < rank:
             return await wait.edit_text(
-                f"❌ Rank <b>#{rank}</b> not found — only "
-                f"<b>{len(results)}</b> collector(s) exist right now.",
+                f"❌ Rank <b>#{rank}</b> doesn't exist yet — "
+                f"only <b>{len(results)}</b> collector(s) on the board.",
                 parse_mode=HTML,
             )
 
-        r    = results[rank - 1]
-        uid  = r.get("user_id", 0)
+        r          = results[rank - 1]
+        target_uid = r.get("user_id", 0)
         char_count = r.get("char_count", 0)
 
-        # display name: try to resolve live from Telegram first
-        name = r.get("first_name") or r.get("username") or f"User {uid}"
-        username_str = ""
+        # try live Telegram lookup for fresh name/username
+        name         = _esc(r.get("first_name") or r.get("username") or f"User {target_uid}")
+        username_line = ""
         try:
-            tg_user = await client.get_users(uid)
-            name = tg_user.first_name or name
+            tg_user = await client.get_users(target_uid)
+            if tg_user.first_name:
+                name = _esc(tg_user.first_name)
             if tg_user.username:
-                username_str = f"\n🔖 <b>Username:</b>  @{_esc(tg_user.username)}"
+                username_line = f"\n🔖 <b>Username:</b>  @{_esc(tg_user.username)}"
         except Exception:
-            pass  # use DB name if Telegram lookup fails
+            pass  # fall back to DB name
 
-        # kakera balance
-        balance = await get_balance(uid)
-
-        # medal label
-        medal = _MEDALS[rank - 1] if rank - 1 < len(_MEDALS) else f"#{rank}"
+        balance = await get_balance(target_uid)
+        medal   = _MEDALS[rank - 1] if rank - 1 < len(_MEDALS) else f"#{rank}"
 
         card = (
             f"{medal} <b>Rank #{rank} — Top Collector</b>\n"
             f"<code>{_DIV}</code>\n"
-            f"👤 <b>Name:</b>  <a href=\"tg://user?id={uid}\">{_esc(name)}</a>"
-            f"{username_str}\n"
-            f"🆔 <b>User ID:</b>  <code>{uid}</code>\n"
+            f"👤 <b>Name:</b>  <a href=\"tg://user?id={target_uid}\">{name}</a>"
+            f"{username_line}\n"
+            f"🆔 <b>User ID:</b>  <code>{target_uid}</code>\n"
             f"<code>{_DIV}</code>\n"
             f"🎴 <b>Collection:</b>  <code>{_fmt(char_count)}</code> characters\n"
-            f"🌸 <b>Kakera Balance:</b>  <code>{_fmt(balance)}</code> kakera\n"
+            f"🌸 <b>Kakera:</b>  <code>{_fmt(balance)}</code> kakera\n"
             f"<code>{_DIV}</code>"
         )
 
@@ -151,4 +157,4 @@ async def cmd_infotop(client, message: Message):
 
     except Exception as e:
         log.error("/infotop error: %s", e, exc_info=True)
-        await wait.edit_text("❌ <b>Failed to fetch top collector info.</b>", parse_mode=HTML)
+        await wait.edit_text("❌ <b>Failed to fetch info.</b>", parse_mode=HTML)
