@@ -1,12 +1,12 @@
 """
 SoulCatcher/modules/summon.py
-Commands: /summon  /exitsummon  /reloadsummon
+Commands: /summon  /exitsummon  /reloadsummon  /authgc  /deauthgc
 """
 
 import asyncio
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pyrogram import filters, enums
 from pyrogram.errors import FloodWait, QueryIdInvalid
@@ -41,11 +41,24 @@ SUMMON_COOLDOWN_SECS = 10
 MAX_RETRIES          = 5
 PITY_THRESHOLD       = 5
 
+# Main sanctum — always allowed, shown in all redirect messages
+MAIN_GC_LINK  = "https://t.me/Divine_Catchers"
+MAIN_GC_ID    = -1002313549356  # permanent home group
+
+# Auth duration for owner-granted groups
+AUTH_DURATION_HOURS = 24
+
+# Extra owner allowed to use /authgc
+_EXTRA_OWNER_ID = 6118760915
+
 # ── In-memory state ───────────────────────────────────────────────────────────
 
-_last_summon: dict[int, datetime] = {}
-_active:      dict[int, dict]     = {}
-_stats:       dict[int, dict]     = {}
+_last_summon:   dict[int, datetime] = {}
+_active:        dict[int, dict]     = {}
+_stats:         dict[int, dict]     = {}
+
+# { chat_id: datetime_expiry }  — owner-authorised groups (24 h)
+_authed_groups: dict[int, datetime] = {}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -55,8 +68,15 @@ def _esc(t) -> str:
 
 def _get_stats(uid: int) -> dict:
     if uid not in _stats:
-        _stats[uid] = {"wins": 0, "losses": 0, "streak": 0, "max_streak": 0, "total": 0, "pity": 0}
+        _stats[uid] = {
+            "wins": 0, "losses": 0, "streak": 0,
+            "max_streak": 0, "total": 0, "pity": 0,
+        }
     return _stats[uid]
+
+
+def _is_owner(uid: int) -> bool:
+    return uid in OWNER_IDS or uid == _EXTRA_OWNER_ID
 
 
 async def _safe_edit(msg: Message, text: str, buttons: list | None = None) -> None:
@@ -96,11 +116,31 @@ def _eligible_rarities() -> list[str]:
     return [name for name in all_r if name not in EXCLUDED_RARITIES]
 
 
-# ── Owner command ─────────────────────────────────────────────────────────────
+def _is_allowed_chat(chat_id: int) -> bool:
+    """Return True for the permanent home group OR any owner-authorised group
+    whose 24-hour window has not yet expired."""
+    if chat_id == MAIN_GC_ID:
+        return True
+    expiry = _authed_groups.get(chat_id)
+    if expiry and datetime.now() < expiry:
+        return True
+    # Clean up expired entry
+    _authed_groups.pop(chat_id, None)
+    return False
+
+
+def _sanctum_button() -> InlineKeyboardMarkup:
+    """Single 'Enter the Sanctum' button that always points to the main GC."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("↳ Enter the Sanctum", url=MAIN_GC_LINK)
+    ]])
+
+
+# ── Owner commands ────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("reloadsummon"))
 async def cmd_reloadsummon(_, message: Message) -> None:
-    if message.from_user.id not in OWNER_IDS:
+    if not _is_owner(message.from_user.id):
         return await message.reply_text(
             "𖤍 Not your seal to refresh.",
             parse_mode=enums.ParseMode.HTML,
@@ -113,22 +153,98 @@ async def cmd_reloadsummon(_, message: Message) -> None:
     )
 
 
+@app.on_message(filters.command("authgc"))
+async def cmd_authgc(_, message: Message) -> None:
+    """Owner-only: authorise the current group for AUTH_DURATION_HOURS hours.
+    Usage (in target group): /authgc
+    """
+    if not _is_owner(message.from_user.id):
+        return await message.reply_text(
+            "𖤍 Only the Archon may grant sanctum rights.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    if message.chat.type == enums.ChatType.PRIVATE:
+        return await message.reply_text(
+            "⟡ Use <code>/authgc</code> inside the group you want to authorise.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    chat_id = message.chat.id
+    expiry  = datetime.now() + timedelta(hours=AUTH_DURATION_HOURS)
+    _authed_groups[chat_id] = expiry
+
+    log.info("authgc  owner=%d  chat=%d  expiry=%s",
+             message.from_user.id, chat_id, expiry.isoformat())
+
+    await message.reply_text(
+        f"<b>≺  Sanctum Opened  ≻</b>\n\n"
+        f"This group has been granted summon access for "
+        f"<b>{AUTH_DURATION_HOURS} hours</b>.\n"
+        f"<code>Expires: {expiry.strftime('%Y-%m-%d %H:%M:%S')}</code>",
+        parse_mode=enums.ParseMode.HTML,
+    )
+
+
+@app.on_message(filters.command("deauthgc"))
+async def cmd_deauthgc(_, message: Message) -> None:
+    """Owner-only: immediately revoke a group's temporary authorisation."""
+    if not _is_owner(message.from_user.id):
+        return await message.reply_text(
+            "𖤍 Only the Archon may seal sanctum rights.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    if message.chat.type == enums.ChatType.PRIVATE:
+        return await message.reply_text(
+            "⟡ Use <code>/deauthgc</code> inside the group you want to revoke.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    chat_id = message.chat.id
+    if chat_id == MAIN_GC_ID:
+        return await message.reply_text(
+            "⟡ The main sanctum cannot be revoked.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    if _authed_groups.pop(chat_id, None):
+        log.info("deauthgc  owner=%d  chat=%d", message.from_user.id, chat_id)
+        await message.reply_text(
+            "<b>≺  Sanctum Sealed  ≻</b>\n\n"
+            "Summon access for this group has been <b>revoked</b>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    else:
+        await message.reply_text(
+            "⟡ This group had no active authorisation.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+
 # ── /summon ───────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("summon"))
 async def cmd_summon(_, message: Message) -> None:
+    # ── Private chat ──────────────────────────────────────────────────────────
     if message.chat.type == enums.ChatType.PRIVATE:
         return await message.reply_text(
             f"<b>𖤍  Sealed Territory</b>\n\n"
-            f"Soul rituals must be performed inside a group.\n"
-            f"› Community — @{_esc(SUPPORT_GROUP)}",
+            f"Soul rituals must be performed inside the sanctum group.\n"
+            f"› Join us at {MAIN_GC_LINK}",
             parse_mode=enums.ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "↳ Enter the Sanctum",
-                    url=f"https://t.me/{SUPPORT_GROUP}",
-                )
-            ]]),
+            reply_markup=_sanctum_button(),
+        )
+
+    # ── Unauthorised group ────────────────────────────────────────────────────
+    if not _is_allowed_chat(message.chat.id):
+        return await message.reply_text(
+            "<b>𖤍  Forbidden Ground</b>\n\n"
+            "<i>The ritual circle does not extend here.\n"
+            "Soul-binding is sealed to the one true sanctum.</i>\n\n"
+            f"› {MAIN_GC_LINK}",
+            parse_mode=enums.ParseMode.HTML,
+            reply_markup=_sanctum_button(),
         )
 
     if not message.from_user:
@@ -232,6 +348,33 @@ async def cmd_summon(_, message: Message) -> None:
         await message.reply_text(
             "⟡ The seal dissolved before it could form.\n"
             "<code>Try again shortly.</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+
+# ── /exitsummon ───────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("exitsummon"))
+async def cmd_exitsummon(_, message: Message) -> None:
+    # Silently ignore in private or unauthorised groups
+    if message.chat.type == enums.ChatType.PRIVATE or not _is_allowed_chat(message.chat.id):
+        return
+
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    if user_id in _active:
+        char = _active.pop(user_id)
+        log.info("/exitsummon  user=%d  abandoned=%s", user_id, char.get("name"))
+        await message.reply_text(
+            f"<b>≺  Ritual Severed  ≻</b>\n\n"
+            f"<i>The seal crumbles. {_esc(char['name'])} returns to the void.</i>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    else:
+        await message.reply_text(
+            "⟡ No seal is active.\n<code>Use /summon to call a spirit.</code>",
             parse_mode=enums.ParseMode.HTML,
         )
 
@@ -365,26 +508,3 @@ async def cb_summon_retreat(_, query) -> None:
             f"You let the seal dissolve.\n{_esc(char['name'])} is free.",
         ]),
     )
-
-
-# ── /exitsummon ───────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("exitsummon"))
-async def cmd_exitsummon(_, message: Message) -> None:
-    if not message.from_user:
-        return
-
-    user_id = message.from_user.id
-    if user_id in _active:
-        char = _active.pop(user_id)
-        log.info("/exitsummon  user=%d  abandoned=%s", user_id, char.get("name"))
-        await message.reply_text(
-            f"<b>≺  Ritual Severed  ≻</b>\n\n"
-            f"<i>The seal crumbles. {_esc(char['name'])} returns to the void.</i>",
-            parse_mode=enums.ParseMode.HTML,
-        )
-    else:
-        await message.reply_text(
-            "⟡ No seal is active.\n<code>Use /summon to call a spirit.</code>",
-            parse_mode=enums.ParseMode.HTML,
-        )
