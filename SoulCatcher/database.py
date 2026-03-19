@@ -82,66 +82,88 @@ def _col(name: str):
 #  Indexes
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _safe_create_index(collection, keys, **kwargs) -> None:
+    """Create an index, dropping the old one first if there's a spec conflict (code 86)."""
+    from pymongo.errors import OperationFailure
+    try:
+        await collection.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        if e.code == 86:  # IndexKeySpecsConflict
+            # Derive the auto-generated index name the same way MongoDB does
+            if isinstance(keys, str):
+                index_name = f"{keys}_1"
+            else:
+                index_name = "_".join(f"{k}_{v}" for k, v in keys)
+            log.warning("⚠️  Index spec conflict on '%s' — dropping and recreating.", index_name)
+            try:
+                await collection.drop_index(index_name)
+            except Exception:
+                pass
+            await collection.create_index(keys, **kwargs)
+        else:
+            raise
+
+
 async def _create_indexes() -> None:
     # ── Users ──────────────────────────────────────────────────────────────────
-    await _col("users").create_index("user_id",  unique=True)
-    await _col("users").create_index("balance")
-    await _col("users").create_index("xp")
-    await _col("users").create_index("level")
+    await _safe_create_index(_col("users"), "user_id",  unique=True)
+    await _safe_create_index(_col("users"), "balance")
+    await _safe_create_index(_col("users"), "xp")
+    await _safe_create_index(_col("users"), "level")
 
     # ── Characters ─────────────────────────────────────────────────────────────
-    await _col("characters").create_index("id",     unique=True)
-    await _col("characters").create_index("rarity")
-    await _col("characters").create_index("enabled")
-    await _col("characters").create_index([("name", "text"), ("anime", "text")])
+    await _safe_create_index(_col("characters"), "id",     unique=True)
+    await _safe_create_index(_col("characters"), "rarity")
+    await _safe_create_index(_col("characters"), "enabled")
+    await _safe_create_index(_col("characters"), [("name", "text"), ("anime", "text")])
 
     # ── User characters (harem) ────────────────────────────────────────────────
-    await _col("user_characters").create_index([("user_id", 1), ("instance_id", 1)], unique=True)
-    await _col("user_characters").create_index([("user_id", 1), ("rarity", 1)])
-    await _col("user_characters").create_index([("user_id", 1), ("char_id", 1)])
-    await _col("user_characters").create_index("obtained_at")
+    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("instance_id", 1)], unique=True)
+    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("rarity", 1)])
+    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("char_id", 1)])
+    await _safe_create_index(_col("user_characters"), "obtained_at")
 
     # ── Market listings (stock-based) ─────────────────────────────────────────
-    await _col("market_listings").create_index("listing_id",  unique=True)
-    await _col("market_listings").create_index("char_id")
-    await _col("market_listings").create_index("status")
-    await _col("market_listings").create_index("added_by")
-    await _col("market_listings").create_index("added_at")
-    await _col("market_listings").create_index([("status", 1), ("rarity", 1)])
-    await _col("market_listings").create_index([("status", 1), ("added_at", -1)])
-    await _col("market_listings").create_index([("status", 1), ("stock_remaining", 1)])
+    await _safe_create_index(_col("market_listings"), "listing_id",  unique=True)
+    await _safe_create_index(_col("market_listings"), "char_id")
+    await _safe_create_index(_col("market_listings"), "status")
+    await _safe_create_index(_col("market_listings"), "added_by")
+    await _safe_create_index(_col("market_listings"), "added_at")
+    await _safe_create_index(_col("market_listings"), [("status", 1), ("rarity", 1)])
+    await _safe_create_index(_col("market_listings"), [("status", 1), ("added_at", -1)])
+    await _safe_create_index(_col("market_listings"), [("status", 1), ("stock_remaining", 1)])
 
     # ── Market purchases ───────────────────────────────────────────────────────
-    await _col("market_purchases").create_index("purchase_id",  unique=True)
-    await _col("market_purchases").create_index("listing_id")
-    await _col("market_purchases").create_index("buyer_id")
-    await _col("market_purchases").create_index("char_id")
-    await _col("market_purchases").create_index("purchased_at")
-    await _col("market_purchases").create_index([("listing_id", 1), ("buyer_id", 1)])
+    await _safe_create_index(_col("market_purchases"), "purchase_id",  unique=True)
+    await _safe_create_index(_col("market_purchases"), "listing_id")
+    await _safe_create_index(_col("market_purchases"), "buyer_id")
+    await _safe_create_index(_col("market_purchases"), "char_id")
+    await _safe_create_index(_col("market_purchases"), "purchased_at")
+    await _safe_create_index(_col("market_purchases"), [("listing_id", 1), ("buyer_id", 1)])
 
     # ── Wishlists ─────────────────────────────────────────────────────────────
-    await _col("wishlists").create_index([("user_id", 1), ("char_id", 1)], unique=True)
+    await _safe_create_index(_col("wishlists"), [("user_id", 1), ("char_id", 1)], unique=True)
 
     # ── Spawns ────────────────────────────────────────────────────────────────
-    await _col("active_spawns").create_index("spawn_id",  unique=True)
-    await _col("active_spawns").create_index("chat_id")
-    await _col("active_spawns").create_index("spawned_at")
+    await _safe_create_index(_col("active_spawns"), "spawn_id",  unique=True)
+    await _safe_create_index(_col("active_spawns"), "chat_id")
+    await _safe_create_index(_col("active_spawns"), "spawned_at")
 
     # ── Group settings ────────────────────────────────────────────────────────
-    await _col("group_settings").create_index("chat_id",  unique=True)
-    await _col("top_groups").create_index("group_id",     unique=True)
+    await _safe_create_index(_col("group_settings"), "chat_id",  unique=True)
+    await _safe_create_index(_col("top_groups"), "group_id",     unique=True)
 
     # ── Drop logs ─────────────────────────────────────────────────────────────
-    await _col("drop_logs").create_index([("chat_id", 1), ("rarity", 1), ("date", 1)])
+    await _safe_create_index(_col("drop_logs"), [("chat_id", 1), ("rarity", 1), ("date", 1)])
 
     # ── Moderation ────────────────────────────────────────────────────────────
-    await _col("global_bans").create_index("user_id",  unique=True)
-    await _col("global_mutes").create_index("user_id", unique=True)
+    await _safe_create_index(_col("global_bans"), "user_id",  unique=True)
+    await _safe_create_index(_col("global_mutes"), "user_id", unique=True)
 
     # ── Trades ────────────────────────────────────────────────────────────────
-    await _col("trades").create_index("trade_id")
-    await _col("trades").create_index([("proposer_id", 1), ("status", 1)])
-    await _col("trades").create_index([("receiver_id", 1), ("status", 1)])
+    await _safe_create_index(_col("trades"), "trade_id")
+    await _safe_create_index(_col("trades"), [("proposer_id", 1), ("status", 1)])
+    await _safe_create_index(_col("trades"), [("receiver_id", 1), ("status", 1)])
 
     log.info("✅ Indexes ready")
 
