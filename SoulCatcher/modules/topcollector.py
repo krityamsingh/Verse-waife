@@ -4,14 +4,13 @@ Commands:
   /topcollector       --  top 10 players by total characters owned
   /topc               --  alias
   /tc                 --  short alias
-  /infotop <rank>     --  detailed info card for a specific leaderboard rank (sudo/owner only)
+  /infotop <rank>     --  detailed info card for a specific leaderboard rank (hardcoded owners only)
 """
 from __future__ import annotations
 import logging
 from pyrogram import filters, enums
 from pyrogram.types import Message
-from .. import app, _sudo_cache
-from ..config import OWNER_IDS
+from .. import app
 from ..database import top_collectors, get_balance
 
 log  = logging.getLogger("SoulCatcher.topcollector")
@@ -19,15 +18,18 @@ HTML = enums.ParseMode.HTML
 _DIV    = "━━━━━━━━━━━━━━━━━━━━"
 _MEDALS = ["🥇", "🥈", "🥉"] + ["🏅"] * 7
 
+# ── Hardcoded owner IDs allowed to use /infotop ───────────────────────────────
+# Add or remove your Telegram user IDs here
+_INFOTOP_ALLOWED: set[int] = {
+    6118760915,
+}
+
 def _fmt(n) -> str:
     try:    return f"{int(n):,}"
     except: return str(n)
 
 def _esc(t: str) -> str:
     return str(t).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-def _is_privileged(uid: int) -> bool:
-    return uid in OWNER_IDS or uid in _sudo_cache
 
 
 # =============================================================================
@@ -72,7 +74,7 @@ async def cmd_topcollector(_, message: Message):
 
 
 # =============================================================================
-#  /infotop <rank>   —  sudo / owner only
+#  /infotop <rank>   —  hardcoded owners only
 # =============================================================================
 
 @app.on_message(filters.command("infotop"))
@@ -81,12 +83,12 @@ async def cmd_infotop(client, message: Message):
     Usage:  /infotop <rank>
     Shows user ID, name, collection count and kakera balance
     for the player at that leaderboard position.
+    Only users listed in _INFOTOP_ALLOWED can use this.
     """
-    uid = message.from_user.id if message.from_user else 0
+    caller_uid = message.from_user.id if message.from_user else 0
 
-    # manual privilege check — avoids filter-chain issues
-    if not _is_privileged(uid):
-        return  # silently ignore non-privileged users
+    if caller_uid not in _INFOTOP_ALLOWED:
+        return  # silently ignore — no response to unauthorised users
 
     args = message.command
 
@@ -127,7 +129,7 @@ async def cmd_infotop(client, message: Message):
         char_count = r.get("char_count", 0)
 
         # try live Telegram lookup for fresh name/username
-        name         = _esc(r.get("first_name") or r.get("username") or f"User {target_uid}")
+        name          = _esc(r.get("first_name") or r.get("username") or f"User {target_uid}")
         username_line = ""
         try:
             tg_user = await client.get_users(target_uid)
