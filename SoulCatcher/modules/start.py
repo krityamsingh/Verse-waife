@@ -10,6 +10,11 @@ Colored buttons (Bot API 9.4):
 Pyrogram's high-level InlineKeyboardButton has no `style` param yet,
 so we build raw TL objects and call client.invoke() to send them.
 Everything else (handlers, DB, logs) stays on normal Pyrogram API.
+
+HELP SYSTEM: Every command listed in _PAGES must have a matching
+@app.on_message handler somewhere in the modules/ directory.
+Phantom commands have been removed; real commands that were previously
+missing have been added.
 """
 
 import re
@@ -97,26 +102,11 @@ GC_TEXT = """\
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RAW TL BUTTON BUILDERS  (Bot API 9.4 colored buttons via Pyrogram raw API)
-#
-# raw_types.KeyboardButtonCallback  →  callback_data buttons
-# raw_types.KeyboardButtonUrl       →  URL buttons
-#
-# Both accept a `style` string field in Bot API 9.4:
-#   "danger"  = red/rose
-#   "success" = green
-#   "primary" = blue
-#   ""        = default (no color)
-#
-# NOTE: Pyrogram's TL schema may not include `style` yet.
-# We use model_copy / __dict__ injection below as a safe fallback.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _raw_url_btn(text: str, url: str, style: str = "") -> object:
     btn = raw_types.KeyboardButtonUrl(text=text, url=url)
     if style:
-        # Inject the style field directly into the TL object dict
-        # so it gets serialised into the raw API call even if Pyrogram's
-        # schema doesn't expose it natively yet.
         try:
             object.__setattr__(btn, "style", style)
         except Exception:
@@ -139,7 +129,6 @@ def _raw_cb_btn(text: str, data: str, style: str = "") -> object:
 
 
 def _raw_markup(rows: list[list]) -> raw_types.ReplyInlineMarkup:
-    """Wrap a list-of-lists of raw button objects into a ReplyInlineMarkup."""
     return raw_types.ReplyInlineMarkup(
         rows=[raw_types.KeyboardButtonRow(buttons=row) for row in rows]
     )
@@ -192,7 +181,6 @@ def _gc_raw_kb(bot_username: str) -> raw_types.ReplyInlineMarkup:
 
 async def _send_raw_text(client, chat_id: int, text: str,
                          markup: raw_types.ReplyInlineMarkup) -> None:
-    """Send a text message with a raw TL markup using client.invoke()."""
     peer = await client.resolve_peer(chat_id)
     await client.invoke(
         functions.messages.SendMessage(
@@ -201,7 +189,7 @@ async def _send_raw_text(client, chat_id: int, text: str,
             random_id=client.rnd_id(),
             reply_markup=markup,
             no_webpage=True,
-            parse_mode=raw_types.InputTextMarkdownV1(),  # Pyrogram internal parse
+            parse_mode=raw_types.InputTextMarkdownV1(),
         )
     )
 
@@ -209,7 +197,6 @@ async def _send_raw_text(client, chat_id: int, text: str,
 async def _send_raw_video(client, chat_id: int, video_url: str,
                           caption: str,
                           markup: raw_types.ReplyInlineMarkup) -> None:
-    """Send a video URL with caption + raw TL markup."""
     peer = await client.resolve_peer(chat_id)
     media = raw_types.InputMediaDocumentExternal(url=video_url)
     await client.invoke(
@@ -232,7 +219,6 @@ async def start_dm(client, message: Message):
     try:
         user = message.from_user
 
-        # Register user
         try:
             await get_or_create_user(
                 user.id,
@@ -248,7 +234,6 @@ async def start_dm(client, message: Message):
         text    = DM_TEXT.format(mention=mention)
         markup  = _dm_raw_kb(bot_me.username)
 
-        # Try raw video send first
         sent = False
         if DM_INTRO_VIDEO:
             try:
@@ -258,7 +243,6 @@ async def start_dm(client, message: Message):
             except Exception as e:
                 log.warning(f"raw video send failed uid={user.id}: {e}")
 
-        # Fallback: raw text send
         if not sent:
             try:
                 await _send_raw_text(client, message.chat.id, text, markup)
@@ -266,7 +250,6 @@ async def start_dm(client, message: Message):
             except Exception as e:
                 log.warning(f"raw text send failed uid={user.id}: {e}")
 
-        # Last resort: normal Pyrogram send (no colored buttons)
         if not sent:
             from pyrogram.types import (
                 InlineKeyboardMarkup as IKM,
@@ -377,17 +360,14 @@ async def on_member_update(client, update: ChatMemberUpdated):
             except Exception as e:
                 log.warning(f"track_group failed: {e}")
 
-            # ── Rich logger GC message ────────────────────────────────────────
             try:
-                # Try to get a real invite link; fall back gracefully
                 try:
                     inv_link = await client.export_chat_invite_link(chat.id)
                 except Exception:
                     inv_link = None
 
-                # Try fetching member count
                 try:
-                    full_chat   = await client.get_chat(chat.id)
+                    full_chat    = await client.get_chat(chat.id)
                     member_count = getattr(full_chat, "members_count", "?")
                 except Exception:
                     member_count = "?"
@@ -450,66 +430,65 @@ async def on_member_update(client, update: ChatMemberUpdated):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HELP SYSTEM  (normal Pyrogram high-level API — no colored buttons needed)
+# HELP SYSTEM
+# All commands listed here are verified against registered @app.on_message
+# handlers. Removed: /setfav /view /sort /cmode /list /buy /market /basket
+#                    /rank /top /ktop /ctop /toprarity /collection
+# Added:  /fav /claim /claiminfo /cashcheque /check /all /wguess
+#         /marry /propose /epropose /drop
 # ─────────────────────────────────────────────────────────────────────────────
 
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 _PAGES: list[tuple[str, list[tuple[str, str]]]] = [
     ("🌸 Collection", [
-        ("/harem",                           "Browse your full character collection"),
-        ("/collection",                      "Alias for /harem"),
-        ("/view <id>",                       "View a character card from your harem"),
-        ("/setfav <id>",                     "Mark a character as favourite ⭐"),
-        ("/burn <id>",                       "Burn a character for kakera 🔥"),
-        ("/sort <rarity|name|anime|recent>", "Change harem sort order"),
-        ("/cmode",                           "Set collection display mode"),
-        ("/all",                             "Full breakdown by rarity"),
-        ("/check",                           "Browse global character database"),
-        ("/check <char_id>",                 "View a specific card + ownership stats"),
+        ("/harem",                "Browse your full character collection"),
+        ("/fav <id>",             "Set a character as your harem cover ⭐"),
+        ("/fav",                  "View your current favourite"),
+        ("/claim",                "Claim your free daily character 🎁"),
+        ("/claiminfo",            "Check your daily claim cooldown"),
+        ("/check <char_id>",      "View a character card with ownership stats"),
+        ("/all",                  "Full character breakdown by rarity tier"),
+        ("/burn <id or count>",   "Burn character(s) for kakera 🔥"),
+        ("/sell <instance_id>",   "Sell a character for kakera instantly"),
     ]),
     ("💗 Spawns & Claiming", [
-        ("/drop",        "Force a character spawn (group cooldown applies)"),
-        ("/spawn",       "Alias for /drop"),
-        ("❤️ button",   "Press to claim a spawned character"),
-        ("/wish <id>",   "Wishlist a character — get pinged on spawn"),
-        ("/wishlist",    "View your wishlist (max 25)"),
-        ("/unwish <id>", "Remove from wishlist"),
+        ("/drop",                 "Force a character spawn (group cooldown applies)"),
+        ("/spawn",                "Alias for /drop"),
+        ("Type the name",        "Guess the character name to claim in groups"),
+        ("/wish <char_id>",       "Wishlist a character — get pinged on spawn"),
+        ("/wishlist",             "View your wishlist (max 25)"),
+        ("/unwish <char_id>",     "Remove a character from your wishlist"),
     ]),
     ("💰 Economy", [
-        ("/daily",                  "Claim daily kakera (streak bonuses!)"),
-        ("/spin",                   "Spin the wheel for kakera (1h cooldown)"),
-        ("/bal",                    "Check your kakera balance"),
-        ("/bal @user",              "Check someone else's balance"),
-        ("/pay <amount>",           "Send kakera (reply to user, 2% fee)"),
-        ("/cheque <amount> [note]", "Send a collectible cheque card"),
-        ("/cashcheque <id>",        "Cash a received cheque"),
-    ]),
-    ("🛒 Market", [
-        ("/sell <id>",         "Sell a character instantly for kakera"),
-        ("/list <id> <price>", "List a character on the market"),
-        ("/buy <listing_id>",  "Buy a listing from the market"),
-        ("/market",            "Browse all active listings"),
-        ("/market <rarity>",   "Filter market by rarity"),
+        ("/daily",                "Claim daily kakera (streak bonuses up to day 10!)"),
+        ("/spin",                 "Spin the wheel for kakera (10 spins/day)"),
+        ("/bal",                  "Check your kakera balance"),
+        ("/pay <amount>",         "Send kakera to someone (reply to user, 5m cooldown)"),
+        ("/cheque <amount>",      "Issue a kakera cheque card (reply to recipient)"),
+        ("/cashcheque <id>",      "Cash a cheque you received"),
     ]),
     ("🎀 Social & Trading", [
-        ("/trade <my_id> <their_id>", "Propose a character trade"),
-        ("/gift <id>",                "Gift a character to someone"),
-        ("/marry",                    "Marry a random character"),
-        ("/propose",                  "Propose to a character (3rd guaranteed!)"),
-        ("/basket <bet>",             "🏀 Bet kakera on a dice game"),
+        ("/trade <my_id> <their_id>", "Propose a character swap (reply to partner)"),
+        ("/gift <instance_id>",   "Gift a character to someone (reply to recipient)"),
+        ("/marry",                "Marry a random character (60 s cooldown)"),
+        ("/propose",              "Propose to a character — guaranteed on 4th attempt"),
+        ("/epropose",             "Cancel your current propose encounter"),
     ]),
     ("💖 Rankings & Stats", [
-        ("/profile",            "View your full profile card"),
-        ("/status",             "Detailed stats: collection, economy, rarities"),
-        ("/rank",               "Your current global collector rank"),
-        ("/top",                "Top 10 collectors by character count"),
-        ("/ktop",               "Top 10 richest by kakera"),
-        ("/ctop",               "Top 10 by total copies"),
-        ("/toprarity <rarity>", "Top 10 for a specific rarity"),
-        ("/richest",            "Top 10 wealthiest players"),
-        ("/rarityinfo",         "Full rarity table with drop rates"),
-        ("/event",              "Current game mode"),
+        ("/profile",              "View your full profile card"),
+        ("/status",               "Detailed stats: collection %, economy, rank"),
+        ("/richest",              "Top 10 wealthiest players by kakera"),
+        ("/topcollector",         "Top 10 collectors by character count"),
+        ("/topc",                 "Alias for /topcollector"),
+        ("/rarityinfo",           "Full rarity table with drop rates & limits"),
+        ("/rarityinfo <name>",    "Detailed card for one rarity — e.g. /rarityinfo mythic"),
+        ("/event",                "Current game mode and spawn multipliers"),
+    ]),
+    ("🎮 Mini-Games & Summon", [
+        ("/wguess",               "Word guessing game — 4 or 5 letters, 15 s timer"),
+        ("/summon",               "Summon a random soul to duel — group only"),
+        ("/exitsummon",           "Abandon your current summon ritual"),
     ]),
 ]
 
@@ -523,12 +502,12 @@ _RARITY_REF = (
 _MAIN_HELP_TEXT = (
     "╭━━━〔 🌸 *SOUL CATCHER HELP* 🌸 〕━━━╮\n\n"
     "💗 Choose a category below to explore all commands\\.\n\n"
-    "🌸 Collection — manage your harem\n"
+    "🌸 Collection — manage your harem & daily claim\n"
     "💗 Spawns — claim characters in groups\n"
     "💰 Economy — earn and spend kakera\n"
-    "🛒 Market — buy and sell between players\n"
     "🎀 Social — trade, gift and marry\n"
-    "💖 Rankings — stats and leaderboards\n\n"
+    "💖 Rankings — stats and leaderboards\n"
+    "🎮 Mini\\-Games — word guess & summon\n\n"
     "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━╯"
 )
 
@@ -589,8 +568,7 @@ async def help_cb(client, cb: CallbackQuery):
         bot_me  = await client.get_me()
         mention = _safe_mention(cb.from_user)
         text    = DM_TEXT.format(mention=mention)
-        # rebuild raw markup for home button
-        markup = _dm_raw_kb(bot_me.username)
+        markup  = _dm_raw_kb(bot_me.username)
         try:
             await cb.message.edit_caption(text, parse_mode=MD)
         except Exception:
