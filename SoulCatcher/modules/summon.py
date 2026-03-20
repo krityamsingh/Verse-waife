@@ -37,9 +37,9 @@ log = logging.getLogger("SoulCatcher.summon")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
-SUMMON_COOLDOWN_SECS = 10
-MAX_RETRIES          = 5
-PITY_THRESHOLD       = 5
+SUMMON_COOLDOWN_SECS = 60
+MAX_RETRIES          = 7
+PITY_THRESHOLD       = 7
 
 # Main sanctum — always allowed, shown in all redirect messages
 MAIN_GC_LINK  = "https://t.me/Divine_Catchers"
