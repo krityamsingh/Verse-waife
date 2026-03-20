@@ -37,7 +37,7 @@ log = logging.getLogger("SoulCatcher.summon")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
-SUMMON_COOLDOWN_SECS = 60
+SUMMON_COOLDOWN_SECS = 30
 MAX_RETRIES          = 7
 PITY_THRESHOLD       = 7
 
