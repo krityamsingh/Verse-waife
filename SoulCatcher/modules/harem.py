@@ -47,6 +47,14 @@ async def harem_cb(_, cb):
     await _show_harem(cb.message, uid, page=page, is_initial=False, cb=cb)
 
 
+def _is_video(url: str) -> bool:
+    """Return True if the URL looks like a video file."""
+    if not url:
+        return False
+    low = url.lower().split("?")[0]   # strip query params before checking extension
+    return low.endswith((".mp4", ".mkv", ".webm", ".mov", ".avi"))
+
+
 async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
     chars = await _col("user_characters").find(
         {"user_id": uid}
@@ -133,31 +141,49 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
     if not cover:
         cover = random.choice(chars)
 
+    url = cover.get("img_url") if cover else None
+
     if is_initial:
-        if cover and cover.get("img_url"):
+        sent = False
+        if url:
             try:
-                await source.reply_photo(
-                    cover["img_url"], caption=text,
-                    reply_markup=markup, parse_mode=enums.ParseMode.HTML,
-                )
-                return
+                if _is_video(url):
+                    await source.reply_video(
+                        url, caption=text,
+                        reply_markup=markup, parse_mode=enums.ParseMode.HTML,
+                    )
+                else:
+                    await source.reply_photo(
+                        url, caption=text,
+                        reply_markup=markup, parse_mode=enums.ParseMode.HTML,
+                    )
+                sent = True
             except Exception:
                 pass
-        await source.reply_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+        if not sent:
+            await source.reply_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
     else:
-        if cover and cover.get("img_url"):
+        sent = False
+        if url:
             try:
-                await cb.message.edit_media(
-                    InputMediaPhoto(cover["img_url"], caption=text, parse_mode=enums.ParseMode.HTML),
-                    reply_markup=markup,
-                )
-                return
+                if _is_video(url):
+                    await cb.message.edit_media(
+                        InputMediaVideo(url, caption=text, parse_mode=enums.ParseMode.HTML),
+                        reply_markup=markup,
+                    )
+                else:
+                    await cb.message.edit_media(
+                        InputMediaPhoto(url, caption=text, parse_mode=enums.ParseMode.HTML),
+                        reply_markup=markup,
+                    )
+                sent = True
             except Exception:
                 pass
-        try:
-            await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
-        except Exception:
-            pass
+        if not sent:
+            try:
+                await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+            except Exception:
+                pass
 
 
 # /fav <char_id>  — set or remove a favourite (cover character)
@@ -361,23 +387,30 @@ async def harem_filter_cb(_, cb):
         [IKB("🔙 Back", callback_data=f"h_rarity_close:{uid}")],
     ])
 
-    # cover — random from this rarity
+    # cover — random from this rarity, supports video
     cover = random.choice(chars)
+    url   = cover.get("img_url") if cover else None
 
     await cb.answer()
-    try:
-        if cover.get("img_url"):
-            await cb.message.edit_media(
-                InputMediaPhoto(
-                    cover["img_url"], caption=text,
-                    parse_mode=enums.ParseMode.HTML,
-                ),
-                reply_markup=markup,
-            )
-            return
-    except Exception:
-        pass
-    try:
-        await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
-    except Exception:
-        pass
+
+    sent = False
+    if url:
+        try:
+            if _is_video(url):
+                await cb.message.edit_media(
+                    InputMediaVideo(url, caption=text, parse_mode=enums.ParseMode.HTML),
+                    reply_markup=markup,
+                )
+            else:
+                await cb.message.edit_media(
+                    InputMediaPhoto(url, caption=text, parse_mode=enums.ParseMode.HTML),
+                    reply_markup=markup,
+                )
+            sent = True
+        except Exception:
+            pass
+    if not sent:
+        try:
+            await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+        except Exception:
+            pass
