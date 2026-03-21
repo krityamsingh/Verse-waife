@@ -1,6 +1,6 @@
 """
 SoulCatcher/modules/summon.py
-Commands: /summon  /exitsummon  /reloadsummon  /authgc  /deauthgc
+Commands: /summon  /exitsummon  /reloadsummon  /authgc  /deauthgc  /cool
 """
 
 import asyncio
@@ -48,7 +48,7 @@ MAIN_GC_ID    = -1002313549356  # permanent home group
 # Auth duration for owner-granted groups
 AUTH_DURATION_HOURS = 24
 
-# Extra owner allowed to use /authgc
+# Extra owner allowed to use /authgc  /deauthgc  /cool  /reloadsummon
 _EXTRA_OWNER_ID = 6118760915
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -151,6 +151,155 @@ async def cmd_reloadsummon(_, message: Message) -> None:
         f"<code>{len(rarities)} eligible tiers: {', '.join(rarities)}</code>",
         parse_mode=enums.ParseMode.HTML,
     )
+
+
+import re as _re
+
+# Tracks the auto-reset task so we can cancel it if /cool is called again
+_cool_reset_task: asyncio.Task | None = None
+
+DEFAULT_COOLDOWN_SECS = SUMMON_COOLDOWN_SECS  # 30 — used for auto-reset
+
+
+def _parse_duration(raw: str) -> int | None:
+    """Parse a duration string into total seconds.
+
+    Accepted formats (case-insensitive):
+        60 / 60s → 60 s
+        5m       → 300 s
+        1h       → 3600 s
+        1h30m    → 5400 s
+        2h15m10s → 8110 s
+    Returns None on failure.
+    """
+    raw = raw.strip().lower().replace(" ", "")
+    if raw.isdigit():
+        return int(raw)
+    pattern = _re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", raw)
+    if not pattern or not any(pattern.groups()):
+        return None
+    h = int(pattern.group(1) or 0)
+    m = int(pattern.group(2) or 0)
+    s = int(pattern.group(3) or 0)
+    total = h * 3600 + m * 60 + s
+    return total if total >= 0 else None
+
+
+def _fmt_duration(secs: int) -> str:
+    """Return a human-friendly label like '1h 30m' or '45s'."""
+    if secs == 0:
+        return "0s (no cooldown)"
+    h, rem = divmod(secs, 3600)
+    m, s   = divmod(rem, 60)
+    parts  = []
+    if h: parts.append(f"{h}h")
+    if m: parts.append(f"{m}m")
+    if s: parts.append(f"{s}s")
+    return " ".join(parts)
+
+
+async def _schedule_cooldown_reset(new_cool: int, for_secs: int) -> None:
+    """Wait for_secs then restore DEFAULT_COOLDOWN_SECS."""
+    global SUMMON_COOLDOWN_SECS
+    try:
+        await asyncio.sleep(for_secs)
+        SUMMON_COOLDOWN_SECS = DEFAULT_COOLDOWN_SECS
+        log.info("cooldown auto-reset to default %ds after %ds",
+                 DEFAULT_COOLDOWN_SECS, for_secs)
+    except asyncio.CancelledError:
+        pass  # A new /cool call cancelled us — that handler sets the value itself
+
+
+@app.on_message(filters.command("cool"))
+async def cmd_cool(_, message: Message) -> None:
+    """Owner-only: set cooldown, optionally for a limited time.
+
+    Usage:
+        /cool                  — show current cooldown
+        /cool 60s              — set to 60 s permanently
+        /cool 60s 1h           — set to 60 s for 1 hour, then reset to 30 s
+        /cool 0 2h             — disable cooldown for 2 hours, then reset
+        /cool 2m 30m           — set to 2 min for 30 minutes, then reset
+
+    Time formats: 60 · 30s · 5m · 1h · 1h30m · 2h15m10s
+    """
+    global SUMMON_COOLDOWN_SECS, _cool_reset_task
+
+    if not _is_owner(message.from_user.id):
+        return await message.reply_text(
+            "𖤍 Only the Archon may alter the ritual timer.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    parts = message.text.split()[1:]  # drop the command itself
+
+    # ── No args: show status ──────────────────────────────────────────────────
+    if not parts:
+        if _cool_reset_task and not _cool_reset_task.done():
+            # We can't know exact remaining time easily, just note it's temporary
+            note = "\n<i>⏳ A timed override is active — will reset to default soon.</i>"
+        else:
+            note = ""
+        return await message.reply_text(
+            f"<b>⟡  Ritual Cooldown</b>\n\n"
+            f"Current · <code>{_fmt_duration(SUMMON_COOLDOWN_SECS)}</code>{note}\n\n"
+            f"<i>Usage: <code>/cool &lt;cooldown&gt;</code> or "
+            f"<code>/cool &lt;cooldown&gt; &lt;duration&gt;</code>\n"
+            f"e.g. <code>/cool 60s 1h</code></i>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    # ── Parse cooldown value (first arg) ─────────────────────────────────────
+    new_cool = _parse_duration(parts[0])
+    if new_cool is None:
+        return await message.reply_text(
+            "<b>⟡  Invalid cooldown value</b>\n\n"
+            "Examples: <code>60</code> · <code>30s</code> · <code>5m</code> · <code>1h30m</code>",
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    # ── Parse optional "for how long" (second arg) ───────────────────────────
+    for_secs: int | None = None
+    if len(parts) >= 2:
+        for_secs = _parse_duration(parts[1])
+        if for_secs is None or for_secs <= 0:
+            return await message.reply_text(
+                "<b>⟡  Invalid duration</b>\n\n"
+                "Examples: <code>1h</code> · <code>30m</code> · <code>2h30m</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+    # ── Cancel any running auto-reset ────────────────────────────────────────
+    if _cool_reset_task and not _cool_reset_task.done():
+        _cool_reset_task.cancel()
+        _cool_reset_task = None
+
+    old_val = SUMMON_COOLDOWN_SECS
+    SUMMON_COOLDOWN_SECS = new_cool
+
+    log.info("cooldown changed  owner=%d  %ds → %ds  for=%s",
+             message.from_user.id, old_val, new_cool,
+             f"{for_secs}s" if for_secs else "permanent")
+
+    # ── Schedule auto-reset if a duration was given ───────────────────────────
+    if for_secs:
+        _cool_reset_task = asyncio.create_task(
+            _schedule_cooldown_reset(new_cool, for_secs)
+        )
+        await message.reply_text(
+            f"<b>≺  Cooldown Overridden  ≻</b>\n\n"
+            f"<code>{_fmt_duration(old_val)}  →  {_fmt_duration(new_cool)}</code>\n"
+            f"⏳ Resets to default (<code>{_fmt_duration(DEFAULT_COOLDOWN_SECS)}</code>) "
+            f"after <b>{_fmt_duration(for_secs)}</b>.",
+            parse_mode=enums.ParseMode.HTML,
+        )
+    else:
+        await message.reply_text(
+            f"<b>≺  Cooldown Updated  ≻</b>\n\n"
+            f"<code>{_fmt_duration(old_val)}  →  {_fmt_duration(new_cool)}</code>\n\n"
+            f"<i>The ritual circle now recovers in <b>{_fmt_duration(new_cool)}</b>.</i>",
+            parse_mode=enums.ParseMode.HTML,
+        )
 
 
 @app.on_message(filters.command("authgc"))
