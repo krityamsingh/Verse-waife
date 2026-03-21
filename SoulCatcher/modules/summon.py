@@ -6,6 +6,7 @@ Commands: /summon  /exitsummon  /reloadsummon  /authgc  /deauthgc  /cool
 import asyncio
 import logging
 import random
+import re
 from datetime import datetime, timedelta
 
 from pyrogram import filters, enums
@@ -37,9 +38,10 @@ log = logging.getLogger("SoulCatcher.summon")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
-SUMMON_COOLDOWN_SECS = 30
-MAX_RETRIES          = 7
-PITY_THRESHOLD       = 7
+SUMMON_COOLDOWN_SECS  = 30
+DEFAULT_COOLDOWN_SECS = 30   # restored after a timed /cool override
+MAX_RETRIES           = 7
+PITY_THRESHOLD        = 7
 
 # Main sanctum — always allowed, shown in all redirect messages
 MAIN_GC_LINK  = "https://t.me/Divine_Catchers"
@@ -59,6 +61,9 @@ _stats:         dict[int, dict]     = {}
 
 # { chat_id: datetime_expiry }  — owner-authorised groups (24 h)
 _authed_groups: dict[int, datetime] = {}
+
+# Tracks running auto-reset task for /cool
+_cool_reset_task: asyncio.Task | None = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -153,14 +158,6 @@ async def cmd_reloadsummon(_, message: Message) -> None:
     )
 
 
-import re as _re
-
-# Tracks the auto-reset task so we can cancel it if /cool is called again
-_cool_reset_task: asyncio.Task | None = None
-
-DEFAULT_COOLDOWN_SECS = SUMMON_COOLDOWN_SECS  # 30 — used for auto-reset
-
-
 def _parse_duration(raw: str) -> int | None:
     """Parse a duration string into total seconds.
 
@@ -175,7 +172,7 @@ def _parse_duration(raw: str) -> int | None:
     raw = raw.strip().lower().replace(" ", "")
     if raw.isdigit():
         return int(raw)
-    pattern = _re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", raw)
+    pattern = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", raw)
     if not pattern or not any(pattern.groups()):
         return None
     h = int(pattern.group(1) or 0)
