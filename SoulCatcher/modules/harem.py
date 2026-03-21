@@ -55,6 +55,52 @@ def _is_video(url: str) -> bool:
     return low.endswith((".mp4", ".mkv", ".webm", ".mov", ".avi"))
 
 
+async def _send_cover(
+    chat_id: int,
+    url: str | None,
+    text: str,
+    markup,
+    old_message=None,
+):
+    """
+    Delete old_message (if given) then send a fresh photo / video / text message.
+
+    Telegram does NOT allow switching media type (photo <-> video) via edit_media,
+    so we always delete + resend when navigating pages.  This guarantees video
+    covers actually show up as video, not silently falling back to text.
+    """
+    if old_message:
+        try:
+            await old_message.delete()
+        except Exception:
+            pass
+
+    if url:
+        try:
+            if _is_video(url):
+                return await app.send_video(
+                    chat_id, url, caption=text,
+                    reply_markup=markup, parse_mode=enums.ParseMode.HTML,
+                )
+            else:
+                return await app.send_photo(
+                    chat_id, url, caption=text,
+                    reply_markup=markup, parse_mode=enums.ParseMode.HTML,
+                )
+        except Exception as e:
+            log.warning("cover send failed (%s): %s", url, e)
+
+    # fallback — plain text
+    try:
+        return await app.send_message(
+            chat_id, text,
+            reply_markup=markup, parse_mode=enums.ParseMode.HTML,
+        )
+    except Exception as e:
+        log.warning("cover text fallback failed: %s", e)
+    return None
+
+
 async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
     chars = await _col("user_characters").find(
         {"user_id": uid}
@@ -141,49 +187,16 @@ async def _show_harem(source, uid: int, page: int, is_initial: bool, cb=None):
     if not cover:
         cover = random.choice(chars)
 
-    url = cover.get("img_url") if cover else None
+    url     = cover.get("img_url") if cover else None
+    chat_id = (cb.message if cb else source).chat.id
 
     if is_initial:
-        sent = False
-        if url:
-            try:
-                if _is_video(url):
-                    await source.reply_video(
-                        url, caption=text,
-                        reply_markup=markup, parse_mode=enums.ParseMode.HTML,
-                    )
-                else:
-                    await source.reply_photo(
-                        url, caption=text,
-                        reply_markup=markup, parse_mode=enums.ParseMode.HTML,
-                    )
-                sent = True
-            except Exception:
-                pass
-        if not sent:
-            await source.reply_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
+        # Fresh /harem command — no old message to delete
+        await _send_cover(chat_id, url, text, markup, old_message=None)
     else:
-        sent = False
-        if url:
-            try:
-                if _is_video(url):
-                    await cb.message.edit_media(
-                        InputMediaVideo(url, caption=text, parse_mode=enums.ParseMode.HTML),
-                        reply_markup=markup,
-                    )
-                else:
-                    await cb.message.edit_media(
-                        InputMediaPhoto(url, caption=text, parse_mode=enums.ParseMode.HTML),
-                        reply_markup=markup,
-                    )
-                sent = True
-            except Exception:
-                pass
-        if not sent:
-            try:
-                await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
-            except Exception:
-                pass
+        # Pagination button — delete the old message and send a brand-new one.
+        # This is the only reliable way to switch between photo and video covers.
+        await _send_cover(chat_id, url, text, markup, old_message=cb.message)
 
 
 # /fav <char_id>  — set or remove a favourite (cover character)
@@ -388,29 +401,10 @@ async def harem_filter_cb(_, cb):
     ])
 
     # cover — random from this rarity, supports video
-    cover = random.choice(chars)
-    url   = cover.get("img_url") if cover else None
+    cover   = random.choice(chars)
+    url     = cover.get("img_url") if cover else None
+    chat_id = cb.message.chat.id
 
     await cb.answer()
-
-    sent = False
-    if url:
-        try:
-            if _is_video(url):
-                await cb.message.edit_media(
-                    InputMediaVideo(url, caption=text, parse_mode=enums.ParseMode.HTML),
-                    reply_markup=markup,
-                )
-            else:
-                await cb.message.edit_media(
-                    InputMediaPhoto(url, caption=text, parse_mode=enums.ParseMode.HTML),
-                    reply_markup=markup,
-                )
-            sent = True
-        except Exception:
-            pass
-    if not sent:
-        try:
-            await cb.message.edit_text(text, reply_markup=markup, parse_mode=enums.ParseMode.HTML)
-        except Exception:
-            pass
+    # Delete + resend so video covers work correctly
+    await _send_cover(chat_id, url, text, markup, old_message=cb.message)
