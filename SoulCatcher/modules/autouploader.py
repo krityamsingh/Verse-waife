@@ -19,7 +19,7 @@ from ..database import insert_character, get_character, update_character
 
 log = logging.getLogger("SoulCatcher.autouploader")
 
-UPLOAD_CHANNEL_ID: int = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003869604435
+UPLOAD_CHANNEL_ID: int = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003888855632
 CATBOX_API        = "https://catbox.moe/user/api.php"
 CATBOX_USERHASH   = "de47eb51da1e8bc98c5ca9cf3"   # catbox.moe authenticated uploads
 MAX_FILE_BYTES    = 50 * 1024 * 1024  # 50 MB
