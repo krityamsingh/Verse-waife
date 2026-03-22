@@ -637,10 +637,71 @@ async def cb_wish_approve(client, cb):
         f"🆔  Instance: <code>{iid}</code>\n\n"
         f"Use /harem to admire your collection. 🌸"
     )
+
+    dm_ok    = False
+    dm_error = ""
+    tmp      = None
+
+    # ── Try media DM (photo / video) ─────────────────────────────────────────
     try:
-        await _send_char_media(client, req["user_id"], char_doc, grant_caption)
+        _vid = char_doc.get("video_url", "")
+        _img = char_doc.get("img_url", "")
+        if _vid and _is_video(_vid):
+            tmp = await _download(_vid, ".mp4")
+            with open(tmp, "rb") as fh:
+                await client.send_video(
+                    req["user_id"], fh,
+                    caption=grant_caption,
+                    parse_mode=enums.ParseMode.HTML,
+                )
+            dm_ok = True
+            log.info("grant video DM OK  user=%d  req=%s", req["user_id"], req_id)
+        elif _img:
+            tmp = await _download(_img, ".jpg")
+            with open(tmp, "rb") as fh:
+                await client.send_photo(
+                    req["user_id"], fh,
+                    caption=grant_caption,
+                    parse_mode=enums.ParseMode.HTML,
+                )
+            dm_ok = True
+            log.info("grant photo DM OK  user=%d  req=%s", req["user_id"], req_id)
     except Exception as exc:
-        log.warning("grant DM failed user=%d: %s", req["user_id"], exc)
+        dm_error = str(exc)
+        log.warning("grant media DM failed user=%d: %s", req["user_id"], exc)
+    finally:
+        _rm(tmp)
+
+    # ── Fallback: plain text DM ───────────────────────────────────────────────
+    if not dm_ok:
+        try:
+            await client.send_message(
+                req["user_id"],
+                grant_caption,
+                parse_mode=enums.ParseMode.HTML,
+            )
+            dm_ok = True
+            log.info("grant text DM OK (media failed)  user=%d  req=%s", req["user_id"], req_id)
+        except Exception as exc:
+            dm_error = str(exc)
+            log.error("grant text DM also failed  user=%d: %s", req["user_id"], exc)
+
+    # ── If ALL DMs failed, alert the owner ───────────────────────────────────
+    if not dm_ok:
+        try:
+            await client.send_message(
+                cb.from_user.id,
+                f"⚠️ <b>Harem updated but DM notification failed!</b>\n\n"
+                f"👤  User: <b>{req['user_name']}</b>  <code>{req['user_id']}</code>\n"
+                f"🌸  <b>{req['char_name']}</b>  <code>{req['char_id']}</code>\n"
+                f"🆔  Instance: <code>{iid}</code>\n\n"
+                f"<i>The character IS in their harem — they just didn't receive the notification.\n"
+                f"They may have blocked the bot.</i>\n\n"
+                f"Error: <code>{dm_error[:200]}</code>",
+                parse_mode=enums.ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
