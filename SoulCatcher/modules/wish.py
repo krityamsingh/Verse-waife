@@ -575,7 +575,7 @@ async def cb_wish_approve(client, cb):
             pass
         return
 
-    # Atomic resolve — prevents double-grant
+    # Atomic resolve — prevents double-grant if two owners tap simultaneously
     if not await _resolve_request(req_id, cb.from_user.id, "approved"):
         return await cb.answer("Already processed by another owner.", show_alert=True)
 
@@ -606,43 +606,129 @@ async def cb_wish_approve(client, cb):
     vid_tag    = " 🎬" if req.get("video_url") else ""
     now_str    = datetime.utcnow().strftime("%Y-%m-%d  %H:%M UTC")
 
-    # Update owner card → approved state
+    # ── 1. Update the owner request card ─────────────────────────────────────
+    owner_confirm = (
+        f"✅ <b>Wish Granted!</b>\n"
+        f"{'─' * 30}\n"
+        f"👤  <b>{req['user_name']}</b>  <code>{req['user_id']}</code>\n"
+        f"🌸  <b>{req['char_name']}</b>{vid_tag}  <code>{req['char_id']}</code>\n"
+        f"📖  <i>{req['anime']}</i>\n"
+        f"{r_emoji}  <b>{r_name}</b>\n"
+        f"{'─' * 30}\n"
+        f"✅  Approved by <b>{owner_name}</b>\n"
+        f"🆔  Instance: <code>{iid}</code>\n"
+        f"🕒  {now_str}\n\n"
+        f"<i>User has been notified in DM.</i>"
+    )
     try:
         await cb.message.edit_caption(
-            f"✅ <b>Wish Approved</b>\n"
-            f"{'─' * 30}\n"
-            f"👤  <b>{req['user_name']}</b>  <code>{req['user_id']}</code>\n"
-            f"🌸  <b>{req['char_name']}</b>{vid_tag}  <code>{req['char_id']}</code>\n"
-            f"📖  <i>{req['anime']}</i>\n"
-            f"{r_emoji}  <b>{r_name}</b>\n"
-            f"{'─' * 30}\n"
-            f"✅  Approved by <b>{owner_name}</b>\n"
-            f"🆔  Instance: <code>{iid}</code>\n"
-            f"🕒  {now_str}",
+            owner_confirm,
             reply_markup=IKM([]),
             parse_mode=enums.ParseMode.HTML,
         )
     except Exception:
         pass
 
-    # DM user — "Wish Granted" card with character media
-    grant_caption = (
-        f"🌟 <b>Your Wish Has Been Granted!</b>\n"
-        f"{'─' * 30}\n"
-        f"🌸  <b>{req['char_name']}</b>{vid_tag}  <code>{req['char_id']}</code>\n"
-        f"📖  <i>{req['anime']}</i>\n"
-        f"{r_emoji}  <b>{r_name}</b>\n"
-        f"{'─' * 30}\n"
-        f"✨  <b>{req['char_name']}</b> has been added to your harem!\n"
-        f"🆔  Instance: <code>{iid}</code>\n\n"
-        f"Use /harem to admire your collection. 🌸"
+    # ── 2. Also send a fresh confirmation card to the owner ──────────────────
+    owner_summary = (
+        f"🎉 <b>Wish Successfully Granted!</b>\n"
+        f"{'─' * 32}\n"
+        f"👤  Collector: <b>{req['user_name']}</b>\n"
+        f"    ID: <code>{req['user_id']}</code>\n\n"
+        f"🌸  Character: <b>{req['char_name']}</b>{vid_tag}\n"
+        f"    ID: <code>{req['char_id']}</code>\n"
+        f"    Anime: <i>{req['anime']}</i>\n"
+        f"    {r_emoji} {r_name}\n\n"
+        f"🆔  Instance: <code>{iid}</code>\n"
+        f"🕒  {now_str}\n"
+        f"{'─' * 32}\n"
+        f"<i>Character added to harem. Notification sent to user.</i>"
     )
+    try:
+        await client.send_message(
+            cb.from_user.id,
+            owner_summary,
+            parse_mode=enums.ParseMode.HTML,
+        )
+    except Exception as exc:
+        log.warning("owner summary message failed: %s", exc)
+
+    # ── 3. DM the user — random lovely "Wish Granted" message + character media
+    _GRANT_MSGS = [
+        (
+            f"🌟 <b>Your wish came true!</b>\n"
+            f"{'─' * 30}\n"
+            f"✨ The stars aligned just for you, <b>{req['user_name']}</b>!\n\n"
+            f"🌸  <b>{req['char_name']}</b>{vid_tag}\n"
+            f"📖  <i>{req['anime']}</i>\n"
+            f"{r_emoji}  <b>{r_name}</b>\n"
+            f"{'─' * 30}\n"
+            f"<b>{req['char_name']}</b> has been added to your harem!\n"
+            f"🆔  Instance: <code>{iid}</code>\n\n"
+            f"💫 Your collection grows more beautiful every day~\n"
+            f"Use /harem to see them all. 🌸"
+        ),
+        (
+            f"🎊 <b>Wish Granted, {req['user_name']}!</b>\n"
+            f"{'─' * 30}\n"
+            f"💝 Someone up there really likes you!\n\n"
+            f"🌸  <b>{req['char_name']}</b>{vid_tag}\n"
+            f"📖  <i>{req['anime']}</i>\n"
+            f"{r_emoji}  <b>{r_name}</b>\n"
+            f"{'─' * 30}\n"
+            f"<b>{req['char_name']}</b> is officially part of your harem!\n"
+            f"🆔  Instance: <code>{iid}</code>\n\n"
+            f"🌙 May your harem always shine bright~\n"
+            f"Use /harem to admire your collection. ✨"
+        ),
+        (
+            f"💫 <b>A dream became reality!</b>\n"
+            f"{'─' * 30}\n"
+            f"🌠 Your wish was heard, <b>{req['user_name']}</b>~\n\n"
+            f"🌸  <b>{req['char_name']}</b>{vid_tag}\n"
+            f"📖  <i>{req['anime']}</i>\n"
+            f"{r_emoji}  <b>{r_name}</b>\n"
+            f"{'─' * 30}\n"
+            f"<b>{req['char_name']}</b> now belongs to you! 💖\n"
+            f"🆔  Instance: <code>{iid}</code>\n\n"
+            f"🌸 Treasure them well~\n"
+            f"Use /harem to view your harem. 🌟"
+        ),
+        (
+            f"🌸 <b>Magic is real and so is your wish!</b>\n"
+            f"{'─' * 30}\n"
+            f"🎀 Congratulations, <b>{req['user_name']}</b>!\n\n"
+            f"🌸  <b>{req['char_name']}</b>{vid_tag}\n"
+            f"📖  <i>{req['anime']}</i>\n"
+            f"{r_emoji}  <b>{r_name}</b>\n"
+            f"{'─' * 30}\n"
+            f"<b>{req['char_name']}</b> has joined your harem!\n"
+            f"🆔  Instance: <code>{iid}</code>\n\n"
+            f"💕 Every wish you make brings more love to your collection~\n"
+            f"Use /harem to see them. 🌠"
+        ),
+        (
+            f"✨ <b>The owner heard your heart!</b>\n"
+            f"{'─' * 30}\n"
+            f"🌟 Your wish has been granted, <b>{req['user_name']}</b>~\n\n"
+            f"🌸  <b>{req['char_name']}</b>{vid_tag}\n"
+            f"📖  <i>{req['anime']}</i>\n"
+            f"{r_emoji}  <b>{r_name}</b>\n"
+            f"{'─' * 30}\n"
+            f"<b>{req['char_name']}</b> is now yours forever! 🌙\n"
+            f"🆔  Instance: <code>{iid}</code>\n\n"
+            f"💫 Keep wishing, keep collecting~\n"
+            f"Use /harem to see your beautiful collection. 🎀"
+        ),
+    ]
+
+    grant_caption = random.choice(_GRANT_MSGS)
 
     dm_ok    = False
     dm_error = ""
     tmp      = None
 
-    # ── Try media DM (photo / video) ─────────────────────────────────────────
+    # Try video first
     try:
         _vid = char_doc.get("video_url", "")
         _img = char_doc.get("img_url", "")
@@ -672,7 +758,7 @@ async def cb_wish_approve(client, cb):
     finally:
         _rm(tmp)
 
-    # ── Fallback: plain text DM ───────────────────────────────────────────────
+    # Fallback: plain text
     if not dm_ok:
         try:
             await client.send_message(
@@ -681,21 +767,21 @@ async def cb_wish_approve(client, cb):
                 parse_mode=enums.ParseMode.HTML,
             )
             dm_ok = True
-            log.info("grant text DM OK (media failed)  user=%d  req=%s", req["user_id"], req_id)
+            log.info("grant text DM OK (media fallback)  user=%d  req=%s", req["user_id"], req_id)
         except Exception as exc:
             dm_error = str(exc)
             log.error("grant text DM also failed  user=%d: %s", req["user_id"], exc)
 
-    # ── If ALL DMs failed, alert the owner ───────────────────────────────────
+    # If ALL DMs failed — alert the owner
     if not dm_ok:
         try:
             await client.send_message(
                 cb.from_user.id,
-                f"⚠️ <b>Harem updated but DM notification failed!</b>\n\n"
-                f"👤  User: <b>{req['user_name']}</b>  <code>{req['user_id']}</code>\n"
+                f"⚠️ <b>Harem updated but user DM failed!</b>\n\n"
+                f"👤  <b>{req['user_name']}</b>  <code>{req['user_id']}</code>\n"
                 f"🌸  <b>{req['char_name']}</b>  <code>{req['char_id']}</code>\n"
                 f"🆔  Instance: <code>{iid}</code>\n\n"
-                f"<i>The character IS in their harem — they just didn't receive the notification.\n"
+                f"<i>The character IS in their harem.\n"
                 f"They may have blocked the bot.</i>\n\n"
                 f"Error: <code>{dm_error[:200]}</code>",
                 parse_mode=enums.ParseMode.HTML,
