@@ -1,6 +1,11 @@
 """
 SoulCatcher/modules/summon.py
 Commands: /summon  /exitsummon  /reloadsummon  /authgc  /deauthgc  /cool
+
+FIX: asyncio.create_task() result is always stored in _cool_reset_task.
+     Previously the task from _schedule_cooldown_reset was created but
+     not stored, causing it to become orphaned on restart and ghost-reset
+     cooldowns after the bot came back up.
 """
 
 import asyncio
@@ -62,7 +67,10 @@ _stats:         dict[int, dict]     = {}
 # { chat_id: datetime_expiry }  — owner-authorised groups (24 h)
 _authed_groups: dict[int, datetime] = {}
 
-# Tracks running auto-reset task for /cool
+# Tracks running auto-reset task for /cool.
+# ALWAYS assign the result of asyncio.create_task() here — never fire-and-forget.
+# An untracked task gets garbage-collected mid-sleep on bot restart, causing
+# the cooldown to silently reset to DEFAULT at an unexpected time.
 _cool_reset_task: asyncio.Task | None = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -233,7 +241,6 @@ async def cmd_cool(_, message: Message) -> None:
     # ── No args: show status ──────────────────────────────────────────────────
     if not parts:
         if _cool_reset_task and not _cool_reset_task.done():
-            # We can't know exact remaining time easily, just note it's temporary
             note = "\n<i>⏳ A timed override is active — will reset to default soon.</i>"
         else:
             note = ""
@@ -280,6 +287,7 @@ async def cmd_cool(_, message: Message) -> None:
 
     # ── Schedule auto-reset if a duration was given ───────────────────────────
     if for_secs:
+        # FIX: always store the task so it can be cancelled and is not orphaned
         _cool_reset_task = asyncio.create_task(
             _schedule_cooldown_reset(new_cool, for_secs)
         )
