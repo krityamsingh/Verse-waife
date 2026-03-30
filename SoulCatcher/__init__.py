@@ -8,11 +8,12 @@ from .config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, SUDO_IDS
 log = logging.getLogger("SoulCatcher")
 
 app = Client(
-    ":memory:",
+    "SoulCatcher",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     sleep_threshold=60,
+    in_memory=True,
 )
 
 # ── Runtime permission caches ─────────────────────────────────────────────────
