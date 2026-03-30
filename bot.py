@@ -16,6 +16,8 @@ FIXES APPLIED:
           where a stall or failure occurs.
   [FIX-8] API_ID is validated as a real integer at startup so a
           misconfigured env var is caught before Pyrogram even tries.
+  [FIX-9] asyncio.wait_for timeout on app.start() breaks the internal
+          Pyrogram DC5 msg_id rejection loop that never raises exceptions.
 """
 
 import asyncio
@@ -109,39 +111,46 @@ async def init_db_with_retry(init_db_fn) -> bool:
 
 async def start_telegram_with_retry(app) -> bool:
     """
-    [FIX-4] Retry app.start() on transient Pyrogram errors.
+    Retry app.start() on transient Pyrogram errors.
 
-    KeyError: 0 means Pyrogram received 4 zero-bytes from Telegram's DC
-    instead of a real MTProto response. This happens when:
-      - Heroku's network drops/resets the TCP connection mid-handshake
-      - Telegram's DC is temporarily overloaded (common on DC2)
-      - The dyno is starting cold and the network isn't fully up yet
-
-    Solution: retry with back-off. It always succeeds within a few attempts
-    once the TCP path to Telegram stabilises.
+    The DC5 msg_id rejection loop is the main culprit: Pyrogram connects,
+    DC5 rejects every packet as stale, Pyrogram disconnects and reconnects
+    internally — forever — without ever raising an exception back to us.
+    asyncio.wait_for with a 40s timeout breaks that loop so we can retry
+    with a fresh client state.
     """
     wait = TG_RETRY_BASE_WAIT
     for attempt in range(1, TG_RETRY_ATTEMPTS + 1):
         try:
             log.info(f"📡 Telegram connection attempt {attempt}/{TG_RETRY_ATTEMPTS}...")
-            await app.start()
+            await asyncio.wait_for(app.start(), timeout=40)
             me = app.me
             log.info(f"✅ Connected as @{me.username} (id={me.id})")
             return True
 
+        except asyncio.TimeoutError:
+            log.warning(
+                f"⚠️  Telegram connection timed out (attempt {attempt}) — "
+                f"likely DC5 msg_id rejection loop. Restarting client..."
+            )
+            try:
+                await app.stop()
+            except Exception:
+                pass
         except KeyError as exc:
-            # KeyError: 0 — Pyrogram got garbage bytes from Telegram DC
-            # This is always a transient network issue, never a config bug.
             log.warning(
                 f"⚠️  Telegram DC handshake failed (attempt {attempt}): "
-                f"KeyError: {exc} — Heroku/DC network glitch, retrying..."
+                f"KeyError: {exc} — DC network glitch, retrying..."
             )
+            try:
+                await app.stop()
+            except Exception:
+                pass
         except ConnectionError as exc:
             log.warning(f"⚠️  Connection error (attempt {attempt}): {exc}")
         except OSError as exc:
             log.warning(f"⚠️  Network OS error (attempt {attempt}): {exc}")
         except Exception as exc:
-            # For unknown errors, log the full type so we can diagnose
             log.warning(
                 f"⚠️  app.start() error (attempt {attempt}): "
                 f"{type(exc).__name__}: {exc}"
@@ -167,15 +176,12 @@ async def start_telegram_with_retry(app) -> bool:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    # Imports inside main() so they run inside asyncio.run()'s event loop.
-    # This guarantees Pyrogram's Client captures the correct running loop.
     from SoulCatcher.config import API_ID, BOT_TOKEN
     from SoulCatcher.database import init_db, get_sudo_ids, get_dev_ids, get_uploader_ids
     from SoulCatcher import app, refresh_sudo, refresh_dev, refresh_uploader
 
     log.info("🌸 SoulCatcher starting up...")
 
-    # ── [FIX-8] Validate critical config before doing anything ────────────
     if not API_ID or API_ID == 0:
         log.critical(
             "❌ API_ID is 0 or missing.\n"
@@ -193,12 +199,10 @@ async def main():
 
     log.info(f"✅ Config OK — API_ID={API_ID}, token ends ...{str(BOT_TOKEN)[-6:]}")
 
-    # ── Phase 1: Database ─────────────────────────────────────────────────
     log.info("Phase 1/4: Database connection")
     if not await init_db_with_retry(init_db):
         sys.exit(1)
 
-    # ── Phase 2: Permission caches ────────────────────────────────────────
     log.info("Phase 2/4: Loading permission caches")
     for label, getter, refresher in [
         ("sudo",     get_sudo_ids,     refresh_sudo),
@@ -211,19 +215,16 @@ async def main():
         except Exception as exc:
             log.warning(f"  ⚠️  {label} cache failed (non-fatal): {exc}")
 
-    # ── Phase 3: Modules ──────────────────────────────────────────────────
     log.info("Phase 3/4: Loading modules")
     loaded, failed = load_modules()
     if not loaded:
         log.critical("❌ No modules loaded — check SoulCatcher/modules/")
         sys.exit(1)
 
-    # ── Phase 4: Connect to Telegram ──────────────────────────────────────
     log.info("Phase 4/4: Connecting to Telegram")
     if not await start_telegram_with_retry(app):
         sys.exit(1)
 
-    # ── Keep alive with clean shutdown ────────────────────────────────────
     stop_event = asyncio.Event()
 
     def _signal_handler():
@@ -235,7 +236,7 @@ async def main():
         try:
             loop.add_signal_handler(sig, _signal_handler)
         except (NotImplementedError, RuntimeError):
-            pass  # Windows doesn't support add_signal_handler
+            pass
 
     log.info("🌸 Bot is running. Press Ctrl+C or send SIGTERM to stop.")
     await stop_event.wait()
