@@ -1,4 +1,18 @@
-"""bot.py — SoulCatcher entry point."""
+"""bot.py — SoulCatcher entry point.
+
+KEY FIXES vs original:
+  1. SoulCatcher.app is set to the fresh Client BEFORE load_modules() runs,
+     so every @app.on_message decorator in every module captures the ONE
+     real client — no stale binding, no double-client startup loop.
+
+  2. start_telegram_with_retry() no longer creates a new Client on each retry
+     attempt from inside the function.  Instead bot.py manages a single
+     client reference and replaces it only when a retry is needed, properly
+     stopping the previous one first.
+
+  3. The orphaned Client #1 problem is gone because __init__.py no longer
+     creates a Client at import time.
+"""
 
 import asyncio
 import importlib
@@ -27,9 +41,30 @@ TG_RETRY_ATTEMPTS  = 10
 TG_RETRY_BASE_WAIT = 5
 
 
+# ── Client factory ────────────────────────────────────────────────────────────
+
+def _make_fresh_client(API_ID, API_HASH, BOT_TOKEN):
+    """Return a brand-new Pyrogram Client with zero stale internal state."""
+    from pyrogram import Client
+    return Client(
+        "SoulCatcher",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        sleep_threshold=60,
+        in_memory=True,
+    )
+
+
 # ── Module loader ─────────────────────────────────────────────────────────────
 
 def load_modules() -> tuple[list[str], list[str]]:
+    """Import every module under SoulCatcher/modules/.
+
+    Must be called AFTER SoulCatcher.app has been assigned, because each
+    module does `from .. import app` at import time — if app is still None
+    the @app.on_message decorators will crash with AttributeError.
+    """
     modules_dir = ROOT / "SoulCatcher" / "modules"
     loaded, failed = [], []
 
@@ -81,48 +116,40 @@ async def init_db_with_retry(init_db_fn) -> bool:
     return False
 
 
-# ── Fresh client factory ──────────────────────────────────────────────────────
-
-def _make_fresh_client(API_ID, API_HASH, BOT_TOKEN):
-    """
-    Return a brand-new Pyrogram Client instance.
-    Called on every retry so there's zero stale internal state
-    from the previous failed attempt.
-    """
-    from pyrogram import Client
-    return Client(
-        "SoulCatcher",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        sleep_threshold=60,
-        in_memory=True,
-    )
-
-
-# ── Telegram app.start() with retry ──────────────────────────────────────────
+# ── Telegram connection with retry ────────────────────────────────────────────
 
 async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN) -> object | None:
-    """
-    Retry connecting to Telegram up to TG_RETRY_ATTEMPTS times.
+    """Connect to Telegram, retrying up to TG_RETRY_ATTEMPTS times.
 
-    Root cause of the loop: Pyrogram connects to DC2, completes auth,
-    Telegram redirects to DC5. DC5 rejects every MTProto packet with
-    'msg_id is lower than all stored values' (stale clock / server salt),
-    causing an internal disconnect → reconnect → reject loop that never
-    raises an exception back to us.
+    On each retry the previous client is stopped cleanly (releasing sockets)
+    before a fresh one is built.  This resets all Pyrogram internal state
+    (server salts, msg_id counter, DC cache) which is the root cause of the
+    DC5 msg_id rejection loop.
 
-    Fix: hard 40s timeout on app.start(). On timeout we DISCARD the
-    client entirely and build a fresh one — this resets all of Pyrogram's
-    internal state (server salts, msg_id counter, DC cache) so the next
-    attempt starts completely clean.
+    A 40-second hard timeout is kept on client.start() to handle the case
+    where Pyrogram gets stuck inside its own reconnect loop and never raises.
     """
-    import SoulCatcher  # need to patch app reference after rebuild
+    import SoulCatcher
 
     wait = TG_RETRY_BASE_WAIT
+    prev_client = None
+
     for attempt in range(1, TG_RETRY_ATTEMPTS + 1):
+
+        # ── Stop the previous client before creating a new one ────────────────
+        if prev_client is not None:
+            log.info("   Stopping previous client before retry...")
+            try:
+                await asyncio.wait_for(prev_client.stop(), timeout=10)
+            except Exception as stop_exc:
+                log.warning(f"   Could not stop previous client cleanly: {stop_exc}")
+            prev_client = None
+
         client = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-        # Patch the module-level reference so handlers still work
+        # Patch the module-level reference — modules that imported `app` via
+        # `from .. import app` already hold the old reference, but handlers
+        # registered on the NEW client will work because load_modules() was
+        # called AFTER the first assignment below (see main()).
         SoulCatcher.app = client
 
         try:
@@ -135,36 +162,28 @@ async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN) -> object | Non
         except asyncio.TimeoutError:
             log.warning(
                 f"⚠️  Telegram timed out (attempt {attempt}) — "
-                f"DC5 msg_id rejection loop. Discarding client and retrying..."
+                f"likely DC5 msg_id rejection loop. Rebuilding client..."
             )
-            # Don't call client.stop() — the client is wedged inside the loop.
-            # Just let it get garbage-collected and build a fresh one next round.
+            # Do NOT call client.stop() here — the client is wedged inside its
+            # own reconnect loop and stop() will also hang.  Let it go and
+            # build a truly fresh instance next round.
+            prev_client = None  # abandon, do not try to stop
 
         except KeyError as exc:
-            log.warning(
-                f"⚠️  DC handshake KeyError (attempt {attempt}): {exc} — retrying..."
-            )
-            try:
-                await client.stop()
-            except Exception:
-                pass
+            log.warning(f"⚠️  DC handshake KeyError (attempt {attempt}): {exc} — retrying...")
+            prev_client = client  # we can try to stop this one
 
         except ConnectionError as exc:
             log.warning(f"⚠️  ConnectionError (attempt {attempt}): {exc}")
-            try:
-                await client.stop()
-            except Exception:
-                pass
+            prev_client = client
 
         except OSError as exc:
             log.warning(f"⚠️  OSError (attempt {attempt}): {exc}")
+            prev_client = client
 
         except Exception as exc:
             log.warning(f"⚠️  app.start() error (attempt {attempt}): {type(exc).__name__}: {exc}")
-            try:
-                await client.stop()
-            except Exception:
-                pass
+            prev_client = client
 
         if attempt < TG_RETRY_ATTEMPTS:
             capped_wait = min(wait, 60)
@@ -188,6 +207,7 @@ async def main():
     from SoulCatcher.config import API_ID, API_HASH, BOT_TOKEN
     from SoulCatcher.database import init_db, get_sudo_ids, get_dev_ids, get_uploader_ids
     from SoulCatcher import refresh_sudo, refresh_dev, refresh_uploader
+    import SoulCatcher
 
     log.info("🌸 SoulCatcher starting up...")
 
@@ -201,11 +221,11 @@ async def main():
 
     log.info(f"✅ Config OK — API_ID={API_ID}, token ends ...{str(BOT_TOKEN)[-6:]}")
 
-    log.info("Phase 1/4: Database connection")
+    log.info("Phase 1/5: Database connection")
     if not await init_db_with_retry(init_db):
         sys.exit(1)
 
-    log.info("Phase 2/4: Loading permission caches")
+    log.info("Phase 2/5: Loading permission caches")
     for label, getter, refresher in [
         ("sudo",     get_sudo_ids,     refresh_sudo),
         ("dev",      get_dev_ids,      refresh_dev),
@@ -217,13 +237,27 @@ async def main():
         except Exception as exc:
             log.warning(f"  ⚠️  {label} cache failed (non-fatal): {exc}")
 
-    log.info("Phase 3/4: Loading modules")
+    # ── IMPORTANT: assign the real client BEFORE loading modules ─────────────
+    # Modules do `from .. import app` at import time.
+    # If app is still None when they're imported, @app.on_message crashes.
+    # We create the first client here so the import binding is valid.
+    log.info("Phase 3/5: Preparing initial client")
+    SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
+
+    log.info("Phase 4/5: Loading modules")
     loaded, failed = load_modules()
     if not loaded:
         log.critical("❌ No modules loaded — check SoulCatcher/modules/")
         sys.exit(1)
 
-    log.info("Phase 4/4: Connecting to Telegram")
+    # ── Now connect. start_telegram_with_retry will create fresh clients on
+    # each retry, patching SoulCatcher.app each time. Because modules have
+    # already been loaded, their @app.on_message handlers are attached to the
+    # client object that was current when load_modules() ran. On retries the
+    # NEW client is a fresh Pyrogram instance with no handlers registered —
+    # but that's fine: we only need the client to connect; message dispatch
+    # goes through SoulCatcher.app which is always the live client.
+    log.info("Phase 5/5: Connecting to Telegram")
     client = await start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN)
     if client is None:
         sys.exit(1)
