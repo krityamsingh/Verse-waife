@@ -1,20 +1,26 @@
-"""SoulCatcher/__init__.py — Pyrogram client + permission filters."""
+"""SoulCatcher/__init__.py — Permission filters + runtime caches.
+
+FIXED: This file no longer creates a Pyrogram Client.
+       bot.py owns the full Client lifecycle.
+       All modules must reference `SoulCatcher.app` (module attribute lookup)
+       NOT `from .. import app` (which binds to the object at import time
+       and becomes stale when bot.py rebuilds the client on a retry).
+"""
 from __future__ import annotations
 import logging
-from pyrogram import Client, filters
+from pyrogram import filters
 from pyrogram.types import Message
-from .config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, SUDO_IDS
+from .config import OWNER_IDS, SUDO_IDS
 
 log = logging.getLogger("SoulCatcher")
 
-app = Client(
-    "SoulCatcher",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    sleep_threshold=60,
-    in_memory=True,
-)
+# ── Client placeholder ────────────────────────────────────────────────────────
+# bot.py assigns this before loading any module.
+# Never create a Client here — doing so causes a second Client to connect
+# to Telegram during import, and all @app.on_message handlers in modules
+# get permanently bound to that dead instance instead of the live one.
+app = None  # type: ignore[assignment]  # replaced by bot.py before module load
+
 
 # ── Runtime permission caches ─────────────────────────────────────────────────
 _sudo_cache:     set[int] = set(SUDO_IDS)
