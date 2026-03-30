@@ -189,7 +189,6 @@ async def _send_raw_text(client, chat_id: int, text: str,
             random_id=client.rnd_id(),
             reply_markup=markup,
             no_webpage=True,
-            parse_mode=raw_types.InputTextMarkdownV1(),
         )
     )
 
