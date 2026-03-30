@@ -1,24 +1,4 @@
-"""bot.py — SoulCatcher entry point.
-
-FIXES APPLIED:
-  [FIX-1] init_db() retries up to 5x with exponential back-off.
-  [FIX-2] refresh_sudo/dev/uploader calls are individually wrapped —
-          a DB hiccup on any single call doesn't crash startup.
-  [FIX-3] load_modules() logs failures per-module, never crashes startup.
-  [FIX-4] app.start() now retries up to TG_RETRY_ATTEMPTS times with
-          back-off. KeyError: 0 from Pyrogram means Telegram's DC sent
-          garbage bytes on the TCP socket (Heroku network flakiness) —
-          the fix is to retry instead of crashing immediately.
-  [FIX-5] sleep_threshold=60 added to the Pyrogram Client so it waits
-          longer before giving up on flood-wait / DC reconnects.
-  [FIX-6] SIGTERM / SIGINT handled for clean Heroku dyno shutdown.
-  [FIX-7] All startup phases logged clearly so you can see exactly
-          where a stall or failure occurs.
-  [FIX-8] API_ID is validated as a real integer at startup so a
-          misconfigured env var is caught before Pyrogram even tries.
-  [FIX-9] asyncio.wait_for timeout on app.start() breaks the internal
-          Pyrogram DC5 msg_id rejection loop that never raises exceptions.
-"""
+"""bot.py — SoulCatcher entry point."""
 
 import asyncio
 import importlib
@@ -40,21 +20,16 @@ if str(ROOT) not in sys.path:
 
 # ── Retry tunables ────────────────────────────────────────────────────────────
 
-DB_RETRY_ATTEMPTS  = 5    # MongoDB connection attempts
-DB_RETRY_BASE_WAIT = 3    # seconds — doubles each attempt: 3, 6, 12, 24, 48
+DB_RETRY_ATTEMPTS  = 5
+DB_RETRY_BASE_WAIT = 3
 
-TG_RETRY_ATTEMPTS  = 10   # Telegram app.start() attempts
-TG_RETRY_BASE_WAIT = 5    # seconds — doubles each attempt: 5, 10, 20 … capped at 60
+TG_RETRY_ATTEMPTS  = 10
+TG_RETRY_BASE_WAIT = 5
 
 
 # ── Module loader ─────────────────────────────────────────────────────────────
 
 def load_modules() -> tuple[list[str], list[str]]:
-    """Import every non-private .py file in SoulCatcher/modules/.
-
-    Returns (loaded_list, failed_list). Never raises — a broken module
-    is logged and skipped so it can't stop the rest of the bot.
-    """
     modules_dir = ROOT / "SoulCatcher" / "modules"
     loaded, failed = [], []
 
@@ -99,62 +74,97 @@ async def init_db_with_retry(init_db_fn) -> bool:
 
     log.critical(
         "❌ MongoDB unavailable after all retries.\n"
-        "   • Check MONGO_URI in your Heroku config vars\n"
+        "   • Check MONGO_URI in your config vars\n"
         "   • Make sure the Atlas cluster is not paused\n"
-        "   • Atlas Network Access must allow 0.0.0.0/0 or your server IP\n"
-        "   Bot cannot start without a database."
+        "   • Atlas Network Access must allow 0.0.0.0/0"
     )
     return False
 
 
+# ── Fresh client factory ──────────────────────────────────────────────────────
+
+def _make_fresh_client(API_ID, API_HASH, BOT_TOKEN):
+    """
+    Return a brand-new Pyrogram Client instance.
+    Called on every retry so there's zero stale internal state
+    from the previous failed attempt.
+    """
+    from pyrogram import Client
+    return Client(
+        "SoulCatcher",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        sleep_threshold=60,
+        in_memory=True,
+    )
+
+
 # ── Telegram app.start() with retry ──────────────────────────────────────────
 
-async def start_telegram_with_retry(app) -> bool:
+async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN) -> object | None:
     """
-    Retry app.start() on transient Pyrogram errors.
+    Retry connecting to Telegram up to TG_RETRY_ATTEMPTS times.
 
-    The DC5 msg_id rejection loop is the main culprit: Pyrogram connects,
-    DC5 rejects every packet as stale, Pyrogram disconnects and reconnects
-    internally — forever — without ever raising an exception back to us.
-    asyncio.wait_for with a 40s timeout breaks that loop so we can retry
-    with a fresh client state.
+    Root cause of the loop: Pyrogram connects to DC2, completes auth,
+    Telegram redirects to DC5. DC5 rejects every MTProto packet with
+    'msg_id is lower than all stored values' (stale clock / server salt),
+    causing an internal disconnect → reconnect → reject loop that never
+    raises an exception back to us.
+
+    Fix: hard 40s timeout on app.start(). On timeout we DISCARD the
+    client entirely and build a fresh one — this resets all of Pyrogram's
+    internal state (server salts, msg_id counter, DC cache) so the next
+    attempt starts completely clean.
     """
+    import SoulCatcher  # need to patch app reference after rebuild
+
     wait = TG_RETRY_BASE_WAIT
     for attempt in range(1, TG_RETRY_ATTEMPTS + 1):
+        client = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
+        # Patch the module-level reference so handlers still work
+        SoulCatcher.app = client
+
         try:
             log.info(f"📡 Telegram connection attempt {attempt}/{TG_RETRY_ATTEMPTS}...")
-            await asyncio.wait_for(app.start(), timeout=40)
-            me = app.me
+            await asyncio.wait_for(client.start(), timeout=40)
+            me = client.me
             log.info(f"✅ Connected as @{me.username} (id={me.id})")
-            return True
+            return client
 
         except asyncio.TimeoutError:
             log.warning(
-                f"⚠️  Telegram connection timed out (attempt {attempt}) — "
-                f"likely DC5 msg_id rejection loop. Restarting client..."
+                f"⚠️  Telegram timed out (attempt {attempt}) — "
+                f"DC5 msg_id rejection loop. Discarding client and retrying..."
             )
-            try:
-                await app.stop()
-            except Exception:
-                pass
+            # Don't call client.stop() — the client is wedged inside the loop.
+            # Just let it get garbage-collected and build a fresh one next round.
+
         except KeyError as exc:
             log.warning(
-                f"⚠️  Telegram DC handshake failed (attempt {attempt}): "
-                f"KeyError: {exc} — DC network glitch, retrying..."
+                f"⚠️  DC handshake KeyError (attempt {attempt}): {exc} — retrying..."
             )
             try:
-                await app.stop()
+                await client.stop()
             except Exception:
                 pass
+
         except ConnectionError as exc:
-            log.warning(f"⚠️  Connection error (attempt {attempt}): {exc}")
+            log.warning(f"⚠️  ConnectionError (attempt {attempt}): {exc}")
+            try:
+                await client.stop()
+            except Exception:
+                pass
+
         except OSError as exc:
-            log.warning(f"⚠️  Network OS error (attempt {attempt}): {exc}")
+            log.warning(f"⚠️  OSError (attempt {attempt}): {exc}")
+
         except Exception as exc:
-            log.warning(
-                f"⚠️  app.start() error (attempt {attempt}): "
-                f"{type(exc).__name__}: {exc}"
-            )
+            log.warning(f"⚠️  app.start() error (attempt {attempt}): {type(exc).__name__}: {exc}")
+            try:
+                await client.stop()
+            except Exception:
+                pass
 
         if attempt < TG_RETRY_ATTEMPTS:
             capped_wait = min(wait, 60)
@@ -164,37 +174,29 @@ async def start_telegram_with_retry(app) -> bool:
         else:
             log.critical(
                 "❌ Could not connect to Telegram after all retries.\n"
-                "   • Verify BOT_TOKEN is correct in Heroku config vars\n"
-                "   • Verify API_ID (must be an integer) and API_HASH\n"
-                "   • If KeyError: 0 persists, Heroku may be blocking\n"
-                "     Telegram's MTProto ports — consider Railway or a VPS"
+                "   • Verify BOT_TOKEN, API_ID, API_HASH in config vars\n"
+                "   • If DC5 msg_id loop persists, your hosting provider\n"
+                "     may have MTProto port issues — try Railway or a VPS"
             )
 
-    return False
+    return None
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main():
-    from SoulCatcher.config import API_ID, BOT_TOKEN
+    from SoulCatcher.config import API_ID, API_HASH, BOT_TOKEN
     from SoulCatcher.database import init_db, get_sudo_ids, get_dev_ids, get_uploader_ids
-    from SoulCatcher import app, refresh_sudo, refresh_dev, refresh_uploader
+    from SoulCatcher import refresh_sudo, refresh_dev, refresh_uploader
 
     log.info("🌸 SoulCatcher starting up...")
 
     if not API_ID or API_ID == 0:
-        log.critical(
-            "❌ API_ID is 0 or missing.\n"
-            "   Set API_ID as an integer in your Heroku config vars.\n"
-            "   Get it from https://my.telegram.org"
-        )
+        log.critical("❌ API_ID is 0 or missing.")
         sys.exit(1)
 
     if not BOT_TOKEN or ":" not in str(BOT_TOKEN):
-        log.critical(
-            "❌ BOT_TOKEN looks invalid.\n"
-            "   It must be in the format  123456:ABCdef...  from @BotFather."
-        )
+        log.critical("❌ BOT_TOKEN looks invalid.")
         sys.exit(1)
 
     log.info(f"✅ Config OK — API_ID={API_ID}, token ends ...{str(BOT_TOKEN)[-6:]}")
@@ -222,7 +224,8 @@ async def main():
         sys.exit(1)
 
     log.info("Phase 4/4: Connecting to Telegram")
-    if not await start_telegram_with_retry(app):
+    client = await start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN)
+    if client is None:
         sys.exit(1)
 
     stop_event = asyncio.Event()
@@ -243,7 +246,7 @@ async def main():
 
     log.info("🌸 Stopping client...")
     try:
-        await app.stop()
+        await client.stop()
         log.info("✅ Client stopped cleanly.")
     except Exception as exc:
         log.warning(f"⚠️  Error during stop: {exc}")
