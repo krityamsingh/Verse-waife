@@ -2,20 +2,17 @@
 from __future__ import annotations
 import logging
 from pyrogram import Client, filters
-from pyrogram.storage import MemoryStorage
 from pyrogram.types import Message
 from .config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS, SUDO_IDS
 
 log = logging.getLogger("SoulCatcher")
 
 app = Client(
-    "SoulCatcher",
+    ":memory:",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     sleep_threshold=60,
-    storage=MemoryStorage("SoulCatcher"),
-    max_concurrent_transmissions=1,
 )
 
 # ── Runtime permission caches ─────────────────────────────────────────────────
