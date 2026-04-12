@@ -43,12 +43,12 @@ log = logging.getLogger("SoulCatcher.summon")
 # ── Config ────────────────────────────────────────────────────────────────────
 
 EXCLUDED_RARITIES: set[str] = {"eternal", "cartoon"}
-SUMMON_COOLDOWN_SECS  = 15
+SUMMON_COOLDOWN_SECS  = 10
 MAX_RETRIES           = 7
 PITY_THRESHOLD        = 15   # bind guaranteed after this many failed attempts
 
 # Summon success probability (base chance per attempt)
-SUMMON_SUCCESS_RATE = 0.10   # 10%
+SUMMON_SUCCESS_RATE = 0.40   # 10%
 
 # Main sanctum — always allowed, shown in all redirect messages
 MAIN_GC_LINK  = "https://t.me/Divine_Catchers"
