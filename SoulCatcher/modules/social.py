@@ -175,7 +175,7 @@ _propose_cds:      dict[int, datetime] = {}
 _propose_attempts: dict[int, dict]     = {}
 _active_proposals: dict[int, dict]     = {}
 
-PROPOSE_CD      = timedelta(minutes=5)
+PROPOSE_CD      = timedelta(minutes=1)
 PROPOSE_GUARANTEE = 4          # ← guaranteed after this many failed attempts
 
 LOVE_SUCCESS = [
