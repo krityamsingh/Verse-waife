@@ -55,7 +55,7 @@ class RarityTier:
     announce_spawn:          bool
 
     # ── Content ───────────────────────────────────────────────────────────────
-    video_only: bool = False          # True only for Verse (cartoon)
+    video_only: bool = False          # True only for Verse
 
     # ── Economy ───────────────────────────────────────────────────────────────
     sell_price_min: int  = 50
@@ -258,8 +258,8 @@ SUB_RARITIES: dict[str, RarityTier] = {
     ),
 
     # ── Eternal → 🎠 Verse (VIDEO ONLY) ─────────────────────────────────────
-    "cartoon": RarityTier(
-        id=71, name="cartoon",
+    "verse": RarityTier(
+        id=71, name="verse",
         display_name="Verse", emoji="🎠", color_hex="#FF9800",
         weight=0.04, drop_limit_per_day=1,
         group_spawn_chance=0.0004, claim_window_seconds=10,
@@ -280,7 +280,7 @@ RARITIES["mythic"].sub_rarities   = [
     SUB_RARITIES["sports"],
     SUB_RARITIES["fantasy"],
 ]
-RARITIES["eternal"].sub_rarities  = [SUB_RARITIES["cartoon"]]
+RARITIES["eternal"].sub_rarities  = [SUB_RARITIES["verse"]]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
