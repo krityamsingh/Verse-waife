@@ -25,22 +25,16 @@ COLLECTIONS
   top_groups           tracked group IDs
 
 CHANGE LOG (vs original)
-  • deduct_balance       → now fully atomic via find_one_and_update filter
-  • count_characters     → fixed enabled=False branch (was always True)
-  • get_or_create_user   → added last_claim, total_bought_market, xp_level,
-                           reward_claimed, reward_claimed_at fields
-  • add_xp               → now handles level-up and returns (new_xp, new_level, levelled_up)
-  • _create_indexes      → added all market_listings stock indexes +
-                           full market_purchases collection indexes
-  • Market section       → replaced old single-copy functions with stock-based variants:
-                               create_market_listing / get_market_listing /
-                               update_market_listing / get_active_market_listings /
-                               count_active_market_listings /
-                               atomic_market_buy / log_market_purchase /
-                               get_user_market_purchase_count / get_user_market_history /
-                               market_aggregate_stats / top_market_listings
-  • reset_reward_claim   → added (was missing, required by reward.py)
-  • Kept all legacy helpers untouched so existing modules compile without changes
+  • deduct_balance         → now fully atomic via find_one_and_update filter
+  • count_characters       → fixed enabled=False branch (was always True)
+  • get_or_create_user     → added last_claim, total_bought_market, xp_level fields
+  • add_xp                 → now handles level-up and returns (new_xp, new_level, levelled_up)
+  • add_to_harem           → saves cartoon field correctly (was hardcoded to 'anime')
+  • reset_reward_claim     → new: reset a single user's reward claim
+  • reset_all_reward_claims→ new: bulk reset every user's reward claim
+  • _create_indexes        → added all market_listings stock indexes +
+                             full market_purchases collection indexes
+  • Market section         → replaced old single-copy functions with stock-based variants
 ═══════════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -90,8 +84,7 @@ async def _safe_create_index(collection, keys, **kwargs) -> None:
     try:
         await collection.create_index(keys, **kwargs)
     except OperationFailure as e:
-        if e.code == 86:  # IndexKeySpecsConflict
-            # Derive the auto-generated index name the same way MongoDB does
+        if e.code == 86:
             if isinstance(keys, str):
                 index_name = f"{keys}_1"
             else:
@@ -185,52 +178,44 @@ async def get_or_create_user(
     if not user:
         now  = datetime.utcnow()
         user = {
-            # Identity
             "user_id":    user_id,
             "username":   username,
             "first_name": first_name,
             "last_name":  last_name,
 
-            # Economy
             "balance":         0,
             "gold":            0.0,
             "rubies":          0.0,
             "saved_amount":    0,
             "loan_amount":     0,
 
-            # Collection stats
             "total_claimed":       0,
             "total_married":       0,
             "marriage_count":      0,
-            "total_bought_market": 0,   # ← market purchases counter
+            "total_bought_market": 0,
 
-            # Progression
             "xp":         0,
             "level":      1,
-            "xp_level":   1,            # mirrors level, kept separate for UI
+            "xp_level":   1,
 
-            # Streaks & cooldowns
             "daily_streak": 0,
             "last_daily":   None,
             "last_spin":    None,
-            "last_claim":   None,       # ← daily free character claim
+            "last_claim":   None,
 
-            # One-time verse reward
-            "reward_claimed":    False,  # ← required by reward.py
-            "reward_claimed_at": None,   # ← required by reward.py
-
-            # Preferences
             "badges":          [],
             "harem_sort":      "rarity",
             "collection_mode": "all",
             "favorites":       [],
             "custom_media":    None,
 
-            # Moderation
             "is_banned":  False,
             "ban_reason": "",
 
-            # Timestamps
+            # Reward fields — always initialised so .get() never KeyErrors
+            "reward_claimed":    False,
+            "reward_claimed_at": None,
+
             "joined_at":  now,
             "last_seen":  now,
             "created_at": now,
@@ -265,7 +250,6 @@ async def get_balance(uid: int) -> int:
 
 
 async def add_balance(uid: int, amt: int) -> None:
-    """Add (or subtract if negative) kakera. Creates user if missing."""
     await _col("users").update_one(
         {"user_id": uid},
         {"$inc": {"balance": amt}},
@@ -274,14 +258,6 @@ async def add_balance(uid: int, amt: int) -> None:
 
 
 async def deduct_balance(uid: int, amt: int) -> bool:
-    """
-    Atomically deduct *amt* kakera only if the user has enough.
-
-    Uses a single find_one_and_update with the balance condition inside the
-    query filter — fully race-condition-free (no separate read + write).
-
-    Returns True on success, False if insufficient funds.
-    """
     result = await _col("users").find_one_and_update(
         {"user_id": uid, "balance": {"$gte": amt}},
         {"$inc": {"balance": -amt}},
@@ -290,24 +266,16 @@ async def deduct_balance(uid: int, amt: int) -> bool:
 
 
 async def deduct_balance_exact(uid: int, amt: int) -> bool:
-    """Alias of deduct_balance for clarity in market/trade code."""
     return await deduct_balance(uid, amt)
 
 
 # ── XP & Levels ──────────────────────────────────────────────────────────────
 
 def xp_for_level(level: int) -> int:
-    """Total XP required to *reach* the given level from zero."""
     return int(100 * (level ** 1.4))
 
 
 async def add_xp(uid: int, xp: int) -> tuple[int, int, bool]:
-    """
-    Add XP to a user and handle level-ups.
-
-    Returns (new_xp, new_level, levelled_up).
-    Grants 50 kakera per level-up as a bonus.
-    """
     user = await _col("users").find_one({"user_id": uid}, {"xp": 1, "level": 1})
     if not user:
         await _col("users").update_one(
@@ -320,7 +288,6 @@ async def add_xp(uid: int, xp: int) -> tuple[int, int, bool]:
     new_level     = current_level
     levelled_up   = False
 
-    # Check for level-up(s) — handles multiple level-ups in one call
     while current_xp >= xp_for_level(new_level + 1):
         new_level  += 1
         levelled_up = True
@@ -329,7 +296,6 @@ async def add_xp(uid: int, xp: int) -> tuple[int, int, bool]:
     await _col("users").update_one({"user_id": uid}, {"$set": updates})
 
     if levelled_up:
-        # Kakera bonus for levelling up
         bonus = 50 * (new_level - current_level)
         await add_balance(uid, bonus)
         log.info("LEVEL UP uid=%d  %d→%d  +%d kakera bonus", uid, current_level, new_level, bonus)
@@ -359,16 +325,6 @@ async def unban_user_db(uid: int) -> None:
     )
 
 
-# ── Reward claim ──────────────────────────────────────────────────────────────
-
-async def reset_reward_claim(uid: int) -> None:
-    """Reset a user's one-time verse reward so they can claim again."""
-    await _col("users").update_one(
-        {"user_id": uid},
-        {"$set": {"reward_claimed": False, "reward_claimed_at": None}},
-    )
-
-
 # ── Bulk user helpers ─────────────────────────────────────────────────────────
 
 async def get_all_user_ids() -> list[int]:
@@ -378,6 +334,36 @@ async def get_all_user_ids() -> list[int]:
 
 async def count_all_users() -> int:
     return await _col("users").count_documents({})
+
+
+# ── Reward claim helpers ──────────────────────────────────────────────────────
+
+async def reset_reward_claim(uid: int) -> None:
+    """Reset a single user's reward claim so they can claim again."""
+    await _col("users").update_one(
+        {"user_id": uid},
+        {"$set": {
+            "reward_claimed":    False,
+            "reward_claimed_at": None,
+        }},
+    )
+    log.info("RESET REWARD: uid=%d", uid)
+
+
+async def reset_all_reward_claims() -> int:
+    """
+    Bulk reset every user's reward claim.
+    Returns the number of users that were actually modified.
+    """
+    result = await _col("users").update_many(
+        {"reward_claimed": True},
+        {"$set": {
+            "reward_claimed":    False,
+            "reward_claimed_at": None,
+        }},
+    )
+    log.info("RESET ALL REWARDS: modified %d users", result.modified_count)
+    return result.modified_count
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -412,10 +398,6 @@ async def update_character(cid: str, upd: dict) -> None:
 
 
 async def count_characters(enabled: bool = True) -> int:
-    """
-    Count characters.  enabled=True → only active chars.
-                        enabled=False → ALL chars (active + disabled).
-    """
     if enabled:
         return await _col("characters").count_documents({"enabled": True})
     return await _col("characters").count_documents({})
@@ -448,14 +430,23 @@ async def add_to_harem(user_id: int, char: dict) -> str:
     Add a character instance to a user's harem.
     Increments total_claimed counter.
     Returns the generated instance_id.
+
+    Characters in the master catalogue store their show name as 'cartoon'.
+    We save it in user_characters as 'anime' (legacy field) but pull from
+    'cartoon' first so both old and new docs work correctly.
     """
-    iid = str(uuid.uuid4())[:8].upper()
+    iid      = str(uuid.uuid4())[:8].upper()
+    # Pull show name: master catalogue uses 'cartoon', fallback to 'anime' for
+    # any legacy docs, then 'Unknown' if neither exists
+    show_name = char.get("cartoon") or char.get("anime") or "Unknown"
+
     await _col("user_characters").insert_one({
         "instance_id": iid,
         "user_id":     user_id,
         "char_id":     char["id"],
         "name":        char["name"],
-        "anime":       char.get("anime", "Unknown"),
+        "anime":       show_name,   # stored as 'anime' in harem for backwards compat
+        "cartoon":     show_name,   # also stored as 'cartoon' so new code can use either
         "rarity":      char["rarity"],
         "img_url":     char.get("img_url", ""),
         "video_url":   char.get("video_url", ""),
@@ -548,27 +539,8 @@ async def get_harem_char_by_name(user_id: int, name: str) -> Optional[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 #  MARKET LISTINGS  (stock-based, new schema)
 # ═════════════════════════════════════════════════════════════════════════════
-#
-#  Document schema:
-#    listing_id       str      "MKT-XXXXXX"
-#    char_id          str      catalogue ID
-#    char_name        str
-#    anime            str
-#    rarity           str      rarity key
-#    img_url          str
-#    video_url        str
-#    price            int      kakera per copy
-#    stock_total      int      original stock
-#    stock_sold       int      copies sold so far
-#    stock_remaining  int      stock_total − stock_sold  (denormalised)
-#    per_user_limit   int      0 = unlimited
-#    added_by         int      user_id of uploader
-#    added_at         datetime
-#    status           str      "active" | "soldout" | "removed"
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def create_market_listing(doc: dict) -> None:
-    """Insert a new market listing document."""
     await _col("market_listings").insert_one(doc)
 
 
@@ -606,14 +578,6 @@ async def count_active_market_listings(rarity: Optional[str] = None) -> int:
 
 
 async def atomic_market_buy(listing_id: str) -> Optional[dict]:
-    """
-    Atomically decrement stock_remaining and increment stock_sold.
-    Only succeeds when status='active' AND stock_remaining > 0.
-
-    Automatically flips status to 'soldout' when stock hits 0.
-
-    Returns the UPDATED document on success, None if unavailable.
-    """
     updated = await _col("market_listings").find_one_and_update(
         {"listing_id": listing_id, "status": "active", "stock_remaining": {"$gt": 0}},
         {"$inc": {"stock_sold": 1, "stock_remaining": -1}},
@@ -622,7 +586,6 @@ async def atomic_market_buy(listing_id: str) -> Optional[dict]:
     if updated is None:
         return None
 
-    # Auto-flip to soldout when stock hits zero
     if updated.get("stock_remaining", 0) <= 0:
         await _col("market_listings").update_one(
             {"listing_id": listing_id},
@@ -634,12 +597,11 @@ async def atomic_market_buy(listing_id: str) -> Optional[dict]:
 
 
 async def market_aggregate_stats() -> dict:
-    """Return a stats dict used by /mstats."""
-    total    = await _col("market_listings").count_documents({})
-    active   = await _col("market_listings").count_documents({"status": "active"})
-    soldout  = await _col("market_listings").count_documents({"status": "soldout"})
-    removed  = await _col("market_listings").count_documents({"status": "removed"})
-    purch    = await _col("market_purchases").count_documents({})
+    total   = await _col("market_listings").count_documents({})
+    active  = await _col("market_listings").count_documents({"status": "active"})
+    soldout = await _col("market_listings").count_documents({"status": "soldout"})
+    removed = await _col("market_listings").count_documents({"status": "removed"})
+    purch   = await _col("market_purchases").count_documents({})
 
     pipeline = [{"$group": {"_id": None, "total": {"$sum": "$price"}}}]
     res = await _col("market_purchases").aggregate(pipeline).to_list(1)
@@ -656,7 +618,6 @@ async def market_aggregate_stats() -> dict:
 
 
 async def top_market_listings(limit: int = 5) -> list[dict]:
-    """Top listings by copies sold."""
     return (
         await _col("market_listings")
         .find({"stock_sold": {"$gt": 0}})
@@ -669,20 +630,8 @@ async def top_market_listings(limit: int = 5) -> list[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 #  MARKET PURCHASES  (per-buyer audit trail)
 # ═════════════════════════════════════════════════════════════════════════════
-#
-#  Document schema:
-#    purchase_id   str
-#    listing_id    str
-#    buyer_id      int
-#    char_id       str
-#    char_name     str
-#    instance_id   str      harem instance created
-#    price         int      kakera paid
-#    purchased_at  datetime
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def log_market_purchase(doc: dict) -> None:
-    """Insert a purchase record. Also bumps total_bought_market on the user."""
     await _col("market_purchases").insert_one(doc)
     await _col("users").update_one(
         {"user_id": doc["buyer_id"]},
@@ -692,14 +641,12 @@ async def log_market_purchase(doc: dict) -> None:
 
 
 async def get_user_market_purchase_count(listing_id: str, buyer_id: int) -> int:
-    """How many times has buyer_id purchased from this specific listing."""
     return await _col("market_purchases").count_documents(
         {"listing_id": listing_id, "buyer_id": buyer_id}
     )
 
 
 async def get_user_market_history(buyer_id: int, limit: int = 20) -> list[dict]:
-    """Recent market purchases for a user, newest first."""
     return (
         await _col("market_purchases")
         .find({"buyer_id": buyer_id})
@@ -709,33 +656,25 @@ async def get_user_market_history(buyer_id: int, limit: int = 20) -> list[dict]:
     )
 
 
-# ── Legacy market helpers (kept for any code that still imports them) ─────────
+# ── Legacy market helpers ─────────────────────────────────────────────────────
 
 async def create_listing(doc: dict) -> None:
-    """Legacy alias → create_market_listing."""
     await create_market_listing(doc)
 
 
 async def get_listing(lid: str) -> Optional[dict]:
-    """Legacy alias → get_market_listing."""
     return await get_market_listing(lid)
 
 
 async def update_listing(lid: str, upd: dict) -> None:
-    """Legacy alias → update_market_listing."""
     await update_market_listing(lid, upd)
 
 
 async def get_active_listings(rarity: Optional[str] = None, limit: int = 10) -> list[dict]:
-    """Legacy alias → get_active_market_listings (uses added_at sort)."""
     return await get_active_market_listings(rarity=rarity, limit=limit)
 
 
 async def atomic_buy_listing(listing_id: str, buyer_id: int) -> Optional[dict]:
-    """
-    Legacy atomic buy — single-copy model shim.
-    Routes through the new atomic_market_buy.
-    """
     return await atomic_market_buy(listing_id)
 
 
@@ -780,7 +719,6 @@ async def expire_spawn(spawn_id: str) -> None:
 
 
 async def unclaim_spawn(spawn_id: str) -> None:
-    """Roll back a claim blocked by max_per_user."""
     await _col("active_spawns").update_one(
         {"spawn_id": spawn_id},
         {"$set": {"claimed": False, "claimed_by": None, "claimed_at": None}},
@@ -792,10 +730,6 @@ async def unclaim_spawn(spawn_id: str) -> None:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def check_and_record_drop(chat_id: int, rarity_name: str) -> bool:
-    """
-    Check whether a rarity may still drop today (daily limit).
-    If yes, record it and return True.  If limit reached, return False.
-    """
     from .rarity import get_drop_limit
     limit = get_drop_limit(rarity_name)
     today = str(date.today())
@@ -1096,7 +1030,6 @@ async def is_uploader(uid: int) -> bool:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def count_user_rank(user_id: int) -> int:
-    """Returns collector rank (1 = most characters owned)."""
     cnt = await _col("user_characters").count_documents({"user_id": user_id})
     pipeline = [
         {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
@@ -1112,7 +1045,6 @@ async def count_user_rank(user_id: int) -> int:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def top_richest(limit: int = 10) -> list[dict]:
-    """Top users by kakera balance."""
     return (
         await _col("users")
         .find({"balance": {"$gt": 0}})
@@ -1123,7 +1055,6 @@ async def top_richest(limit: int = 10) -> list[dict]:
 
 
 async def top_collectors(limit: int = 10) -> list[dict]:
-    """Top users by total characters owned, display names joined in."""
     pipeline = [
         {"$group": {"_id": "$user_id", "char_count": {"$sum": 1}}},
         {"$sort": {"char_count": -1}},
@@ -1147,7 +1078,6 @@ async def top_collectors(limit: int = 10) -> list[dict]:
 
 
 async def top_by_level(limit: int = 10) -> list[dict]:
-    """Top users by XP level."""
     return (
         await _col("users")
         .find({"level": {"$gt": 1}})
