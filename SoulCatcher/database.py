@@ -350,6 +350,14 @@ async def ban_user_db(uid: int, reason: str = "") -> None:
     )
 
 
+async def reset_reward_claim(uid: int) -> None:
+    """Reset a user's one-time verse reward so they can claim again."""
+    await _col("users").update_one(
+        {"user_id": uid},
+        {"$set": {"reward_claimed": False, "reward_claimed_at": None}},
+    )
+
+
 async def unban_user_db(uid: int) -> None:
     await _col("users").update_one(
         {"user_id": uid},
