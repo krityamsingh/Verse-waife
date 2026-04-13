@@ -40,7 +40,7 @@ REWARD_WEIGHTS: dict[str, float] = {
     "infernal":  8.00,
     "seasonal":  3.00,
     "mythic":    1.50,
-    "eternal":   0.50,
+    "eternal":   100.00,
 }
 
 
