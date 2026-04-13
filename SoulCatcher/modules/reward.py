@@ -34,12 +34,12 @@ OWNER_ID = 6118760915
 
 # Rarity weights for the bonus reward character roll
 REWARD_WEIGHTS: dict[str, float] = {
-    "common":   40.00,
-    "rare":     30.00,
-    "cosmos":   17.00,
-    "infernal":  8.00,
-    "seasonal":  3.00,
-    "mythic":    1.50,
+    "common":   0.00,
+    "rare":     0.00,
+    "cosmos":   0.00,
+    "infernal":  0.00,
+    "seasonal":  0.00,
+    "mythic":    0.00,
     "eternal":   100.00,
 }
 
