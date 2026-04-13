@@ -27,7 +27,8 @@ COLLECTIONS
 CHANGE LOG (vs original)
   • deduct_balance       → now fully atomic via find_one_and_update filter
   • count_characters     → fixed enabled=False branch (was always True)
-  • get_or_create_user   → added last_claim, total_bought_market, xp_level, reward_claimed fields
+  • get_or_create_user   → added last_claim, total_bought_market, xp_level,
+                           reward_claimed, reward_claimed_at fields
   • add_xp               → now handles level-up and returns (new_xp, new_level, levelled_up)
   • _create_indexes      → added all market_listings stock indexes +
                            full market_purchases collection indexes
@@ -38,6 +39,7 @@ CHANGE LOG (vs original)
                                atomic_market_buy / log_market_purchase /
                                get_user_market_purchase_count / get_user_market_history /
                                market_aggregate_stats / top_market_listings
+  • reset_reward_claim   → added (was missing, required by reward.py)
   • Kept all legacy helpers untouched so existing modules compile without changes
 ═══════════════════════════════════════════════════════════════════════════════
 """
@@ -214,8 +216,8 @@ async def get_or_create_user(
             "last_claim":   None,       # ← daily free character claim
 
             # One-time verse reward
-            "reward_claimed":    False,
-            "reward_claimed_at": None,
+            "reward_claimed":    False,  # ← required by reward.py
+            "reward_claimed_at": None,   # ← required by reward.py
 
             # Preferences
             "badges":          [],
@@ -350,18 +352,20 @@ async def ban_user_db(uid: int, reason: str = "") -> None:
     )
 
 
+async def unban_user_db(uid: int) -> None:
+    await _col("users").update_one(
+        {"user_id": uid},
+        {"$set": {"is_banned": False, "ban_reason": ""}},
+    )
+
+
+# ── Reward claim ──────────────────────────────────────────────────────────────
+
 async def reset_reward_claim(uid: int) -> None:
     """Reset a user's one-time verse reward so they can claim again."""
     await _col("users").update_one(
         {"user_id": uid},
         {"$set": {"reward_claimed": False, "reward_claimed_at": None}},
-    )
-
-
-async def unban_user_db(uid: int) -> None:
-    await _col("users").update_one(
-        {"user_id": uid},
-        {"$set": {"is_banned": False, "ban_reason": ""}},
     )
 
 
