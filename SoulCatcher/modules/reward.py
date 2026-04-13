@@ -133,8 +133,11 @@ async def cmd_reward(_, message: Message):
 # Usage: /resetreward <user_id>  OR  reply to user's message + /resetreward
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.command("resetreward") & filters.user(OWNER_ID))
+@app.on_message(filters.command("resetreward"))
 async def cmd_reset_reward(_, message: Message):
+    if message.from_user.id != OWNER_ID:
+        return await message.reply_text("🚫 You are not authorized to use this command.")
+
     target_id = None
 
     if message.reply_to_message and message.reply_to_message.from_user:
