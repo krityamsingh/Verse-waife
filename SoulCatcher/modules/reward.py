@@ -44,11 +44,13 @@ async def cmd_reward(_, message: Message):
         message.from_user.last_name  or "",
     )
 
+    # Always fetch fresh from DB so resets are reflected instantly
     user = await get_user(uid)
 
     if user.get("is_banned"):
         return await message.reply_text("🚫 You are globally banned.")
 
+    # One-time lifetime lock
     if user.get("reward_claimed"):
         return await message.reply_text(
             "❌ **Already Claimed!**\n\n"
@@ -56,8 +58,7 @@ async def cmd_reward(_, message: Message):
             "Each account can only claim this **once**."
         )
 
-    # FIX 2 — keep fetching until we get a character that actually has a video_url,
-    # or bail out cleanly before touching the harem or the claim flag.
+    # Fetch a Verse character that actually has a video_url — retry up to 10 times
     verse_char = None
     for _ in range(10):
         candidate = await get_random_character(_VERSE_RARITY)
@@ -73,7 +74,6 @@ async def cmd_reward(_, message: Message):
             "Ask an admin to add `verse` rarity characters with a `video_url`!"
         )
 
-    # FIX 3 — attempt delivery FIRST; only lock the reward on success.
     r            = get_rarity(_VERSE_RARITY)
     emoji        = r.emoji        if r else "🎠"
     display      = r.display_name if r else "Verse"
@@ -83,14 +83,18 @@ async def cmd_reward(_, message: Message):
         else message.from_user.first_name or "Someone"
     )
 
+    # Use 'cartoon' field from MongoDB (falls back to 'Unknown' if missing)
+    cartoon = verse_char.get("cartoon", "Unknown")
+
     text = (
         f"🎠 **VERSE REWARD CLAIMED!**\n\n"
         f"👤 {user_mention} just claimed their Verse reward!\n\n"
         f"✨ **{verse_char['name']}**\n"
-        f"📖 *{verse_char.get('anime', 'Unknown')}*\n"
+        f"📖 *{cartoon}*\n"
         f"{emoji} **{display}**\n"
     )
 
+    # Attempt delivery FIRST — only lock the reward if delivery succeeds
     delivered = False
     try:
         await message.reply_video(video=verse_char["video_url"], caption=text)
@@ -105,14 +109,14 @@ async def cmd_reward(_, message: Message):
                 await message.reply_text(text)
                 delivered = True
         except Exception as e2:
-            log.error(f"REWARD: fallback also failed uid={uid}: {e2}")
+            log.error(f"REWARD: all fallbacks failed uid={uid}: {e2}")
 
     if not delivered:
         return await message.reply_text(
-            "⚠️ Could not send your reward media. Please try again — nothing was charged."
+            "⚠️ Could not send your reward. Please try again — nothing was charged."
         )
 
-    # Delivery confirmed — now lock the reward and add to harem.
+    # Delivery confirmed — now add to harem and lock the claim
     instance_id = await add_to_harem(uid, verse_char)
     await update_user(uid, {
         "$set": {
@@ -121,7 +125,7 @@ async def cmd_reward(_, message: Message):
         }
     })
 
-    log.info(f"REWARD: uid={uid} char={verse_char['name']!r} instance={instance_id}")
+    log.info(f"REWARD: uid={uid} char={verse_char['name']!r} cartoon={cartoon!r} instance={instance_id}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,7 +133,6 @@ async def cmd_reward(_, message: Message):
 # Usage: /resetreward <user_id>  OR  reply to user's message + /resetreward
 # ─────────────────────────────────────────────────────────────────────────────
 
-# FIX 1 — single authorization layer via the inline filter; no redundant owner_filter import needed.
 @app.on_message(filters.command("resetreward") & filters.user(OWNER_ID))
 async def cmd_reset_reward(_, message: Message):
     target_id = None
