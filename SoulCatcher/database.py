@@ -27,7 +27,7 @@ COLLECTIONS
 CHANGE LOG (vs original)
   • deduct_balance       → now fully atomic via find_one_and_update filter
   • count_characters     → fixed enabled=False branch (was always True)
-  • get_or_create_user   → added last_claim, total_bought_market, xp_level fields
+  • get_or_create_user   → added last_claim, total_bought_market, xp_level, reward_claimed fields
   • add_xp               → now handles level-up and returns (new_xp, new_level, levelled_up)
   • _create_indexes      → added all market_listings stock indexes +
                            full market_purchases collection indexes
@@ -212,6 +212,10 @@ async def get_or_create_user(
             "last_daily":   None,
             "last_spin":    None,
             "last_claim":   None,       # ← daily free character claim
+
+            # One-time verse reward
+            "reward_claimed":    False,
+            "reward_claimed_at": None,
 
             # Preferences
             "badges":          [],
