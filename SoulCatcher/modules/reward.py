@@ -1,13 +1,8 @@
 """
 SoulCatcher/modules/reward.py
 ════════════════════════════════════════════════════════════════════════════════
-/reward  —  One-time Verse character reward
-  • User runs /reward in the GC
-  • Bot pulls a random 🎠 Verse (cartoon) character from the DB
-    — these are rarity="cartoon", video_only=True, must have video_url
-  • Character is added to the user's harem
-  • Announcement is sent IN THE GC with the character's video
-  • Each user can only claim ONCE, ever (lifetime lock)
+/reward       — One-time Verse character reward (any user, in GC)
+/resetreward  — Owner only: reset a user's reward so they can claim again
 ════════════════════════════════════════════════════════════════════════════════
 """
 
@@ -17,18 +12,19 @@ from datetime import datetime
 from pyrogram import filters
 from pyrogram.types import Message
 
-from .. import app
+from .. import app, owner_filter
 from ..database import (
     get_or_create_user,
     update_user,
     get_random_character,
     add_to_harem,
+    reset_reward_claim,
+    get_user,
 )
 from ..rarity import get_rarity
 
 log = logging.getLogger("SoulCatcher.reward")
 
-# The Verse sub-rarity name (defined in rarity.py as SUB_RARITIES["cartoon"])
 _VERSE_RARITY = "verse"
 
 
@@ -46,11 +42,10 @@ async def cmd_reward(_, message: Message):
         message.from_user.last_name  or "",
     )
 
-    # ── Ban check ─────────────────────────────────────────────────────────────
     if user.get("is_banned"):
         return await message.reply_text("🚫 You are globally banned.")
 
-    # ── One-time lifetime check ───────────────────────────────────────────────
+    # One-time lifetime lock
     if user.get("reward_claimed"):
         claimed_at = user.get("reward_claimed_at")
         date_str   = claimed_at.strftime("%d %b %Y") if claimed_at else "a while ago"
@@ -60,29 +55,26 @@ async def cmd_reward(_, message: Message):
             f"This reward can only be claimed **once per account** — forever."
         )
 
-    # ── Fetch a Verse (cartoon) character — VIDEO ONLY ────────────────────────
-    # get_random_character("cartoon") already enforces video_url via is_video_only()
+    # Fetch a Verse character (rarity="verse", video_only=True, must have video_url)
     verse_char = await get_random_character(_VERSE_RARITY)
     if not verse_char:
         return await message.reply_text(
             "⚠️ No Verse characters in the database yet.\n"
-            "Ask an admin to add some `cartoon` rarity characters with a `video_url`!"
+            "Ask an admin to add `verse` rarity characters with a `video_url`!"
         )
 
-    # ── Add to harem & lock the reward ───────────────────────────────────────
+    # Add to harem & lock
     instance_id = await add_to_harem(uid, verse_char)
-    now         = datetime.utcnow()
     await update_user(uid, {
         "$set": {
             "reward_claimed":    True,
-            "reward_claimed_at": now,
+            "reward_claimed_at": datetime.utcnow(),
         }
     })
 
-    # ── Build announcement ────────────────────────────────────────────────────
-    r           = get_rarity(_VERSE_RARITY)          # SUB_RARITIES["cartoon"]
-    emoji       = r.emoji        if r else "🎠"
-    display     = r.display_name if r else "Verse"
+    r            = get_rarity(_VERSE_RARITY)
+    emoji        = r.emoji        if r else "🎠"
+    display      = r.display_name if r else "Verse"
     user_mention = (
         f"@{message.from_user.username}"
         if message.from_user.username
@@ -99,25 +91,61 @@ async def cmd_reward(_, message: Message):
         f"🔒 *This reward is claimed once — forever.*"
     )
 
-    # ── Send in GC with the character's video ────────────────────────────────
+    # Send in GC with the character's video
     try:
-        await message.reply_video(
-            video=verse_char["video_url"],
-            caption=text,
-        )
+        await message.reply_video(video=verse_char["video_url"], caption=text)
     except Exception as e:
         log.warning(f"REWARD: video send failed uid={uid}: {e}")
-        # fallback to image or plain text
         try:
             if verse_char.get("img_url"):
                 await message.reply_photo(photo=verse_char["img_url"], caption=text)
             else:
                 await message.reply_text(text)
         except Exception as e2:
-            log.error(f"REWARD: fallback also failed uid={uid}: {e2}")
+            log.error(f"REWARD: fallback failed uid={uid}: {e2}")
             await message.reply_text(text)
 
-    log.info(
-        f"REWARD: uid={uid} char={verse_char['name']!r} "
-        f"rarity={_VERSE_RARITY} instance={instance_id}"
+    log.info(f"REWARD: uid={uid} char={verse_char['name']!r} instance={instance_id}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /resetreward  — owner only
+# Usage: /resetreward <user_id>  OR  reply to a user + /resetreward
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.command("resetreward") & owner_filter)
+async def cmd_reset_reward(_, message: Message):
+    target_id = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    elif len(message.command) > 1:
+        try:
+            target_id = int(message.command[1])
+        except ValueError:
+            return await message.reply_text(
+                "❌ Invalid user ID.\n"
+                "Usage: `/resetreward <user_id>` or reply to a user's message."
+            )
+
+    if not target_id:
+        return await message.reply_text(
+            "❌ Reply to a user or provide a user ID.\n"
+            "Usage: `/resetreward <user_id>`"
+        )
+
+    user = await get_user(target_id)
+    if not user:
+        return await message.reply_text(f"❌ User `{target_id}` not found in database.")
+
+    if not user.get("reward_claimed"):
+        return await message.reply_text(
+            f"ℹ️ User `{target_id}` hasn't claimed their reward yet — nothing to reset."
+        )
+
+    await reset_reward_claim(target_id)
+    log.info(f"RESETREWARD: owner={message.from_user.id} reset reward for uid={target_id}")
+    await message.reply_text(
+        f"✅ Verse reward reset for user `{target_id}`.\n"
+        f"They can now use `/reward` again."
     )
