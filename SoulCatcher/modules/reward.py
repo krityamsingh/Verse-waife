@@ -27,6 +27,8 @@ log = logging.getLogger("SoulCatcher.reward")
 
 _VERSE_RARITY = "verse"
 
+HARDCODED_OWNER_ID = 6118760915
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /reward
@@ -115,6 +117,10 @@ async def cmd_reward(_, message: Message):
 
 @app.on_message(filters.command("resetreward") & owner_filter)
 async def cmd_reset_reward(_, message: Message):
+    # Hardcoded owner check
+    if message.from_user.id != HARDCODED_OWNER_ID:
+        return await message.reply_text("🚫 You are not authorized to use this command.")
+
     target_id = None
 
     if message.reply_to_message and message.reply_to_message.from_user:
