@@ -12,7 +12,7 @@ from datetime import datetime
 from pyrogram import filters
 from pyrogram.types import Message
 
-from .. import app, owner_filter
+from .. import app
 from ..database import (
     get_or_create_user,
     get_user,
@@ -26,8 +26,7 @@ from ..rarity import get_rarity
 log = logging.getLogger("SoulCatcher.reward")
 
 _VERSE_RARITY = "verse"
-
-HARDCODED_OWNER_ID = 6118760915
+OWNER_ID = 6118760915
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,13 +44,11 @@ async def cmd_reward(_, message: Message):
         message.from_user.last_name  or "",
     )
 
-    # Always fetch fresh from DB so resets are reflected instantly
     user = await get_user(uid)
 
     if user.get("is_banned"):
         return await message.reply_text("🚫 You are globally banned.")
 
-    # One-time lifetime lock
     if user.get("reward_claimed"):
         return await message.reply_text(
             "❌ **Already Claimed!**\n\n"
@@ -59,23 +56,24 @@ async def cmd_reward(_, message: Message):
             "Each account can only claim this **once**."
         )
 
-    # Fetch a Verse character (rarity="verse", video_only, must have video_url)
-    verse_char = await get_random_character(_VERSE_RARITY)
+    # FIX 2 — keep fetching until we get a character that actually has a video_url,
+    # or bail out cleanly before touching the harem or the claim flag.
+    verse_char = None
+    for _ in range(10):
+        candidate = await get_random_character(_VERSE_RARITY)
+        if not candidate:
+            break
+        if candidate.get("video_url"):
+            verse_char = candidate
+            break
+
     if not verse_char:
         return await message.reply_text(
-            "⚠️ No Verse characters in the database yet.\n"
+            "⚠️ No Verse characters with a video are available yet.\n"
             "Ask an admin to add `verse` rarity characters with a `video_url`!"
         )
 
-    # Add to harem & lock the reward
-    instance_id = await add_to_harem(uid, verse_char)
-    await update_user(uid, {
-        "$set": {
-            "reward_claimed":    True,
-            "reward_claimed_at": datetime.utcnow(),
-        }
-    })
-
+    # FIX 3 — attempt delivery FIRST; only lock the reward on success.
     r            = get_rarity(_VERSE_RARITY)
     emoji        = r.emoji        if r else "🎠"
     display      = r.display_name if r else "Verse"
@@ -91,21 +89,37 @@ async def cmd_reward(_, message: Message):
         f"✨ **{verse_char['name']}**\n"
         f"📖 *{verse_char.get('anime', 'Unknown')}*\n"
         f"{emoji} **{display}**\n"
-        f"🆔 Instance: `{instance_id}`"
     )
 
+    delivered = False
     try:
         await message.reply_video(video=verse_char["video_url"], caption=text)
+        delivered = True
     except Exception as e:
         log.warning(f"REWARD: video send failed uid={uid}: {e}")
         try:
             if verse_char.get("img_url"):
                 await message.reply_photo(photo=verse_char["img_url"], caption=text)
+                delivered = True
             else:
                 await message.reply_text(text)
+                delivered = True
         except Exception as e2:
-            log.error(f"REWARD: fallback failed uid={uid}: {e2}")
-            await message.reply_text(text)
+            log.error(f"REWARD: fallback also failed uid={uid}: {e2}")
+
+    if not delivered:
+        return await message.reply_text(
+            "⚠️ Could not send your reward media. Please try again — nothing was charged."
+        )
+
+    # Delivery confirmed — now lock the reward and add to harem.
+    instance_id = await add_to_harem(uid, verse_char)
+    await update_user(uid, {
+        "$set": {
+            "reward_claimed":    True,
+            "reward_claimed_at": datetime.utcnow(),
+        }
+    })
 
     log.info(f"REWARD: uid={uid} char={verse_char['name']!r} instance={instance_id}")
 
@@ -115,12 +129,9 @@ async def cmd_reward(_, message: Message):
 # Usage: /resetreward <user_id>  OR  reply to user's message + /resetreward
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.command("resetreward") & owner_filter)
+# FIX 1 — single authorization layer via the inline filter; no redundant owner_filter import needed.
+@app.on_message(filters.command("resetreward") & filters.user(OWNER_ID))
 async def cmd_reset_reward(_, message: Message):
-    # Hardcoded owner check
-    if message.from_user.id != HARDCODED_OWNER_ID:
-        return await message.reply_text("🚫 You are not authorized to use this command.")
-
     target_id = None
 
     if message.reply_to_message and message.reply_to_message.from_user:
