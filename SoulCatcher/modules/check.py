@@ -67,8 +67,8 @@ def _restrictions(char: dict) -> str:
 
 
 async def _ownership_stats(char_id: str) -> tuple[int, int]:
-    col   = _col("user_characters")
-    total = await col.count_documents({"char_id": char_id})
+    col    = _col("user_characters")
+    total  = await col.count_documents({"char_id": char_id})
     owners = await col.distinct("user_id", {"char_id": char_id})
     return len(owners), total
 
@@ -181,6 +181,7 @@ async def _char_card_text(char: dict) -> str:
         f"🌸  `{kakera}` kakera  ·  💵 `{price_min:,} – {price_max:,}`\n"
     )
 
+
 def _card_buttons(char_id: str) -> IKM:
     return IKM([[
         IKB("👥 Top Owners", callback_data=f"chk_own:{char_id}"),
@@ -189,42 +190,63 @@ def _card_buttons(char_id: str) -> IKM:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Send / edit helpers
+# Send / edit helpers  (fixed — individual try/except per media type with
+#                       proper logging and a clickable fallback URL)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _reply_card(source: Message, char: dict):
     text   = await _char_card_text(char)
     markup = _card_buttons(char["id"])
-    vid    = char.get("video_url", "")
-    img    = char.get("img_url", "")
-    try:
-        if vid:
+    vid    = char.get("video_url", "").strip()
+    img    = char.get("img_url",   "").strip()
+
+    if vid:
+        try:
             await source.reply_video(vid, caption=text, reply_markup=markup)
-        elif img:
+            return
+        except Exception as e:
+            log.warning(f"reply_video failed for char {char['id']}: {e}")
+
+    if img:
+        try:
             await source.reply_photo(img, caption=text, reply_markup=markup)
-        else:
-            await source.reply_text(text, reply_markup=markup)
-    except Exception:
-        await source.reply_text(text, reply_markup=markup)
+            return
+        except Exception as e:
+            log.warning(f"reply_photo failed for char {char['id']}: {e}")
+
+    # Fallback: text only + clickable media link so user can still open the image
+    media_url = vid or img
+    fallback  = text + (f"\n\n🔗 [Open Media]({media_url})" if media_url else "")
+    await source.reply_text(fallback, reply_markup=markup, disable_web_page_preview=False)
 
 
 async def _edit_card(source, char: dict):
     text   = await _char_card_text(char)
     markup = _card_buttons(char["id"])
-    vid    = char.get("video_url", "")
-    img    = char.get("img_url", "")
-    try:
-        if vid:
-            await source.edit_media(InputMediaVideo(vid, caption=text), reply_markup=markup)
-        elif img:
-            await source.edit_media(InputMediaPhoto(img, caption=text), reply_markup=markup)
-        else:
-            await source.edit_text(text, reply_markup=markup)
-    except Exception:
+    vid    = char.get("video_url", "").strip()
+    img    = char.get("img_url",   "").strip()
+
+    if vid:
         try:
-            await source.edit_text(text, reply_markup=markup)
-        except Exception:
-            pass
+            await source.edit_media(InputMediaVideo(vid, caption=text), reply_markup=markup)
+            return
+        except Exception as e:
+            log.warning(f"edit_media(video) failed for char {char['id']}: {e}")
+
+    if img:
+        try:
+            await source.edit_media(InputMediaPhoto(img, caption=text), reply_markup=markup)
+            return
+        except Exception as e:
+            log.warning(f"edit_media(photo) failed for char {char['id']}: {e}")
+
+    # Fallback: text only + clickable media link
+    media_url = vid or img
+    fallback  = text + (f"\n\n🔗 [Open Media]({media_url})" if media_url else "")
+    try:
+        await source.edit_text(fallback, reply_markup=markup, disable_web_page_preview=False)
+    except Exception as e:
+        log.warning(f"edit_text fallback also failed for char {char['id']}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
