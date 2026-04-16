@@ -190,8 +190,30 @@ def _card_buttons(char_id: str) -> IKM:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Send / edit helpers  (fixed — individual try/except per media type with
-#                       proper logging and a clickable fallback URL)
+# Media fetch helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _fetch_bytes(url: str) -> bytes | None:
+    """Download a URL and return raw bytes, or None on failure.
+
+    Telegram's `WEBPAGE_MEDIA_EMPTY` error occurs when it cannot fetch a URL
+    directly (redirects, non-standard hosts, missing Content-Type headers, etc.).
+    Downloading client-side and uploading the raw bytes sidesteps this entirely.
+    """
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                log.warning(f"_fetch_bytes HTTP {resp.status} for {url}")
+    except Exception as e:
+        log.warning(f"_fetch_bytes failed for {url}: {e}")
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Send / edit helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _reply_card(source: Message, char: dict):
@@ -201,20 +223,40 @@ async def _reply_card(source: Message, char: dict):
     img    = char.get("img_url",   "").strip()
 
     if vid:
+        # 1a. Try URL directly
         try:
             await source.reply_video(vid, caption=text, reply_markup=markup)
             return
         except Exception as e:
-            log.warning(f"reply_video failed for char {char['id']}: {e}")
+            log.warning(f"reply_video (url) failed for char {char['id']}: {e}")
+        # 1b. Download and send as bytes (fixes WEBPAGE_MEDIA_EMPTY)
+        data = await _fetch_bytes(vid)
+        if data:
+            try:
+                from io import BytesIO
+                await source.reply_video(BytesIO(data), caption=text, reply_markup=markup)
+                return
+            except Exception as e:
+                log.warning(f"reply_video (bytes) failed for char {char['id']}: {e}")
 
     if img:
+        # 2a. Try URL directly
         try:
             await source.reply_photo(img, caption=text, reply_markup=markup)
             return
         except Exception as e:
-            log.warning(f"reply_photo failed for char {char['id']}: {e}")
+            log.warning(f"reply_photo (url) failed for char {char['id']}: {e}")
+        # 2b. Download and send as bytes (fixes WEBPAGE_MEDIA_EMPTY)
+        data = await _fetch_bytes(img)
+        if data:
+            try:
+                from io import BytesIO
+                await source.reply_photo(BytesIO(data), caption=text, reply_markup=markup)
+                return
+            except Exception as e:
+                log.warning(f"reply_photo (bytes) failed for char {char['id']}: {e}")
 
-    # Fallback: text only + clickable media link so user can still open the image
+    # Final fallback: text only + clickable media link
     media_url = vid or img
     fallback  = text + (f"\n\n🔗 [Open Media]({media_url})" if media_url else "")
     await source.reply_text(fallback, reply_markup=markup, disable_web_page_preview=False)
@@ -227,20 +269,40 @@ async def _edit_card(source, char: dict):
     img    = char.get("img_url",   "").strip()
 
     if vid:
+        # 1a. Try URL directly
         try:
             await source.edit_media(InputMediaVideo(vid, caption=text), reply_markup=markup)
             return
         except Exception as e:
-            log.warning(f"edit_media(video) failed for char {char['id']}: {e}")
+            log.warning(f"edit_media(video url) failed for char {char['id']}: {e}")
+        # 1b. Download and send as bytes
+        data = await _fetch_bytes(vid)
+        if data:
+            try:
+                from io import BytesIO
+                await source.edit_media(InputMediaVideo(BytesIO(data), caption=text), reply_markup=markup)
+                return
+            except Exception as e:
+                log.warning(f"edit_media(video bytes) failed for char {char['id']}: {e}")
 
     if img:
+        # 2a. Try URL directly
         try:
             await source.edit_media(InputMediaPhoto(img, caption=text), reply_markup=markup)
             return
         except Exception as e:
-            log.warning(f"edit_media(photo) failed for char {char['id']}: {e}")
+            log.warning(f"edit_media(photo url) failed for char {char['id']}: {e}")
+        # 2b. Download and send as bytes
+        data = await _fetch_bytes(img)
+        if data:
+            try:
+                from io import BytesIO
+                await source.edit_media(InputMediaPhoto(BytesIO(data), caption=text), reply_markup=markup)
+                return
+            except Exception as e:
+                log.warning(f"edit_media(photo bytes) failed for char {char['id']}: {e}")
 
-    # Fallback: text only + clickable media link
+    # Final fallback: text only + clickable media link
     media_url = vid or img
     fallback  = text + (f"\n\n🔗 [Open Media]({media_url})" if media_url else "")
     try:
