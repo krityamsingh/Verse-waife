@@ -37,7 +37,7 @@ from ..database import _col, get_character
 log = logging.getLogger("SoulCatcher.reloader")
 
 # ─── tunables ────────────────────────────────────────────────────────────────
-DUMP_CHANNEL     = -1002000000000   # ← replace with your actual media-dump channel id
+DUMP_CHANNEL     = -1003869604435  # ← replace with your actual media-dump channel id
 CATBOX_URL       = "https://catbox.moe/user/api.php"
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=15)
 UPLOAD_TIMEOUT   = aiohttp.ClientTimeout(total=120, connect=15)
