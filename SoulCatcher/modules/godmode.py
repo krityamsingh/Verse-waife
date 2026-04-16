@@ -27,7 +27,7 @@ from io import BytesIO
 
 import aiohttp
 from pyrogram import filters
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, MessageNotModified, MessageIdInvalid
 from pyrogram.types import Message
 
 from .. import app
@@ -69,6 +69,66 @@ def _is_telegram_file_id(value: str) -> bool:
 
 class ReloadError(Exception):
     pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# safe_edit — rate-limit-aware message editor
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Tracks (last_text, last_edit_timestamp) per message_id
+_edit_state: dict[int, tuple[str, float]] = {}
+
+MIN_EDIT_INTERVAL = 3.5   # seconds between edits on the same message (Telegram allows ~20/min)
+MAX_MSG_LEN       = 4096  # Telegram hard limit
+
+async def safe_edit(msg: Message, text: str) -> None:
+    """
+    Edit *msg* with *text*, but:
+    • Truncate to Telegram's 4096-char limit automatically.
+    • Skip the edit if the text hasn't changed.
+    • Throttle: never edit the same message faster than MIN_EDIT_INTERVAL seconds.
+    • Absorb MessageNotModified / MessageIdInvalid silently.
+    • On FloodWait: sleep the required time, then retry once.
+    """
+    # Truncate safely (never crash on long failure lists)
+    if len(text) > MAX_MSG_LEN:
+        cutoff = text.rfind("\n", 0, MAX_MSG_LEN - 60)
+        if cutoff == -1:
+            cutoff = MAX_MSG_LEN - 60
+        text = text[:cutoff] + "\n\n…_(truncated — check logs for full list)_"
+
+    mid = msg.id
+    now = time.monotonic()
+    last_text, last_ts = _edit_state.get(mid, ("", 0.0))
+
+    # Skip if nothing changed
+    if text == last_text:
+        return
+
+    # Throttle: wait out the remaining cooldown
+    wait_for = MIN_EDIT_INTERVAL - (now - last_ts)
+    if wait_for > 0:
+        await asyncio.sleep(wait_for)
+
+    for attempt in range(2):   # try twice (once after FloodWait)
+        try:
+            await msg.edit_text(text)
+            _edit_state[mid] = (text, time.monotonic())
+            return
+        except FloodWait as fw:
+            if attempt == 0:
+                log.warning(f"[safe_edit] FloodWait {fw.value}s on msg {mid}")
+                await asyncio.sleep(fw.value + 1)
+            else:
+                log.error(f"[safe_edit] FloodWait again on msg {mid}, giving up")
+                return
+        except (MessageNotModified, MessageIdInvalid):
+            # Not modified = text was already that value; Invalid = message deleted
+            _edit_state[mid] = (text, time.monotonic())
+            return
+        except Exception as e:
+            log.warning(f"[safe_edit] msg {mid}: {e}")
+            return
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -248,13 +308,11 @@ async def _bulk_reload(
     total = len(chars)
 
     if total == 0:
-        try:
-            await status_msg.edit_text(
-                "✅ **Nothing to do!**\n\n"
-                "All enabled characters already have working Catbox URLs."
-            )
-        except Exception:
-            pass
+        await safe_edit(
+            status_msg,
+            "✅ **Nothing to do!**\n\n"
+            "All enabled characters already have working Catbox URLs.",
+        )
         return 0, 0, 0, []
 
     sem        = asyncio.Semaphore(CONCURRENCY)
@@ -287,18 +345,16 @@ async def _bulk_reload(
                     eta     = (elapsed / done) * (total - done) if done else 0
                     pct     = int(done / total * 100)
                     bar     = "█" * (pct // 5) + "░" * (20 - pct // 5)
-                    try:
-                        await status_msg.edit_text(
-                            f"⚙️ **GODMODE RELOAD** in progress…\n\n"
-                            f"`[{bar}]` {pct}%\n\n"
-                            f"📊 **{done}** / **{total}** need fixing\n"
-                            f"✅ Fixed    : **{success}**\n"
-                            f"⏭ Skipped  : **{skipped}**\n"
-                            f"❌ Failed   : **{failed}**\n\n"
-                            f"⏱ Elapsed  : `{elapsed:.0f}s`  ETA: `{eta:.0f}s`"
-                        )
-                    except Exception:
-                        pass
+                    await safe_edit(
+                        status_msg,
+                        f"⚙️ **GODMODE RELOAD** in progress…\n\n"
+                        f"`[{bar}]` {pct}%\n\n"
+                        f"📊 **{done}** / **{total}** need fixing\n"
+                        f"✅ Fixed    : **{success}**\n"
+                        f"⏭ Skipped  : **{skipped}**\n"
+                        f"❌ Failed   : **{failed}**\n\n"
+                        f"⏱ Elapsed  : `{elapsed:.0f}s`  ETA: `{eta:.0f}s`",
+                    )
 
         await asyncio.gather(*[_worker(c) for c in chars])
 
@@ -386,7 +442,8 @@ async def _godmode_status(message: Message):
 
     needs_work = fileid_photo + fileid_video + broken_photo + broken_video
 
-    await msg.edit_text(
+    await safe_edit(
+        msg,
         "╔══════════════════════════════╗\n"
         "║    🛡  GODMODE  STATUS       ║\n"
         "╚══════════════════════════════╝\n\n"
@@ -404,7 +461,7 @@ async def _godmode_status(message: Message):
             "Run `/godmode reload` to fix them."
             if needs_work else
             "🎉 **All media already on Catbox — no errors expected!**"
-        )
+        ),
     )
 
 
@@ -423,9 +480,7 @@ async def _godmode_reload(message: Message, force: bool):
         )
     except Exception as e:
         log.exception("_bulk_reload crashed")
-        return await status_msg.edit_text(
-            f"💥 **Fatal error during reload:**\n`{e}`"
-        )
+        return await safe_edit(status_msg, f"💥 **Fatal error during reload:**\n`{e}`")
 
     fail_block = ""
     if failed_ids:
@@ -441,7 +496,8 @@ async def _godmode_reload(message: Message, force: bool):
         "\n\n🎉 All broken media now points to stable Catbox URLs!"
     )
 
-    await status_msg.edit_text(
+    await safe_edit(
+        status_msg,
         "╔══════════════════════════════╗\n"
         "║   ✅  RELOAD  COMPLETE       ║\n"
         "╚══════════════════════════════╝\n\n"
@@ -449,7 +505,7 @@ async def _godmode_reload(message: Message, force: bool):
         f"⏭ Skipped   : **{skipped:,}** _(already Catbox)_\n"
         f"❌ Failed    : **{failed:,}**\n"
         + fail_block
-        + footer
+        + footer,
     )
 
 
@@ -478,24 +534,27 @@ async def _godmode_fix(message: Message, raw_id: str):
     updated = await get_character(char_id)
 
     if result.success:
-        await msg.edit_text(
+        await safe_edit(
+            msg,
             f"✅ `{char_id}` — **{char.get('name', '?')}**\n\n"
             f"📸 img_url   : `{(updated.get('img_url') or 'none')[:80]}`\n"
             f"🎬 video_url : `{(updated.get('video_url') or 'none')[:80]}`\n\n"
-            "DB patched with new Catbox URLs."
+            "DB patched with new Catbox URLs.",
         )
     elif result.skipped:
-        await msg.edit_text(
+        await safe_edit(
+            msg,
             f"⏭ `{char_id}` — **{char.get('name', '?')}**\n"
             "Already on Catbox — nothing to do.\n"
-            "_(use `/godmode reload --force` to re-upload anyway)_"
+            "_(use `/godmode reload --force` to re-upload anyway)_",
         )
     else:
-        await msg.edit_text(
+        await safe_edit(
+            msg,
             f"❌ `{char_id}` — **{char.get('name', '?')}**\n"
             f"**Error:** `{result.error}`\n\n"
             "Possible causes:\n"
             "• The file_id is from a different bot/session\n"
             "• The dump channel is inaccessible\n"
-            "• The original URL is dead or geo-blocked"
+            "• The original URL is dead or geo-blocked",
         )
