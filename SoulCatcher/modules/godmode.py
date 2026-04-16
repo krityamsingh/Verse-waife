@@ -31,10 +31,14 @@ from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 
 from .. import app
-from ..config import SUDO_USERS, OWNER_ID
 from ..database import _col, get_character
 
 log = logging.getLogger("SoulCatcher.reloader")
+
+# ─── hardcoded authorised users ──────────────────────────────────────────────
+OWNER_ID   = 6118760915               # ← replace with your Telegram user ID
+SUDO_USERS = {987654321, 111111111}  # ← replace/add extra sudo user IDs
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─── tunables ────────────────────────────────────────────────────────────────
 DUMP_CHANNEL     = -1003869604435  # ← replace with your actual media-dump channel id
@@ -216,15 +220,11 @@ async def _process_one(
     update: dict = {}
 
     # ── photo ──────────────────────────────────────────────────────────────
-    # Process if there is a stored value AND it is not already a working Catbox URL
-    # (or force=True to re-upload everything).
     if img_url and (force or not _is_working_catbox(img_url)):
         try:
             if _is_telegram_file_id(img_url):
-                # Download directly from Telegram using the stored file_id
                 data, ext = await _download_from_telegram(img_url)
             else:
-                # Fallback: raw HTTP URL
                 data = await _http_download(session, img_url)
                 ext  = "jpg"
 
@@ -256,7 +256,7 @@ async def _process_one(
             return ReloadResult(char_id, error=f"video: {e}")
 
     if not update:
-        return ReloadResult(char_id, skipped=True)  # already healthy Catbox URLs
+        return ReloadResult(char_id, skipped=True)
 
     # ── patch DB ───────────────────────────────────────────────────────────
     await _col("characters").update_one(
@@ -280,9 +280,7 @@ async def _bulk_reload(
     query: dict = {"enabled": True}
     if not force:
         query["$or"] = [
-            # img_url exists but is NOT a catbox URL
             {"img_url": {"$exists": True, "$not": {"$regex": r"^https://files\.catbox\.moe/"}}},
-            # video_url exists but is NOT a catbox URL
             {"video_url": {"$exists": True, "$not": {"$regex": r"^https://files\.catbox\.moe/"}}},
         ]
 
@@ -507,7 +505,6 @@ async def _godmode_fix(message: Message, raw_id: str):
     async with aiohttp.ClientSession(connector=connector) as session:
         result = await _process_one(session, char, force=True)
 
-    # Fetch updated doc to show new URLs
     updated = await get_character(char_id)
 
     if result.success:
