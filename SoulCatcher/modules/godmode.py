@@ -24,7 +24,6 @@ import asyncio
 import logging
 import time
 from io import BytesIO
-from typing import Optional
 
 import aiohttp
 from pyrogram import filters
@@ -38,7 +37,7 @@ from ..database import _col, get_character
 log = logging.getLogger("SoulCatcher.reloader")
 
 # ─── tunables ────────────────────────────────────────────────────────────────
-DUMP_CHANNEL     = -1002xxxxxxxxx   # ← your media-dump channel id
+DUMP_CHANNEL     = -1002000000000   # ← replace with your actual media-dump channel id
 CATBOX_URL       = "https://catbox.moe/user/api.php"
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=15)
 UPLOAD_TIMEOUT   = aiohttp.ClientTimeout(total=120, connect=15)
@@ -103,8 +102,50 @@ async def _download_from_telegram(file_id: str) -> tuple[bytes, str]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Step 2 — Upload to Catbox (anonymous)
+# Step 2 — HTTP fallback download
 # ═════════════════════════════════════════════════════════════════════════════
+
+async def _http_download(
+    session: aiohttp.ClientSession,
+    url: str,
+) -> bytes:
+    """Fallback: download from a raw HTTP URL. Returns raw bytes only."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with session.get(url, timeout=DOWNLOAD_TIMEOUT) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if data:
+                        return data
+                    raise ReloadError(f"Empty body from {url}")
+                raise ReloadError(f"HTTP {resp.status} from {url}")
+        except ReloadError:
+            raise
+        except asyncio.TimeoutError:
+            log.warning(f"[http-dl] timeout attempt {attempt}/{MAX_RETRIES}: {url}")
+        except Exception as e:
+            log.warning(f"[http-dl] attempt {attempt}/{MAX_RETRIES}: {e}")
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(2 ** attempt)
+    raise ReloadError(f"HTTP download failed after {MAX_RETRIES} attempts: {url}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Step 3 — Upload to Catbox (anonymous)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_catbox_form(data: bytes, filename: str) -> aiohttp.FormData:
+    form = aiohttp.FormData()
+    form.add_field("reqtype", "fileupload")
+    form.add_field("userhash", "")          # anonymous — leave blank
+    form.add_field(
+        "fileToUpload",
+        BytesIO(data),
+        filename=filename,
+        content_type="application/octet-stream",
+    )
+    return form
+
 
 async def _upload_to_catbox(
     session: aiohttp.ClientSession,
@@ -115,17 +156,8 @@ async def _upload_to_catbox(
     Upload *data* to Catbox anonymously.
     Returns the direct URL like https://files.catbox.moe/xxxxxx.jpg
     """
-    form = aiohttp.FormData()
-    form.add_field("reqtype", "fileupload")
-    form.add_field("userhash", "")          # anonymous — leave blank
-    form.add_field(
-        "fileToUpload",
-        BytesIO(data),
-        filename=filename,
-        content_type="application/octet-stream",
-    )
-
     for attempt in range(1, MAX_RETRIES + 1):
+        form = _build_catbox_form(data, filename)   # rebuild each attempt (FormData can't be reused)
         try:
             async with session.post(
                 CATBOX_URL, data=form, timeout=UPLOAD_TIMEOUT
@@ -145,22 +177,8 @@ async def _upload_to_catbox(
             log.warning(f"[catbox] attempt {attempt}/{MAX_RETRIES}: {e}")
         if attempt < MAX_RETRIES:
             await asyncio.sleep(2 ** attempt)
-            form = _rebuild_form(data, filename)   # FormData can't be reused
 
-    raise ReloadError(f"Catbox upload failed after {MAX_RETRIES} attempts")
-
-
-def _rebuild_form(data: bytes, filename: str) -> aiohttp.FormData:
-    form = aiohttp.FormData()
-    form.add_field("reqtype", "fileupload")
-    form.add_field("userhash", "")
-    form.add_field(
-        "fileToUpload",
-        BytesIO(data),
-        filename=filename,
-        content_type="application/octet-stream",
-    )
-    return form
+    raise ReloadError(f"Catbox upload failed after {MAX_RETRIES} attempts for {filename}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -198,19 +216,19 @@ async def _process_one(
     update: dict = {}
 
     # ── photo ──────────────────────────────────────────────────────────────
-    # Process if:
-    #   • There's a value stored AND
-    #   • It's either a broken/non-Catbox URL  OR  a Telegram file_id  OR  force=True
+    # Process if there is a stored value AND it is not already a working Catbox URL
+    # (or force=True to re-upload everything).
     if img_url and (force or not _is_working_catbox(img_url)):
         try:
-            # If it's already a file_id, download directly from Telegram.
-            # If it's some other raw URL, try HTTP download as fallback.
             if _is_telegram_file_id(img_url):
+                # Download directly from Telegram using the stored file_id
                 data, ext = await _download_from_telegram(img_url)
             else:
-                data, ext = await _http_download(session, img_url), "jpg"
+                # Fallback: raw HTTP URL
+                data = await _http_download(session, img_url)
+                ext  = "jpg"
 
-            filename  = f"{safe_name}.{ext}"
+            filename   = f"{safe_name}.{ext}"
             catbox_url = await _upload_to_catbox(session, data, filename)
             update["img_url"] = catbox_url
             log.info(f"[{char_id}] photo → {catbox_url}")
@@ -225,7 +243,8 @@ async def _process_one(
             if _is_telegram_file_id(vid_url):
                 data, ext = await _download_from_telegram(vid_url)
             else:
-                data, ext = await _http_download(session, vid_url), "mp4"
+                data = await _http_download(session, vid_url)
+                ext  = "mp4"
 
             filename   = f"{safe_name}.{ext}"
             catbox_url = await _upload_to_catbox(session, data, filename)
@@ -246,31 +265,6 @@ async def _process_one(
     return ReloadResult(char_id, success=True)
 
 
-async def _http_download(
-    session: aiohttp.ClientSession,
-    url: str,
-) -> bytes:
-    """Fallback: download from a raw HTTP URL."""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            async with session.get(url, timeout=DOWNLOAD_TIMEOUT) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    if data:
-                        return data
-                    raise ReloadError(f"Empty body from {url}")
-                raise ReloadError(f"HTTP {resp.status} from {url}")
-        except ReloadError:
-            raise
-        except asyncio.TimeoutError:
-            log.warning(f"[http-dl] timeout attempt {attempt}/{MAX_RETRIES}: {url}")
-        except Exception as e:
-            log.warning(f"[http-dl] attempt {attempt}/{MAX_RETRIES}: {e}")
-        if attempt < MAX_RETRIES:
-            await asyncio.sleep(2 ** attempt)
-    raise ReloadError(f"HTTP download failed after {MAX_RETRIES} attempts: {url}")
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # Bulk reload engine
 # ═════════════════════════════════════════════════════════════════════════════
@@ -283,7 +277,6 @@ async def _bulk_reload(
     Scans ALL enabled characters, skips those already on Catbox (unless force).
     Returns (success, skipped, failed, failed_id_list).
     """
-    # Only fetch characters that actually need work (unless force)
     query: dict = {"enabled": True}
     if not force:
         query["$or"] = [
@@ -293,8 +286,8 @@ async def _bulk_reload(
             {"video_url": {"$exists": True, "$not": {"$regex": r"^https://files\.catbox\.moe/"}}},
         ]
 
-    chars    = await _col("characters").find(query).to_list(None)
-    total    = len(chars)
+    chars = await _col("characters").find(query).to_list(None)
+    total = len(chars)
 
     if total == 0:
         try:
@@ -307,7 +300,10 @@ async def _bulk_reload(
         return 0, 0, 0, []
 
     sem        = asyncio.Semaphore(CONCURRENCY)
-    success    = skipped = failed = done = 0
+    success    = 0
+    skipped    = 0
+    failed     = 0
+    done       = 0
     failed_ids: list[str] = []
     start_ts   = time.time()
 
@@ -390,9 +386,12 @@ async def _godmode_status(message: Message):
     msg = await message.reply_text("🔍 Scanning database…")
 
     total        = await _col("characters").count_documents({"enabled": True})
-    catbox_photo = catbox_video = 0
-    fileid_photo = fileid_video = 0
-    broken_photo = broken_video = 0
+    catbox_photo = 0
+    catbox_video = 0
+    fileid_photo = 0
+    fileid_video = 0
+    broken_photo = 0
+    broken_video = 0
 
     async for char in _col("characters").find({"enabled": True}):
         img = (char.get("img_url")   or "").strip()
@@ -402,14 +401,20 @@ async def _godmode_status(message: Message):
             if not val:
                 continue
             if _is_working_catbox(val):
-                if is_vid: catbox_video += 1
-                else:      catbox_photo += 1
+                if is_vid:
+                    catbox_video += 1
+                else:
+                    catbox_photo += 1
             elif _is_telegram_file_id(val):
-                if is_vid: fileid_video += 1
-                else:      fileid_photo += 1
+                if is_vid:
+                    fileid_video += 1
+                else:
+                    fileid_photo += 1
             else:
-                if is_vid: broken_video += 1
-                else:      broken_photo += 1
+                if is_vid:
+                    broken_video += 1
+                else:
+                    broken_photo += 1
 
     needs_work = fileid_photo + fileid_video + broken_photo + broken_video
 
