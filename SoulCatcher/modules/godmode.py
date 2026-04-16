@@ -36,18 +36,18 @@ from ..database import _col, get_character
 log = logging.getLogger("SoulCatcher.reloader")
 
 # ─── hardcoded authorised users ──────────────────────────────────────────────
-OWNER_ID   = 6118760915               # ← replace with your Telegram user ID
-SUDO_USERS = {6118760915, 6118760915}  # ← replace/add extra sudo user IDs
+OWNER_ID   = 6118760915
+SUDO_USERS = {6118760915}
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── tunables ────────────────────────────────────────────────────────────────
-DUMP_CHANNEL     = -1003869604435  # ← replace with your actual media-dump channel id
+DUMP_CHANNEL     = -1003869604435
 CATBOX_URL       = "https://catbox.moe/user/api.php"
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=15)
 UPLOAD_TIMEOUT   = aiohttp.ClientTimeout(total=120, connect=15)
 MAX_RETRIES      = 3
-CONCURRENCY      = 4                # parallel workers
-PROGRESS_EVERY   = 10               # edit status message every N characters
+CONCURRENCY      = 4
+PROGRESS_EVERY   = 10
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -60,12 +60,10 @@ def _is_sudo(uid: int) -> bool:
 
 
 def _is_working_catbox(url: str) -> bool:
-    """Return True if the URL is already a live Catbox link."""
     return url.startswith("https://files.catbox.moe/")
 
 
 def _is_telegram_file_id(value: str) -> bool:
-    """True when the value looks like a Telegram file_id (not a URL)."""
     return not value.startswith("http") and len(value) > 20
 
 
@@ -78,10 +76,6 @@ class ReloadError(Exception):
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def _download_from_telegram(file_id: str) -> tuple[bytes, str]:
-    """
-    Ask Pyrogram to download the media identified by *file_id*.
-    Returns (raw_bytes, suggested_extension).
-    """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             buf = BytesIO()
@@ -90,7 +84,6 @@ async def _download_from_telegram(file_id: str) -> tuple[bytes, str]:
             data = buf.read()
             if not data:
                 raise ReloadError(f"Empty download for file_id {file_id[:20]}…")
-            # Guess extension from file_id prefix (photos start AgAC, videos BAA/BQA)
             ext = "mp4" if file_id.startswith(("BAA", "BQA")) else "jpg"
             return data, ext
         except FloodWait as fw:
@@ -109,11 +102,7 @@ async def _download_from_telegram(file_id: str) -> tuple[bytes, str]:
 # Step 2 — HTTP fallback download
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def _http_download(
-    session: aiohttp.ClientSession,
-    url: str,
-) -> bytes:
-    """Fallback: download from a raw HTTP URL. Returns raw bytes only."""
+async def _http_download(session: aiohttp.ClientSession, url: str) -> bytes:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with session.get(url, timeout=DOWNLOAD_TIMEOUT) as resp:
@@ -141,7 +130,7 @@ async def _http_download(
 def _build_catbox_form(data: bytes, filename: str) -> aiohttp.FormData:
     form = aiohttp.FormData()
     form.add_field("reqtype", "fileupload")
-    form.add_field("userhash", "")          # anonymous — leave blank
+    form.add_field("userhash", "")
     form.add_field(
         "fileToUpload",
         BytesIO(data),
@@ -156,23 +145,15 @@ async def _upload_to_catbox(
     data: bytes,
     filename: str,
 ) -> str:
-    """
-    Upload *data* to Catbox anonymously.
-    Returns the direct URL like https://files.catbox.moe/xxxxxx.jpg
-    """
     for attempt in range(1, MAX_RETRIES + 1):
-        form = _build_catbox_form(data, filename)   # rebuild each attempt (FormData can't be reused)
+        form = _build_catbox_form(data, filename)
         try:
-            async with session.post(
-                CATBOX_URL, data=form, timeout=UPLOAD_TIMEOUT
-            ) as resp:
+            async with session.post(CATBOX_URL, data=form, timeout=UPLOAD_TIMEOUT) as resp:
                 text = (await resp.text()).strip()
                 if resp.status == 200 and text.startswith("https://"):
                     log.info(f"[catbox] uploaded → {text}")
                     return text
-                raise ReloadError(
-                    f"Catbox returned HTTP {resp.status}: {text[:120]}"
-                )
+                raise ReloadError(f"Catbox returned HTTP {resp.status}: {text[:120]}")
         except ReloadError:
             raise
         except asyncio.TimeoutError:
@@ -181,7 +162,6 @@ async def _upload_to_catbox(
             log.warning(f"[catbox] attempt {attempt}/{MAX_RETRIES}: {e}")
         if attempt < MAX_RETRIES:
             await asyncio.sleep(2 ** attempt)
-
     raise ReloadError(f"Catbox upload failed after {MAX_RETRIES} attempts for {filename}")
 
 
@@ -192,14 +172,7 @@ async def _upload_to_catbox(
 class ReloadResult:
     __slots__ = ("char_id", "success", "skipped", "error")
 
-    def __init__(
-        self,
-        char_id: str,
-        *,
-        success: bool = False,
-        skipped: bool = False,
-        error: str = "",
-    ):
+    def __init__(self, char_id: str, *, success: bool = False, skipped: bool = False, error: str = ""):
         self.char_id = char_id
         self.success = success
         self.skipped = skipped
@@ -219,7 +192,6 @@ async def _process_one(
 
     update: dict = {}
 
-    # ── photo ──────────────────────────────────────────────────────────────
     if img_url and (force or not _is_working_catbox(img_url)):
         try:
             if _is_telegram_file_id(img_url):
@@ -227,17 +199,14 @@ async def _process_one(
             else:
                 data = await _http_download(session, img_url)
                 ext  = "jpg"
-
             filename   = f"{safe_name}.{ext}"
             catbox_url = await _upload_to_catbox(session, data, filename)
             update["img_url"] = catbox_url
             log.info(f"[{char_id}] photo → {catbox_url}")
-
         except ReloadError as e:
             log.error(f"[{char_id}] photo FAILED: {e}")
             return ReloadResult(char_id, error=f"photo: {e}")
 
-    # ── video ──────────────────────────────────────────────────────────────
     if vid_url and (force or not _is_working_catbox(vid_url)):
         try:
             if _is_telegram_file_id(vid_url):
@@ -245,12 +214,10 @@ async def _process_one(
             else:
                 data = await _http_download(session, vid_url)
                 ext  = "mp4"
-
             filename   = f"{safe_name}.{ext}"
             catbox_url = await _upload_to_catbox(session, data, filename)
             update["video_url"] = catbox_url
             log.info(f"[{char_id}] video → {catbox_url}")
-
         except ReloadError as e:
             log.error(f"[{char_id}] video FAILED: {e}")
             return ReloadResult(char_id, error=f"video: {e}")
@@ -258,10 +225,7 @@ async def _process_one(
     if not update:
         return ReloadResult(char_id, skipped=True)
 
-    # ── patch DB ───────────────────────────────────────────────────────────
-    await _col("characters").update_one(
-        {"id": char_id}, {"$set": update}
-    )
+    await _col("characters").update_one({"id": char_id}, {"$set": update})
     return ReloadResult(char_id, success=True)
 
 
@@ -273,10 +237,6 @@ async def _bulk_reload(
     status_msg: Message,
     force: bool = False,
 ) -> tuple[int, int, int, list[str]]:
-    """
-    Scans ALL enabled characters, skips those already on Catbox (unless force).
-    Returns (success, skipped, failed, failed_id_list).
-    """
     query: dict = {"enabled": True}
     if not force:
         query["$or"] = [
@@ -346,26 +306,36 @@ async def _bulk_reload(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# /godmode commands
+# /godmode commands  ← NOW works in BOTH private AND group chats
 # ═════════════════════════════════════════════════════════════════════════════
 
-@app.on_message(filters.command("godmode") & filters.private)
+# ── FIX 1: removed `& filters.private` so GC also works ──────────────────────
+@app.on_message(filters.command("godmode"))
 async def cmd_godmode(client, message: Message):
+    # ── FIX 2: guard against messages with no sender (channel posts, etc.) ───
+    if not message.from_user:
+        return
+
     if not _is_sudo(message.from_user.id):
         return await message.reply_text(
             "⛔ You are not authorised to use `/godmode`."
         )
 
-    args = message.command[1:]
+    args = message.command[1:]  # message.command[0] is "godmode"
 
-    if not args or args[0] == "status":
+    # ── FIX 3: explicit routing with safe fallback ───────────────────────────
+    sub = args[0].lower() if args else "status"
+
+    if sub == "status":
         await _godmode_status(message)
 
-    elif args[0] == "reload":
+    elif sub == "reload":
         force = "--force" in args
         await _godmode_reload(message, force=force)
 
-    elif args[0] == "fix" and len(args) >= 2:
+    elif sub == "fix":
+        if len(args) < 2:
+            return await message.reply_text("❌ Usage: `/godmode fix <character_id>`")
         await _godmode_fix(message, args[1])
 
     else:
