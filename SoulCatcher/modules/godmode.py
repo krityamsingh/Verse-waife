@@ -37,7 +37,7 @@ log = logging.getLogger("SoulCatcher.reloader")
 
 # ─── hardcoded authorised users ──────────────────────────────────────────────
 OWNER_ID   = 6118760915               # ← replace with your Telegram user ID
-SUDO_USERS = {987654321, 111111111}  # ← replace/add extra sudo user IDs
+SUDO_USERS = {6118760915, 6118760915}  # ← replace/add extra sudo user IDs
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ─── tunables ────────────────────────────────────────────────────────────────
