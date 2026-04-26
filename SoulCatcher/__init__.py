@@ -14,15 +14,52 @@ from .config import OWNER_IDS, SUDO_IDS
 
 log = logging.getLogger("SoulCatcher")
 
-# ── Client placeholder ────────────────────────────────────────────────────────
-# bot.py assigns this before importing any module.
-app = None  # type: ignore[assignment]
+# ── Client placeholder (lazy proxy) ──────────────────────────────────────────
+# bot.py calls SoulCatcher.app._set(real_client) before importing modules.
+# Modules do `from .. import app` which binds this proxy object — NOT None.
+# All attribute access (@app.on_message etc.) is forwarded to the real client.
+
+class _AppProxy:
+    """Lazy proxy that forwards all attribute access to the real Pyrogram Client.
+
+    This lets modules do `from .. import app` and use `@app.on_message(...)` as
+    decorators at import time, while bot.py sets the actual client just before
+    importing those modules via `SoulCatcher.app._set(client)`.
+    """
+    _client = None
+
+    def _set(self, client) -> None:
+        object.__setattr__(self, '_client', client)
+
+    def __getattr__(self, name: str):
+        client = object.__getattribute__(self, '_client')
+        if client is None:
+            raise RuntimeError(
+                f"SoulCatcher.app.{name!r} was accessed before the Pyrogram Client "
+                "was initialised. Make sure bot.py calls SoulCatcher.app._set(client) "
+                "before load_modules()."
+            )
+        return getattr(client, name)
+
+    def __setattr__(self, name: str, value) -> None:
+        if name == '_client':
+            object.__setattr__(self, name, value)
+        else:
+            client = object.__getattribute__(self, '_client')
+            if client is None:
+                raise RuntimeError("SoulCatcher.app not initialised.")
+            setattr(client, name, value)
+
+    def __repr__(self) -> str:
+        client = object.__getattribute__(self, '_client')
+        return f"<_AppProxy wrapping {client!r}>"
 
 
-def get_app():
-    """Return the live Pyrogram Client. Raises if bot.py hasn't set it yet."""
-    if app is None:
-        raise RuntimeError("SoulCatcher.app not initialised — check bot.py startup order.")
+app: _AppProxy = _AppProxy()
+
+
+def get_app() -> _AppProxy:
+    """Return the live Pyrogram Client proxy. Raises if not yet initialised."""
     return app
 
 
