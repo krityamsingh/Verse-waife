@@ -1,19 +1,40 @@
-"""SoulCatcher/modules/dragonball.py — Full Dragon Ball Fighting Game."""
+"""SoulCatcher/modules/dragonball.py — Dragon Ball Fighting Game with Shop System.
+
+Bot API 9.4 Colored Buttons
+────────────────────────────
+Telegram Bot API 9.4 (Feb 9 2026) added a `style` field to InlineKeyboardButton:
+  • "primary" → Blue
+  • "success" → Green
+  • "danger"  → Red
+
+Pyrogram's high-level InlineKeyboardButton doesn't expose this field yet, so we
+use raw MTProto types instead.  Every helper that used to return a pyrogram IKM/IKB
+now returns a raw types.ReplyInlineMarkup built from raw types.KeyboardButtonCallback
+objects that carry the `style` argument.
+
+Team colour mapping:
+  hero    → "primary"  (blue  — 🔵)
+  villain → "danger"   (red   — 🔴)
+  neutral → "success"  (green — 🟢)
+  action  → "primary"  (blue  — generic action)
+  special → "success"  (green — special move)
+  transform → "danger" (red   — power surge)
+  wish    → "primary"  (blue  — single wish rows)
+"""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import ReturnDocument
 
 import SoulCatcher as _soul
-from pyrogram import filters
+from pyrogram import filters, raw
+from pyrogram.raw import types as raw_types, functions as raw_functions
 from pyrogram.types import (
     Message,
-    InlineKeyboardMarkup as IKM,
-    InlineKeyboardButton as IKB,
     CallbackQuery,
 )
 
@@ -41,30 +62,28 @@ async def init_db():
     _db = client[DB_NAME]
     await _db["db_dragon_balls"].create_index([("user_id", 1)], unique=True)
     await _db["db_wishes"].create_index([("user_id", 1), ("wished_at", -1)])
-    await _db["db_fighters"].create_index([("user_id", 1)], unique=True)
-    await _db["db_fights"].create_index([("fight_id", 1)], unique=True)
+    await _db["db_owned_fighters"].create_index([("user_id", 1)], unique=True)
+    await _db["db_fight_stats"].create_index([("user_id", 1)], unique=True)
     await _db["db_upgrades"].create_index([("user_id", 1)], unique=True)
     log.info("✅ DragonBall DB ready")
 
 
 def _col(name: str):
     if _db is None:
-        raise RuntimeError(
-            "DragonBall _db is None — init_db() was never called. "
-            "Ensure bot.py awaits init_db() before load_modules()."
-        )
+        raise RuntimeError("DragonBall _db is None — init_db() was never awaited.")
     return _db[name]
 
 
-# ── Characters & Videos ───────────────────────────────────────────────────────
+# ── Fighter Catalogue ─────────────────────────────────────────────────────────
 
 FIGHTERS = {
+    # ── HEROES ────────────────────────────────────────────────────────────────
     "goku": {
-        "name": "Goku",
-        "emoji": "🟡",
-        "team": "hero",
-        "base_power": 9000,
-        "signature": "Kamehameha",
+        "name": "Goku", "emoji": "🟡", "team": "hero",
+        "price": 0,
+        "base_power": 9000, "hp": 100, "signature": "Kamehameha",
+        "transform_name": "Ultra Instinct", "transform_power": 1.6,
+        "desc": "The legendary Super Saiyan warrior",
         "videos": {
             "idle":      "https://litter.catbox.moe/so5rk7.mp4",
             "transform": "https://litter.catbox.moe/3ga3cf.mp4",
@@ -72,17 +91,13 @@ FIGHTERS = {
             "win":       "https://litter.catbox.moe/zjukij.mp4",
             "lose":      "https://litter.catbox.moe/l999rw.mp4",
         },
-        "transform_name": "Ultra Instinct",
-        "transform_power": 1.6,
-        "hp": 100,
-        "desc": "The legendary Super Saiyan warrior",
     },
     "vegeta": {
-        "name": "Vegeta",
-        "emoji": "🔵",
-        "team": "hero",
-        "base_power": 8500,
-        "signature": "Final Flash",
+        "name": "Vegeta", "emoji": "🔵", "team": "hero",
+        "price": 3_000,
+        "base_power": 8500, "hp": 95, "signature": "Final Flash",
+        "transform_name": "Ultra Ego", "transform_power": 1.5,
+        "desc": "Prince of all Saiyans, rival to Goku",
         "videos": {
             "idle":      "https://litter.catbox.moe/snqtio.mp4",
             "transform": "https://litter.catbox.moe/almlg0.mp4",
@@ -90,17 +105,13 @@ FIGHTERS = {
             "win":       None,
             "lose":      "https://litter.catbox.moe/xpjjpx.mp4",
         },
-        "transform_name": "Ultra Ego",
-        "transform_power": 1.5,
-        "hp": 95,
-        "desc": "Prince of all Saiyans, rival to Goku",
     },
     "broly": {
-        "name": "Broly",
-        "emoji": "🟢",
-        "team": "hero",
-        "base_power": 9200,
-        "signature": "Gigantic Roar",
+        "name": "Broly", "emoji": "🟢", "team": "hero",
+        "price": 5_000,
+        "base_power": 9200, "hp": 110, "signature": "Gigantic Roar",
+        "transform_name": "Legendary Super Saiyan", "transform_power": 1.7,
+        "desc": "The Legendary Super Saiyan, pure raw power",
         "videos": {
             "idle":      "https://litter.catbox.moe/i3pshj.mp4",
             "transform": "https://litter.catbox.moe/tqy9md.mp4",
@@ -108,17 +119,13 @@ FIGHTERS = {
             "win":       None,
             "lose":      "https://litter.catbox.moe/wr191h.mp4",
         },
-        "transform_name": "Legendary Super Saiyan",
-        "transform_power": 1.7,
-        "hp": 110,
-        "desc": "The Legendary Super Saiyan, pure raw power",
     },
     "vegito": {
-        "name": "Vegito",
-        "emoji": "⚡",
-        "team": "hero",
-        "base_power": 9800,
-        "signature": "Spirit Sword",
+        "name": "Vegito", "emoji": "⚡", "team": "hero",
+        "price": 8_000,
+        "base_power": 9800, "hp": 105, "signature": "Spirit Sword",
+        "transform_name": "Super Saiyan Blue", "transform_power": 1.8,
+        "desc": "The fusion of Goku and Vegeta, unstoppable",
         "videos": {
             "idle":      "https://litter.catbox.moe/b9hty6.mp4",
             "transform": None,
@@ -126,17 +133,70 @@ FIGHTERS = {
             "win":       None,
             "lose":      "https://litter.catbox.moe/9rk2cf.mp4",
         },
-        "transform_name": "Super Saiyan Blue",
-        "transform_power": 1.8,
-        "hp": 105,
-        "desc": "The fusion of Goku and Vegeta, unstoppable",
     },
+    "gohan": {
+        "name": "Gohan", "emoji": "🟣", "team": "hero",
+        "price": 4_000,
+        "base_power": 8800, "hp": 100, "signature": "Masenko",
+        "transform_name": "Beast Mode", "transform_power": 1.65,
+        "desc": "Son of Goku, hidden power unleashed",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "trunks": {
+        "name": "Future Trunks", "emoji": "🔵", "team": "hero",
+        "price": 3_500,
+        "base_power": 7800, "hp": 90, "signature": "Burning Attack",
+        "transform_name": "Super Saiyan Rage", "transform_power": 1.5,
+        "desc": "Warrior from the future who slays gods",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "piccolo": {
+        "name": "Piccolo", "emoji": "🟢", "team": "hero",
+        "price": 2_000,
+        "base_power": 6000, "hp": 85, "signature": "Special Beam Cannon",
+        "transform_name": "Orange Piccolo", "transform_power": 1.4,
+        "desc": "The Namekian warrior, Gohan's mentor",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "krillin": {
+        "name": "Krillin", "emoji": "⚪", "team": "hero",
+        "price": 500,
+        "base_power": 3000, "hp": 70, "signature": "Destructo Disc",
+        "transform_name": "Unlocked Potential", "transform_power": 1.3,
+        "desc": "Earth's strongest human, surprisingly lethal",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "android17": {
+        "name": "Android 17", "emoji": "🔵", "team": "hero",
+        "price": 3_000,
+        "base_power": 7000, "hp": 88, "signature": "Power Blitz",
+        "transform_name": "Barrier Overload", "transform_power": 1.35,
+        "desc": "Infinite energy android, Tournament MVP",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "bardock": {
+        "name": "Bardock", "emoji": "🟠", "team": "hero",
+        "price": 2_500,
+        "base_power": 5500, "hp": 80, "signature": "Riot Javelin",
+        "transform_name": "Super Saiyan", "transform_power": 1.4,
+        "desc": "Low-class warrior, father of Goku",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "gogeta": {
+        "name": "Gogeta", "emoji": "🔴", "team": "hero",
+        "price": 9_000,
+        "base_power": 9900, "hp": 110, "signature": "True Kamehameha",
+        "transform_name": "Super Saiyan Blue", "transform_power": 1.9,
+        "desc": "The mightiest fusion, Goku and Vegeta as one",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    # ── VILLAINS ──────────────────────────────────────────────────────────────
     "goku_black": {
-        "name": "Goku Black",
-        "emoji": "😈",
-        "team": "villain",
-        "base_power": 9100,
-        "signature": "Black Kamehameha",
+        "name": "Goku Black", "emoji": "😈", "team": "villain",
+        "price": 6_000,
+        "base_power": 9100, "hp": 98, "signature": "Black Kamehameha",
+        "transform_name": "Super Saiyan Rose", "transform_power": 1.55,
+        "desc": "Zamasu in Goku's body, corrupted god",
         "videos": {
             "idle":      "https://litter.catbox.moe/itlrio.mp4",
             "transform": None,
@@ -144,17 +204,13 @@ FIGHTERS = {
             "win":       "https://litter.catbox.moe/tyxxbd.mp4",
             "lose":      None,
         },
-        "transform_name": "Super Saiyan Rosé",
-        "transform_power": 1.55,
-        "hp": 98,
-        "desc": "Zamasu in Goku's body, corrupted god",
     },
     "cell": {
-        "name": "Cell",
-        "emoji": "🟢",
-        "team": "villain",
-        "base_power": 7500,
-        "signature": "Solar Kamehameha",
+        "name": "Cell", "emoji": "🟢", "team": "villain",
+        "price": 4_500,
+        "base_power": 7500, "hp": 90, "signature": "Solar Kamehameha",
+        "transform_name": "Perfect Form", "transform_power": 1.4,
+        "desc": "The perfect being, absorber of power",
         "videos": {
             "idle":      "https://litter.catbox.moe/m7j5xf.mp4",
             "transform": None,
@@ -162,312 +218,156 @@ FIGHTERS = {
             "win":       None,
             "lose":      "https://litter.catbox.moe/l1d2fl.mp4",
         },
-        "transform_name": "Perfect Form",
-        "transform_power": 1.4,
-        "hp": 90,
-        "desc": "The perfect being, absorber of power",
-    },
-    # ── Text-only fighters (no videos yet) ───────────────────────────────────
-    "gohan": {
-        "name": "Gohan",
-        "emoji": "🟣",
-        "team": "hero",
-        "base_power": 8800,
-        "signature": "Masenko",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Beast Mode",
-        "transform_power": 1.65,
-        "hp": 100,
-        "desc": "Son of Goku, hidden power unleashed",
-    },
-    "trunks": {
-        "name": "Future Trunks",
-        "emoji": "🔵",
-        "team": "hero",
-        "base_power": 7800,
-        "signature": "Burning Attack",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Super Saiyan Rage",
-        "transform_power": 1.5,
-        "hp": 90,
-        "desc": "Warrior from the future who slays gods",
-    },
-    "piccolo": {
-        "name": "Piccolo",
-        "emoji": "🟢",
-        "team": "hero",
-        "base_power": 6000,
-        "signature": "Special Beam Cannon",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Orange Piccolo",
-        "transform_power": 1.4,
-        "hp": 85,
-        "desc": "The Namekian warrior, Gohan's mentor",
-    },
-    "krillin": {
-        "name": "Krillin",
-        "emoji": "⚪",
-        "team": "hero",
-        "base_power": 3000,
-        "signature": "Destructo Disc",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Unlocked Potential",
-        "transform_power": 1.3,
-        "hp": 70,
-        "desc": "Earth's strongest human, surprisingly lethal",
-    },
-    "android17": {
-        "name": "Android 17",
-        "emoji": "🔵",
-        "team": "hero",
-        "base_power": 7000,
-        "signature": "Power Blitz",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Barrier Overload",
-        "transform_power": 1.35,
-        "hp": 88,
-        "desc": "Infinite energy android, Tournament MVP",
-    },
-    "bardock": {
-        "name": "Bardock",
-        "emoji": "🟠",
-        "team": "hero",
-        "base_power": 5500,
-        "signature": "Riot Javelin",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Super Saiyan",
-        "transform_power": 1.4,
-        "hp": 80,
-        "desc": "Low-class warrior, father of Goku",
-    },
-    "gogeta": {
-        "name": "Gogeta",
-        "emoji": "🔴",
-        "team": "hero",
-        "base_power": 9900,
-        "signature": "True Kamehameha",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Super Saiyan Blue",
-        "transform_power": 1.9,
-        "hp": 110,
-        "desc": "The mightiest fusion, Goku and Vegeta as one",
     },
     "frieza": {
-        "name": "Frieza",
-        "emoji": "❄️",
-        "team": "villain",
-        "base_power": 8800,
-        "signature": "Death Ball",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Black Frieza",
-        "transform_power": 1.6,
-        "hp": 95,
+        "name": "Frieza", "emoji": "❄️", "team": "villain",
+        "price": 5_500,
+        "base_power": 8800, "hp": 95, "signature": "Death Ball",
+        "transform_name": "Black Frieza", "transform_power": 1.6,
         "desc": "The galactic emperor, eternal rival",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "jiren": {
-        "name": "Jiren",
-        "emoji": "🔴",
-        "team": "villain",
-        "base_power": 9500,
-        "signature": "Power Impact",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Limit Breaker",
-        "transform_power": 1.7,
-        "hp": 105,
+        "name": "Jiren", "emoji": "🔴", "team": "villain",
+        "price": 7_000,
+        "base_power": 9500, "hp": 105, "signature": "Power Impact",
+        "transform_name": "Limit Breaker", "transform_power": 1.7,
         "desc": "The Pride Trooper who surpassed gods",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "beerus": {
-        "name": "Beerus",
-        "emoji": "💜",
-        "team": "villain",
-        "base_power": 9900,
-        "signature": "Hakai",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "God of Destruction",
-        "transform_power": 1.8,
-        "hp": 115,
+        "name": "Beerus", "emoji": "💜", "team": "villain",
+        "price": 10_000,
+        "base_power": 9900, "hp": 115, "signature": "Hakai",
+        "transform_name": "God of Destruction", "transform_power": 1.8,
         "desc": "The God of Destruction, destroyer of worlds",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "majin_buu": {
-        "name": "Majin Buu",
-        "emoji": "🩷",
-        "team": "villain",
-        "base_power": 7800,
-        "signature": "Chocolate Beam",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Pure Evil Buu",
-        "transform_power": 1.5,
-        "hp": 120,
+        "name": "Majin Buu", "emoji": "🩷", "team": "villain",
+        "price": 4_000,
+        "base_power": 7800, "hp": 120, "signature": "Chocolate Beam",
+        "transform_name": "Pure Evil Buu", "transform_power": 1.5,
         "desc": "The magical monster, can absorb anything",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "zamasu": {
-        "name": "Fused Zamasu",
-        "emoji": "⚡",
-        "team": "villain",
-        "base_power": 8500,
-        "signature": "Holy Wrath",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Divine Overflow",
-        "transform_power": 1.55,
-        "hp": 100,
+        "name": "Fused Zamasu", "emoji": "⚡", "team": "villain",
+        "price": 6_500,
+        "base_power": 8500, "hp": 100, "signature": "Holy Wrath",
+        "transform_name": "Divine Overflow", "transform_power": 1.55,
         "desc": "Immortal god of justice, half-corrupted",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "janemba": {
-        "name": "Janemba",
-        "emoji": "👹",
-        "team": "villain",
-        "base_power": 8200,
-        "signature": "Hell Gate",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Super Janemba",
-        "transform_power": 1.5,
-        "hp": 95,
+        "name": "Janemba", "emoji": "👹", "team": "villain",
+        "price": 5_000,
+        "base_power": 8200, "hp": 95, "signature": "Hell Gate",
+        "transform_name": "Super Janemba", "transform_power": 1.5,
         "desc": "The demon of pure evil energy",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "turles": {
-        "name": "Turles",
-        "emoji": "🌿",
-        "team": "villain",
-        "base_power": 5000,
-        "signature": "Power Ball",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Tree of Might Boost",
-        "transform_power": 1.45,
-        "hp": 78,
+        "name": "Turles", "emoji": "🌿", "team": "villain",
+        "price": 2_000,
+        "base_power": 5000, "hp": 78, "signature": "Power Ball",
+        "transform_name": "Tree of Might Boost", "transform_power": 1.45,
         "desc": "Goku's dark mirror, powered by evil fruit",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "raditz": {
-        "name": "Raditz",
-        "emoji": "⚫",
-        "team": "villain",
-        "base_power": 1500,
-        "signature": "Double Sunday",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Great Ape",
-        "transform_power": 1.3,
-        "hp": 65,
+        "name": "Raditz", "emoji": "⚫", "team": "villain",
+        "price": 500,
+        "base_power": 1500, "hp": 65, "signature": "Double Sunday",
+        "transform_name": "Great Ape", "transform_power": 1.3,
         "desc": "Goku's evil brother, first true villain",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "nappa": {
-        "name": "Nappa",
-        "emoji": "🟤",
-        "team": "villain",
-        "base_power": 4000,
-        "signature": "Bomber DX",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Full Power",
-        "transform_power": 1.3,
-        "hp": 85,
+        "name": "Nappa", "emoji": "🟤", "team": "villain",
+        "price": 1_000,
+        "base_power": 4000, "hp": 85, "signature": "Bomber DX",
+        "transform_name": "Full Power", "transform_power": 1.3,
         "desc": "Vegeta's brutal elite soldier",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "android21": {
-        "name": "Android 21",
-        "emoji": "🩷",
-        "team": "villain",
-        "base_power": 8000,
-        "signature": "Conquer the World",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Majin Form",
-        "transform_power": 1.55,
-        "hp": 92,
+        "name": "Android 21", "emoji": "🩷", "team": "villain",
+        "price": 5_500,
+        "base_power": 8000, "hp": 92, "signature": "Conquer the World",
+        "transform_name": "Majin Form", "transform_power": 1.55,
         "desc": "The hungry researcher who absorbs power",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "baby_vegeta": {
-        "name": "Baby Vegeta",
-        "emoji": "👶",
-        "team": "villain",
-        "base_power": 7200,
-        "signature": "Revenge Death Ball",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Golden Great Ape",
-        "transform_power": 1.5,
-        "hp": 90,
+        "name": "Baby Vegeta", "emoji": "👶", "team": "villain",
+        "price": 4_500,
+        "base_power": 7200, "hp": 90, "signature": "Revenge Death Ball",
+        "transform_name": "Golden Great Ape", "transform_power": 1.5,
         "desc": "Tuffle parasite controlling Vegeta's body",
-    },
-    "whis": {
-        "name": "Whis",
-        "emoji": "⚪",
-        "team": "neutral",
-        "base_power": 9999,
-        "signature": "Staff Strike",
         "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Angel Mode",
-        "transform_power": 2.0,
-        "hp": 999,
-        "desc": "The angelic attendant, beyond all gods",
     },
-    "zeno": {
-        "name": "Zeno",
-        "emoji": "👑",
-        "team": "neutral",
-        "base_power": 99999,
-        "signature": "Erase",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "True Form",
-        "transform_power": 3.0,
-        "hp": 9999,
-        "desc": "The Omni-King, erases universes for fun",
-    },
+    # ── NEUTRAL ───────────────────────────────────────────────────────────────
     "hit": {
-        "name": "Hit",
-        "emoji": "🕐",
-        "team": "neutral",
-        "base_power": 8000,
-        "signature": "Time Skip",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Pure Progress",
-        "transform_power": 1.6,
-        "hp": 90,
+        "name": "Hit", "emoji": "🕐", "team": "neutral",
+        "price": 5_000,
+        "base_power": 8000, "hp": 90, "signature": "Time Skip",
+        "transform_name": "Pure Progress", "transform_power": 1.6,
         "desc": "The legendary assassin who skips time",
-    },
-    "vegito_blue": {
-        "name": "Vegito Blue",
-        "emoji": "🔵",
-        "team": "neutral",
-        "base_power": 9950,
-        "signature": "Final Kamehameha",
         "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "SSB Kaioken",
-        "transform_power": 2.0,
-        "hp": 108,
-        "desc": "The ultimate fusion at peak godly power",
     },
     "kefla": {
-        "name": "Kefla",
-        "emoji": "💚",
-        "team": "neutral",
-        "base_power": 8200,
-        "signature": "Blaster Meteor",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "Super Saiyan 2",
-        "transform_power": 1.5,
-        "hp": 95,
+        "name": "Kefla", "emoji": "💚", "team": "neutral",
+        "price": 4_500,
+        "base_power": 8200, "hp": 95, "signature": "Blaster Meteor",
+        "transform_name": "Super Saiyan 2", "transform_power": 1.5,
         "desc": "Universe 6's female Saiyan fusion",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
     },
     "toppo": {
-        "name": "Toppo",
-        "emoji": "🟠",
-        "team": "neutral",
-        "base_power": 8800,
-        "signature": "Hakai Blast",
-        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "God of Destruction Mode",
-        "transform_power": 1.65,
-        "hp": 100,
+        "name": "Toppo", "emoji": "🟠", "team": "neutral",
+        "price": 5_500,
+        "base_power": 8800, "hp": 100, "signature": "Hakai Blast",
+        "transform_name": "God of Destruction Mode", "transform_power": 1.65,
         "desc": "Pride Trooper leader who embraced destruction",
-    },
-    "grand_priest": {
-        "name": "Grand Priest",
-        "emoji": "✨",
-        "team": "neutral",
-        "base_power": 99990,
-        "signature": "Divine Strike",
         "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
-        "transform_name": "True Divinity",
-        "transform_power": 2.5,
-        "hp": 5000,
-        "desc": "Father of angels, second only to Zeno",
     },
+    "whis": {
+        "name": "Whis", "emoji": "⚪", "team": "neutral",
+        "price": 15_000,
+        "base_power": 9999, "hp": 999, "signature": "Staff Strike",
+        "transform_name": "Angel Mode", "transform_power": 2.0,
+        "desc": "The angelic attendant, beyond all gods",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+    "zeno": {
+        "name": "Zeno", "emoji": "👑", "team": "neutral",
+        "price": 50_000,
+        "base_power": 99999, "hp": 9999, "signature": "Erase",
+        "transform_name": "True Form", "transform_power": 3.0,
+        "desc": "The Omni-King, erases universes for fun",
+        "videos": {"idle": None, "transform": None, "attack": None, "win": None, "lose": None},
+    },
+}
+
+FREE_FIGHTER = "goku"
+
+# ── Team → Bot API 9.4 button style ──────────────────────────────────────────
+#   hero    → "primary"  (Blue)
+#   villain → "danger"   (Red)
+#   neutral → "success"  (Green)
+
+TEAM_STYLE: dict[str, str] = {
+    "hero":    "primary",
+    "villain": "danger",
+    "neutral": "success",
+}
+
+# Legacy emoji dots kept for text labels only (not needed on buttons anymore)
+TEAM_COLOR: dict[str, str] = {
+    "hero":    "🔵",
+    "villain": "🔴",
+    "neutral": "⚪",
 }
 
 # ── Dragon Balls ──────────────────────────────────────────────────────────────
@@ -478,15 +378,14 @@ TOTAL_BALLS   = 7
 WISH_COOLDOWN = 7 * 24 * 3600
 
 WISHES = {
-    "kakera":   {"label": "💰 10,000 Kakera",     "desc": "Receive 10,000 kakera instantly."},
-    "xp":       {"label": "⭐ 2,000 XP",          "desc": "Gain 2,000 XP toward your level."},
-    "power":    {"label": "⚡ Power Level +500",   "desc": "Boost your fighter's power level."},
-    "immunity": {"label": "🛡 1-week immunity",    "desc": "Cannot be gbanned for 7 days."},
-    "reroll":   {"label": "🎲 Daily reroll ×2",    "desc": "Double kakera from your next daily."},
+    "kakera":   {"label": "💰  10,000 Kakera",      "desc": "Receive 10,000 kakera instantly."},
+    "xp":       {"label": "⭐  2,000 XP",            "desc": "Gain 2,000 XP toward your level."},
+    "fighter":  {"label": "🎁  Free Random Fighter", "desc": "Get a random DB fighter for free."},
+    "immunity": {"label": "🛡  1-Week Immunity",     "desc": "Cannot be gbanned for 7 days."},
+    "reroll":   {"label": "🎲  Daily Reroll x2",     "desc": "Double kakera from your next daily."},
 }
 
-# ── Power Upgrade Costs ───────────────────────────────────────────────────────
-# Each tier costs more — upgrades are additive power boosts
+# ── Power Upgrade Tiers ───────────────────────────────────────────────────────
 
 UPGRADE_TIERS = [
     {"tier": 1, "boost": 500,   "cost": 1_000,   "label": "Tier I — Awakening"},
@@ -498,14 +397,14 @@ UPGRADE_TIERS = [
 ]
 
 POWER_TIERS = [
-    (0,     2000,   "Earthling"),
-    (2001,  6000,   "Saiyan"),
-    (6001,  12000,  "Super Saiyan"),
-    (12001, 25000,  "Super Saiyan 2"),
-    (25001, 50000,  "Super Saiyan 3"),
-    (50001, 100000, "Super Saiyan God"),
-    (100001,250000, "Ultra Instinct"),
-    (250001,999999, "Omni-God"),
+    (0,      2000,   "Earthling"),
+    (2001,   6000,   "Saiyan"),
+    (6001,   12000,  "Super Saiyan"),
+    (12001,  25000,  "Super Saiyan 2"),
+    (25001,  50000,  "Super Saiyan 3"),
+    (50001,  100000, "Super Saiyan God"),
+    (100001, 250000, "Ultra Instinct"),
+    (250001, 999999, "Omni-God"),
 ]
 
 
@@ -516,22 +415,76 @@ def _power_tier_name(pl: int) -> str:
     return "Beyond Mortal"
 
 
-# ── Active fights tracker (in-memory) ─────────────────────────────────────────
+# ── Active fights (in-memory) ─────────────────────────────────────────────────
 
-_active_fights: dict[str, dict] = {}  # fight_id -> state
+_active_fights: dict[str, dict] = {}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+#  RAW BUTTON HELPERS  —  Bot API 9.4 colored InlineKeyboardButton
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  Pyrogram's high-level InlineKeyboardButton wraps the raw
+#  KeyboardButtonCallback type but doesn't pass through the `style` field yet.
+#  We build the raw markup directly.
+#
+#  raw_types.KeyboardButtonCallback(text, data, style?) is what Telegram uses
+#  under the hood for callback buttons.  The `style` kwarg maps to the Bot API
+#  9.4 `style` field: "primary" | "success" | "danger".
+#
+#  raw_types.ReplyInlineMarkup(rows=[raw_types.KeyboardButtonRow(buttons=[...])])
+#  is the raw equivalent of InlineKeyboardMarkup.
+# ─────────────────────────────────────────────────────────────────────────────
 
-async def _send_video_or_text(m: Message, url: str | None, caption: str):
-    """Send video if URL available, else send text."""
-    if url:
-        try:
-            await m.reply_video(url, caption=caption)
-            return
-        except Exception:
-            pass
-    await m.reply(caption)
+def _raw_btn(text: str, data: str, style: str | None = None) -> raw_types.KeyboardButtonCallback:
+    """
+    Build one raw callback inline button.
+
+    style: "primary" (blue) | "success" (green) | "danger" (red) | None (default)
+    """
+    kwargs = {"text": text, "data": data.encode()}
+    if style:
+        kwargs["style"] = style
+    return raw_types.KeyboardButtonCallback(**kwargs)
+
+
+def _raw_markup(rows: list[list[raw_types.KeyboardButtonCallback]]) -> raw_types.ReplyInlineMarkup:
+    """Wrap a list-of-lists of raw buttons into a ReplyInlineMarkup."""
+    return raw_types.ReplyInlineMarkup(
+        rows=[raw_types.KeyboardButtonRow(buttons=row) for row in rows]
+    )
+
+
+def _team_style(team: str) -> str:
+    """Map fighter team to Bot API 9.4 button style string."""
+    return TEAM_STYLE.get(team, "primary")
+
+
+# ── DB Helpers ────────────────────────────────────────────────────────────────
+
+async def _get_owned(uid: int) -> list[str]:
+    doc = await _col("db_owned_fighters").find_one({"user_id": uid})
+    if not doc:
+        await _col("db_owned_fighters").insert_one({"user_id": uid, "fighters": [FREE_FIGHTER]})
+        return [FREE_FIGHTER]
+    owned = doc.get("fighters", [FREE_FIGHTER])
+    if FREE_FIGHTER not in owned:
+        owned.append(FREE_FIGHTER)
+    return owned
+
+
+async def _add_owned(uid: int, key: str):
+    await _col("db_owned_fighters").update_one(
+        {"user_id": uid}, {"$addToSet": {"fighters": key}}, upsert=True,
+    )
+
+
+async def _get_upgrades(uid: int) -> dict:
+    doc = await _col("db_upgrades").find_one({"user_id": uid})
+    if not doc:
+        doc = {"user_id": uid, "tier": 0, "bonus_power": 0, "total_spent": 0}
+        await _col("db_upgrades").insert_one(doc)
+    return doc
 
 
 async def _get_user_balls(uid: int) -> dict:
@@ -547,73 +500,314 @@ async def _has_all_balls(uid: int) -> bool:
     return len(set(doc.get("balls", []))) >= TOTAL_BALLS
 
 
-async def _get_fighter(uid: int) -> dict | None:
-    return await _col("db_fighters").find_one({"user_id": uid})
+# ── UI / Keyboard Helpers ─────────────────────────────────────────────────────
 
-
-async def _get_upgrades(uid: int) -> dict:
-    doc = await _col("db_upgrades").find_one({"user_id": uid})
-    if not doc:
-        doc = {"user_id": uid, "tier": 0, "bonus_power": 0, "total_spent": 0}
-        await _col("db_upgrades").insert_one(doc)
-    return doc
-
-
-def _fighter_power(fighter: dict, upgrades: dict) -> int:
-    key     = fighter.get("character_key", "goku")
-    char    = FIGHTERS.get(key, FIGHTERS["goku"])
-    base    = char["base_power"]
-    bonus   = upgrades.get("bonus_power", 0)
-    pl_bonus = fighter.get("pl_bonus", 0)
-    return base + bonus + pl_bonus
-
-
-def _build_fight_hp_bar(hp: int, max_hp: int = 100) -> str:
-    filled = max(0, min(10, int(hp / max_hp * 10)))
+def _hp_bar(hp: int, max_hp: int) -> str:
+    filled = max(0, min(10, int(hp / max(max_hp, 1) * 10)))
     return "🟩" * filled + "⬛" * (10 - filled)
 
 
-# ── Character Select ──────────────────────────────────────────────────────────
-
-def _char_select_keyboard(page: int = 0, fight_id: str = "") -> IKM:
+def _shop_keyboard(page: int = 0, uid: int = 0) -> raw_types.ReplyInlineMarkup:
+    """
+    Shop grid — each fighter button is colored by team:
+      hero → primary (blue) | villain → danger (red) | neutral → success (green)
+    """
     keys     = list(FIGHTERS.keys())
-    per_page = 8
+    per_page = 6
     start    = page * per_page
     chunk    = keys[start:start + per_page]
     rows     = []
-
-    # Two buttons per row
     for i in range(0, len(chunk), 2):
         row = []
         for key in chunk[i:i+2]:
-            c = FIGHTERS[key]
-            row.append(IKB(
-                f"{c['emoji']} {c['name']}",
-                callback_data=f"dbpick:{fight_id}:{key}"
+            c         = FIGHTERS[key]
+            style     = _team_style(c["team"])
+            price_str = "FREE" if c["price"] == 0 else f"{c['price']:,}💰"
+            row.append(_raw_btn(
+                f"{c['name']} · {price_str}",
+                f"dbshop_view:{uid}:{key}:{page}",
+                style=style,
             ))
         rows.append(row)
-
-    # Navigation
+    # Nav row (default style)
     nav = []
     if page > 0:
-        nav.append(IKB("◀️ Prev", callback_data=f"dbpage:{fight_id}:{page-1}"))
+        nav.append(_raw_btn("◀️ Prev", f"dbshop_page:{uid}:{page-1}"))
     if start + per_page < len(keys):
-        nav.append(IKB("Next ▶️", callback_data=f"dbpage:{fight_id}:{page+1}"))
+        nav.append(_raw_btn("Next ▶️", f"dbshop_page:{uid}:{page+1}"))
     if nav:
         rows.append(nav)
-
-    return IKM(rows)
-
-
-def _action_keyboard(fight_id: str, uid: int) -> IKM:
-    return IKM([[
-        IKB("⚔️ Attack",    callback_data=f"dbact:{fight_id}:{uid}:attack"),
-        IKB("💥 Special",   callback_data=f"dbact:{fight_id}:{uid}:special"),
-        IKB("🌀 Transform", callback_data=f"dbact:{fight_id}:{uid}:transform"),
-    ]])
+    # Bottom quick-links — primary (blue)
+    rows.append([
+        _raw_btn("🥋 My Fighters", f"dbshop_mine:{uid}", style="primary"),
+        _raw_btn("⚡ Power Up",    f"dbshop_pwrup:{uid}", style="success"),
+    ])
+    return _raw_markup(rows)
 
 
-# ── /dbfight Command ──────────────────────────────────────────────────────────
+def _owned_pick_keyboard(
+    owned: list[str], fight_id: str, role: str, page: int = 0
+) -> raw_types.ReplyInlineMarkup:
+    """Pick keyboard — fighter buttons colored by their team."""
+    per_page = 6
+    start    = page * per_page
+    chunk    = owned[start:start + per_page]
+    rows     = []
+    for i in range(0, len(chunk), 2):
+        row = []
+        for key in chunk[i:i+2]:
+            c     = FIGHTERS.get(key, {})
+            style = _team_style(c.get("team", "neutral"))
+            row.append(_raw_btn(
+                c.get("name", key),
+                f"dbpick:{fight_id}:{role}:{key}",
+                style=style,
+            ))
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(_raw_btn("◀️", f"dbpick_page:{fight_id}:{role}:{page-1}"))
+    if start + per_page < len(owned):
+        nav.append(_raw_btn("▶️", f"dbpick_page:{fight_id}:{role}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    return _raw_markup(rows)
+
+
+def _action_keyboard(
+    fight_id: str, uid: int, transformed: bool
+) -> raw_types.ReplyInlineMarkup:
+    """
+    Combat buttons — colored by action type:
+      Attack    → primary (blue)
+      Special   → success (green)
+      Transform → danger  (red)
+    """
+    rows = [
+        [_raw_btn("⚔️  ──  A T T A C K  ──", f"dbact:{fight_id}:{uid}:attack",    style="primary")],
+        [_raw_btn("💥  ──  SPECIAL MOVE  ──", f"dbact:{fight_id}:{uid}:special",   style="success")],
+    ]
+    if not transformed:
+        rows.append([_raw_btn("🌀  ══  T R A N S F O R M  ══", f"dbact:{fight_id}:{uid}:transform", style="danger")])
+    return _raw_markup(rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHOP
+# ══════════════════════════════════════════════════════════════════════════════
+
+@_soul.app.on_message(filters.command(["dbshop", "buychar", "dbstore"]))
+async def dbshop_cmd(_, m: Message):
+    uid = m.from_user.id
+    await get_or_create_user(uid, m.from_user.username or "", m.from_user.first_name or "", m.from_user.last_name or "")
+    bal   = await get_balance(uid)
+    owned = await _get_owned(uid)
+
+    await m.reply(
+        f"🛒 **Dragon Ball Fighter Shop**\n\n"
+        f"💰 Balance: `{bal:,}` kakera\n"
+        f"🥋 Owned: `{len(owned)}/{len(FIGHTERS)}` fighters\n\n"
+        f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n"
+        f"Pick a fighter to view & buy:",
+        reply_markup=_shop_keyboard(page=0, uid=uid),
+    )
+
+
+@_soul.app.on_callback_query(filters.regex(r"^dbshop_page:(\d+):(\d+)$"))
+async def dbshop_page_cb(_, cq: CallbackQuery):
+    _, uid_str, page_str = cq.data.split(":")
+    uid = int(uid_str)
+    if cq.from_user.id != uid:
+        await cq.answer("Not your shop!", show_alert=True)
+        return
+    bal   = await get_balance(uid)
+    owned = await _get_owned(uid)
+    page  = int(page_str)
+    await cq.message.edit_text(
+        f"🛒 **Dragon Ball Fighter Shop**\n\n"
+        f"💰 Balance: `{bal:,}` kakera\n"
+        f"🥋 Owned: `{len(owned)}/{len(FIGHTERS)}` fighters\n\n"
+        f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n"
+        f"Pick a fighter to view & buy:",
+        reply_markup=_shop_keyboard(page=page, uid=uid),
+    )
+    await cq.answer()
+
+
+@_soul.app.on_callback_query(filters.regex(r"^dbshop_mine:(\d+)$"))
+async def dbshop_mine_cb(_, cq: CallbackQuery):
+    uid = int(cq.data.split(":")[1])
+    if cq.from_user.id != uid:
+        await cq.answer("Not your data!", show_alert=True)
+        return
+    owned = await _get_owned(uid)
+    lines = []
+    for k in owned:
+        c = FIGHTERS.get(k)
+        if c:
+            dot = TEAM_COLOR.get(c["team"], "⚪")
+            lines.append(f"{dot} **{c['name']}** — `{c['base_power']:,}` PL")
+    await cq.answer()
+    await cq.message.reply(
+        f"🥋 **Your Fighters** (`{len(owned)}/{len(FIGHTERS)}`)\n\n"
+        + ("\n".join(lines) if lines else "_None yet_")
+    )
+
+
+@_soul.app.on_callback_query(filters.regex(r"^dbshop_pwrup:(\d+)$"))
+async def dbshop_pwrup_cb(_, cq: CallbackQuery):
+    await cq.answer("Use /dbupgrade to power up!", show_alert=True)
+
+
+@_soul.app.on_callback_query(filters.regex(r"^dbshop_view:(\d+):(\w+):(\d+)$"))
+async def dbshop_view_cb(_, cq: CallbackQuery):
+    _, uid_str, key, page_str = cq.data.split(":")
+    uid = int(uid_str)
+    if cq.from_user.id != uid:
+        await cq.answer("Not your shop!", show_alert=True)
+        return
+
+    char = FIGHTERS.get(key)
+    if not char:
+        await cq.answer("Unknown fighter!", show_alert=True)
+        return
+
+    owned     = await _get_owned(uid)
+    bal       = await get_balance(uid)
+    page      = int(page_str)
+    dot       = TEAM_COLOR.get(char["team"], "⚪")
+    team_icon = {"hero": "🦸 Hero", "villain": "😈 Villain", "neutral": "⚖️ Neutral"}.get(char["team"], "")
+    price_str = "**FREE**" if char["price"] == 0 else f"`{char['price']:,}` kakera"
+    already   = key in owned
+    style     = _team_style(char["team"])
+
+    if already:
+        status = "✅ **OWNED**"
+    elif bal >= char["price"]:
+        status = f"💰 Price: {price_str}\n✅ You can afford this!"
+    else:
+        status = f"💰 Price: {price_str}\n❌ Not enough kakera"
+
+    rows = []
+    if not already and char["price"] > 0:
+        rows.append([_raw_btn(
+            f"🛒  Buy {char['name']} — {char['price']:,} 💰",
+            f"dbbuy:{uid}:{key}:{page}",
+            style=style,
+        )])
+    elif not already:
+        rows.append([_raw_btn(
+            f"🎁  Claim {char['name']} FREE",
+            f"dbbuy:{uid}:{key}:{page}",
+            style="success",
+        )])
+    rows.append([_raw_btn(f"◀️ Back to Shop", f"dbshop_page:{uid}:{page}")])
+
+    text = (
+        f"{dot} **{char['name']}**  {char['emoji']}\n"
+        f"{team_icon} | ⚡ PL: `{char['base_power']:,}`\n"
+        f"❤️ HP: `{char['hp']}` | 💥 `{char['signature']}`\n"
+        f"🌟 Transform: **{char['transform_name']}** (x{char['transform_power']})\n"
+        f"📖 _{char['desc']}_\n\n"
+        f"{status}"
+    )
+
+    video = char["videos"].get("idle")
+    try:
+        if video:
+            await cq.message.edit_caption(caption=text, reply_markup=_raw_markup(rows))
+        else:
+            await cq.message.edit_text(text, reply_markup=_raw_markup(rows))
+    except Exception:
+        await cq.message.edit_text(text, reply_markup=_raw_markup(rows))
+    await cq.answer()
+
+
+@_soul.app.on_callback_query(filters.regex(r"^dbbuy:(\d+):(\w+):(\d+)$"))
+async def dbbuy_cb(_, cq: CallbackQuery):
+    _, uid_str, key, page_str = cq.data.split(":")
+    uid = int(uid_str)
+    if cq.from_user.id != uid:
+        await cq.answer("Not your purchase!", show_alert=True)
+        return
+
+    char = FIGHTERS.get(key)
+    if not char:
+        await cq.answer("Unknown fighter!", show_alert=True)
+        return
+
+    owned = await _get_owned(uid)
+    if key in owned:
+        await cq.answer("You already own this fighter!", show_alert=True)
+        return
+
+    price = char["price"]
+    if price > 0:
+        bal = await get_balance(uid)
+        if bal < price:
+            await cq.answer(f"❌ Need {price:,} kakera, you have {bal:,}!", show_alert=True)
+            return
+        await deduct_balance(uid, price)
+
+    await _add_owned(uid, key)
+    owned = await _get_owned(uid)
+    dot   = TEAM_COLOR.get(char["team"], "⚪")
+    style = _team_style(char["team"])
+
+    await cq.answer(f"✅ {char['name']} is yours!", show_alert=True)
+
+    back_btn = _raw_markup([[_raw_btn(f"◀️ Back to Shop", f"dbshop_page:{uid}:{page_str}", style=style)]])
+
+    video = char["videos"].get("idle")
+    if video:
+        try:
+            await cq.message.reply_video(
+                video,
+                caption=(
+                    f"🎉 {dot} **{char['emoji']} {char['name']} Purchased!**\n\n"
+                    f"⚡ PL: `{char['base_power']:,}` | 💥 {char['signature']}\n"
+                    f"🌟 Transform: **{char['transform_name']}**\n\n"
+                    f"Use `/dbfight @user` to battle!"
+                ),
+            )
+            return
+        except Exception:
+            pass
+
+    await cq.message.edit_text(
+        f"🎉 {dot} **{char['emoji']} {char['name']} Purchased!**\n\n"
+        f"⚡ PL: `{char['base_power']:,}` | 💥 {char['signature']}\n"
+        f"🌟 Transform: **{char['transform_name']}**\n"
+        f"🥋 You now own `{len(owned)}/{len(FIGHTERS)}` fighters.\n\n"
+        f"Use `/dbfight @user` to battle!",
+        reply_markup=back_btn,
+    )
+
+
+@_soul.app.on_message(filters.command(["mydb", "myfighters", "dbcollection"]))
+async def mydb_cmd(_, m: Message):
+    target = m.reply_to_message.from_user if m.reply_to_message else m.from_user
+    owned  = await _get_owned(target.id)
+
+    lines = []
+    for key in owned:
+        c = FIGHTERS.get(key)
+        if c:
+            dot = TEAM_COLOR.get(c["team"], "⚪")
+            lines.append(f"{dot} **{c['name']}** — `{c['base_power']:,}` PL | {c['signature']}")
+
+    await m.reply(
+        f"🥋 **{target.first_name}'s Dragon Ball Fighters**\n\n"
+        f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n\n"
+        + ("\n".join(lines) if lines else "_No fighters yet — use /dbshop!_")
+        + f"\n\n`{len(owned)}/{len(FIGHTERS)}` fighters owned\n"
+        f"💡 Buy more with `/dbshop`"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGHT SYSTEM
+# ══════════════════════════════════════════════════════════════════════════════
 
 @_soul.app.on_message(filters.command(["dbfight", "dragonbattle", "dbattle"]))
 async def dbfight_cmd(_, m: Message):
@@ -621,7 +815,9 @@ async def dbfight_cmd(_, m: Message):
         await m.reply(
             "⚔️ **Dragon Ball Fight!**\n\n"
             "Reply to someone to challenge them!\n"
-            "Usage: `/dbfight` (reply to opponent)"
+            "`/dbfight` (reply to opponent)\n\n"
+            "🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n"
+            "💡 Buy fighters first with `/dbshop`!"
         )
         return
 
@@ -629,168 +825,171 @@ async def dbfight_cmd(_, m: Message):
     opponent   = m.reply_to_message.from_user
 
     if opponent.id == challenger.id:
-        await m.reply("❌ You can't fight yourself!")
+        await m.reply("❌ Can't fight yourself!")
         return
     if opponent.is_bot:
         await m.reply("❌ Bots don't fight!")
         return
 
     await get_or_create_user(challenger.id, challenger.username or "", challenger.first_name or "", challenger.last_name or "")
-    await get_or_create_user(opponent.id, opponent.username or "", opponent.first_name or "", opponent.last_name or "")
+    await get_or_create_user(opponent.id,   opponent.username or "",   opponent.first_name or "",   opponent.last_name or "")
 
-    fight_id = f"{challenger.id}_{opponent.id}_{int(datetime.utcnow().timestamp())}"
+    c_owned = await _get_owned(challenger.id)
+    o_owned = await _get_owned(opponent.id)
+
+    fight_id = f"{challenger.id}v{opponent.id}_{int(datetime.utcnow().timestamp())}"
 
     _active_fights[fight_id] = {
-        "challenger_id":   challenger.id,
-        "challenger_name": challenger.first_name,
-        "opponent_id":     opponent.id,
-        "opponent_name":   opponent.first_name,
-        "chat_id":         m.chat.id,
-        "state":           "picking_challenger",
-        "challenger_char": None,
-        "opponent_char":   None,
-        "challenger_hp":   100,
-        "opponent_hp":     100,
+        "challenger_id":          challenger.id,
+        "challenger_name":        challenger.first_name,
+        "opponent_id":            opponent.id,
+        "opponent_name":          opponent.first_name,
+        "challenger_char":        None,
+        "opponent_char":          None,
+        "challenger_hp":          100,
+        "opponent_hp":            100,
         "challenger_transformed": False,
         "opponent_transformed":   False,
-        "turn":            challenger.id,
-        "round":           1,
-        "created_at":      datetime.utcnow(),
+        "turn":  challenger.id,
+        "round": 1,
+        "state": "picking_challenger",
     }
 
-    await m.reply_video(
-        FIGHTERS["goku"]["videos"]["idle"],
-        caption=(
-            f"🐉 **DRAGON BALL FIGHT CHALLENGE!** 🐉\n\n"
-            f"⚔️ **{challenger.first_name}** challenges **{opponent.first_name}**!\n\n"
-            f"**{challenger.first_name}** — pick your fighter:"
-        ),
-        reply_markup=_char_select_keyboard(page=0, fight_id=f"{fight_id}:c"),
+    goku_video   = FIGHTERS["goku"]["videos"]["idle"]
+    pick_caption = (
+        f"🐉 **DRAGON BALL FIGHT!** 🐉\n\n"
+        f"🔵 **{challenger.first_name}**  ⚔️  **{opponent.first_name}** 🔴\n\n"
+        f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n\n"
+        f"**{challenger.first_name}** — pick your fighter:"
     )
+    try:
+        await m.reply_video(
+            goku_video,
+            caption=pick_caption,
+            reply_markup=_owned_pick_keyboard(c_owned, fight_id, "c"),
+        )
+    except Exception:
+        await m.reply(pick_caption, reply_markup=_owned_pick_keyboard(c_owned, fight_id, "c"))
 
 
-# ── Page navigation ───────────────────────────────────────────────────────────
-
-@_soul.app.on_callback_query(filters.regex(r"^dbpage:(.+):(\d+)$"))
-async def dbpage_cb(_, cq: CallbackQuery):
-    parts   = cq.data.split(":")
-    fight_id_raw = ":".join(parts[1:-1])
-    page    = int(parts[-1])
-
-    # Determine who is picking
-    fight_id = fight_id_raw.rsplit(":", 1)[0] if ":" in fight_id_raw else fight_id_raw
-    suffix   = fight_id_raw.rsplit(":", 1)[1] if ":" in fight_id_raw else "c"
-
+@_soul.app.on_callback_query(filters.regex(r"^dbpick_page:([^:]+):([co]):(\d+)$"))
+async def dbpick_page_cb(_, cq: CallbackQuery):
+    _, fight_id, role, page_str = cq.data.split(":", 3)
+    page  = int(page_str)
     state = _active_fights.get(fight_id)
     if not state:
         await cq.answer("Fight expired!", show_alert=True)
         return
-
-    picking_uid = state["challenger_id"] if suffix == "c" else state["opponent_id"]
-    if cq.from_user.id != picking_uid:
-        await cq.answer("It's not your turn to pick!", show_alert=True)
+    pick_uid = state["challenger_id"] if role == "c" else state["opponent_id"]
+    if cq.from_user.id != pick_uid:
+        await cq.answer("Not your pick!", show_alert=True)
         return
-
-    await cq.message.edit_reply_markup(
-        reply_markup=_char_select_keyboard(page=page, fight_id=f"{fight_id}:{suffix}")
-    )
+    owned = await _get_owned(pick_uid)
+    await cq.message.edit_reply_markup(reply_markup=_owned_pick_keyboard(owned, fight_id, role, page))
     await cq.answer()
 
 
-# ── Character picked ──────────────────────────────────────────────────────────
-
-@_soul.app.on_callback_query(filters.regex(r"^dbpick:(.+):(\w+)$"))
+@_soul.app.on_callback_query(filters.regex(r"^dbpick:([^:]+):([co]):(\w+)$"))
 async def dbpick_cb(_, cq: CallbackQuery):
     parts    = cq.data.split(":")
-    char_key = parts[-1]
-    fight_id_raw = ":".join(parts[1:-1])
-
-    fight_id = fight_id_raw.rsplit(":", 1)[0] if ":" in fight_id_raw else fight_id_raw
-    suffix   = fight_id_raw.rsplit(":", 1)[1] if ":" in fight_id_raw else "c"
+    key      = parts[-1]
+    role     = parts[-2]
+    fight_id = ":".join(parts[1:-2])
 
     state = _active_fights.get(fight_id)
     if not state:
         await cq.answer("Fight expired!", show_alert=True)
         return
 
-    char = FIGHTERS.get(char_key)
-    if not char:
-        await cq.answer("Unknown character!", show_alert=True)
+    pick_uid = state["challenger_id"] if role == "c" else state["opponent_id"]
+    if cq.from_user.id != pick_uid:
+        await cq.answer("Not your turn to pick!", show_alert=True)
         return
 
-    if suffix == "c":
-        # Challenger picking
-        if cq.from_user.id != state["challenger_id"]:
-            await cq.answer("You're not the challenger!", show_alert=True)
-            return
-        state["challenger_char"] = char_key
+    owned = await _get_owned(pick_uid)
+    if key not in owned:
+        await cq.answer("You don't own this fighter! Buy from /dbshop", show_alert=True)
+        return
+
+    char = FIGHTERS.get(key)
+    if not char:
+        await cq.answer("Unknown fighter!", show_alert=True)
+        return
+
+    upg   = await _get_upgrades(pick_uid)
+    power = char["base_power"] + upg.get("bonus_power", 0)
+    dot   = TEAM_COLOR.get(char["team"], "⚪")
+
+    if role == "c":
+        state["challenger_char"] = key
         state["challenger_hp"]   = char["hp"]
         state["state"]           = "picking_opponent"
 
-        upgrades = await _get_upgrades(state["challenger_id"])
-        c_power  = char["base_power"] + upgrades.get("bonus_power", 0)
+        o_owned = await _get_owned(state["opponent_id"])
+        await cq.answer(f"You picked {char['name']}!")
+
+        video = char["videos"].get("idle")
+        if video:
+            try:
+                await cq.message.reply_video(
+                    video,
+                    caption=f"{dot} **{state['challenger_name']}** enters as **{char['emoji']} {char['name']}**!\nPL: `{power:,}`",
+                )
+            except Exception:
+                pass
 
         await cq.message.edit_caption(
             caption=(
-                f"✅ **{state['challenger_name']}** chose **{char['emoji']} {char['name']}**!\n"
-                f"⚡ Power: `{c_power:,}` | 💪 Signature: **{char['signature']}**\n\n"
+                f"✅ {dot} **{state['challenger_name']}** chose **{char['emoji']} {char['name']}**!\n"
+                f"⚡ PL: `{power:,}` | 💥 {char['signature']}\n\n"
+                f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n\n"
                 f"Now **{state['opponent_name']}** — pick your fighter:"
             ),
-            reply_markup=_char_select_keyboard(page=0, fight_id=f"{fight_id}:o"),
+            reply_markup=_owned_pick_keyboard(o_owned, fight_id, "o"),
         )
-        await cq.answer(f"You chose {char['name']}!")
 
     else:
-        # Opponent picking
-        if cq.from_user.id != state["opponent_id"]:
-            await cq.answer("You're not the opponent!", show_alert=True)
-            return
-        state["opponent_char"] = char_key
+        state["opponent_char"] = key
         state["opponent_hp"]   = char["hp"]
         state["state"]         = "fighting"
 
-        c_char = FIGHTERS[state["challenger_char"]]
-        o_char = FIGHTERS[char_key]
+        c_key   = state["challenger_char"]
+        c_char  = FIGHTERS[c_key]
+        c_upg   = await _get_upgrades(state["challenger_id"])
+        o_upg   = await _get_upgrades(state["opponent_id"])
+        c_power = c_char["base_power"] + c_upg.get("bonus_power", 0)
+        o_power = char["base_power"]   + o_upg.get("bonus_power", 0)
+        c_dot   = TEAM_COLOR.get(c_char["team"], "⚪")
 
-        c_upg  = await _get_upgrades(state["challenger_id"])
-        o_upg  = await _get_upgrades(state["opponent_id"])
-        c_pow  = c_char["base_power"] + c_upg.get("bonus_power", 0)
-        o_pow  = o_char["base_power"] + o_upg.get("bonus_power", 0)
+        await cq.answer(f"You picked {char['name']}! FIGHT!")
 
-        c_bar  = _build_fight_hp_bar(state["challenger_hp"], c_char["hp"])
-        o_bar  = _build_fight_hp_bar(state["opponent_hp"],   o_char["hp"])
-
-        await cq.answer(f"You chose {o_char['name']}! Fight starts!")
-
-        # Send idle videos for both fighters
-        try:
-            if c_char["videos"]["idle"]:
+        video = char["videos"].get("idle")
+        if video:
+            try:
                 await cq.message.reply_video(
-                    c_char["videos"]["idle"],
-                    caption=f"🟡 **{state['challenger_name']}** enters as **{c_char['name']}**!"
+                    video,
+                    caption=f"{dot} **{state['opponent_name']}** enters as **{char['emoji']} {char['name']}**!\nPL: `{o_power:,}`",
                 )
-            if o_char["videos"]["idle"]:
-                await cq.message.reply_video(
-                    o_char["videos"]["idle"],
-                    caption=f"🔴 **{state['opponent_name']}** enters as **{o_char['name']}**!"
-                )
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+        c_bar = _hp_bar(state["challenger_hp"], c_char["hp"])
+        o_bar = _hp_bar(state["opponent_hp"],   char["hp"])
 
         await cq.message.edit_caption(
             caption=(
                 f"⚡ **ROUND 1 — FIGHT!** ⚡\n\n"
-                f"{c_char['emoji']} **{state['challenger_name']}** ({c_char['name']}) `{c_pow:,}`\n"
+                f"{c_dot} {c_char['emoji']} **{state['challenger_name']}** ({c_char['name']}) `{c_power:,}`\n"
                 f"❤️ {c_bar} `{state['challenger_hp']}/{c_char['hp']}`\n\n"
-                f"{o_char['emoji']} **{state['opponent_name']}** ({o_char['name']}) `{o_pow:,}`\n"
-                f"❤️ {o_bar} `{state['opponent_hp']}/{o_char['hp']}`\n\n"
-                f"⚔️ **{state['challenger_name']}'s turn!** Choose your move:"
+                f"{dot} {char['emoji']} **{state['opponent_name']}** ({char['name']}) `{o_power:,}`\n"
+                f"❤️ {o_bar} `{state['opponent_hp']}/{char['hp']}`\n\n"
+                f"⚔️ **{state['challenger_name']}'s turn!**"
             ),
-            reply_markup=_action_keyboard(fight_id, state["challenger_id"]),
+            reply_markup=_action_keyboard(fight_id, state["challenger_id"], False),
         )
 
 
-# ── Fight Action ──────────────────────────────────────────────────────────────
+# ── Fight Actions ─────────────────────────────────────────────────────────────
 
 @_soul.app.on_callback_query(filters.regex(r"^dbact:([^:]+):(\d+):(attack|special|transform)$"))
 async def dbact_cb(_, cq: CallbackQuery):
@@ -812,318 +1011,284 @@ async def dbact_cb(_, cq: CallbackQuery):
         await cq.answer("It's not your turn!", show_alert=True)
         return
 
-    # Determine attacker/defender
-    is_challenger = (uid == state["challenger_id"])
-    atk_key  = state["challenger_char"] if is_challenger else state["opponent_char"]
-    def_key  = state["opponent_char"]   if is_challenger else state["challenger_char"]
-    atk_char = FIGHTERS[atk_key]
-    def_char = FIGHTERS[def_key]
-
-    atk_name = state["challenger_name"] if is_challenger else state["opponent_name"]
-    def_name = state["opponent_name"]   if is_challenger else state["challenger_name"]
-    def_uid  = state["opponent_id"]     if is_challenger else state["challenger_id"]
-
-    atk_upg  = await _get_upgrades(uid)
-    def_upg  = await _get_upgrades(def_uid)
-    atk_pow  = atk_char["base_power"] + atk_upg.get("bonus_power", 0)
-    def_pow  = def_char["base_power"] + def_upg.get("bonus_power", 0)
-
+    is_challenger   = (uid == state["challenger_id"])
+    atk_key         = state["challenger_char"] if is_challenger else state["opponent_char"]
+    def_key         = state["opponent_char"]   if is_challenger else state["challenger_char"]
+    atk_char        = FIGHTERS[atk_key]
+    def_char        = FIGHTERS[def_key]
+    atk_name        = state["challenger_name"] if is_challenger else state["opponent_name"]
+    def_name        = state["opponent_name"]   if is_challenger else state["challenger_name"]
+    def_uid         = state["opponent_id"]     if is_challenger else state["challenger_id"]
     atk_transformed = state["challenger_transformed"] if is_challenger else state["opponent_transformed"]
+    atk_dot         = TEAM_COLOR.get(atk_char["team"], "⚪")
+    def_dot         = TEAM_COLOR.get(def_char["team"], "⚪")
 
-    narrative  = ""
-    video_url  = None
-    damage     = 0
-    miss       = False
+    atk_upg = await _get_upgrades(uid)
+    def_upg = await _get_upgrades(def_uid)
+    atk_pow = atk_char["base_power"] + atk_upg.get("bonus_power", 0)
+    def_pow = def_char["base_power"] + def_upg.get("bonus_power", 0)
+    if atk_transformed:
+        atk_pow = int(atk_pow * atk_char["transform_power"])
+
+    damage    = 0
+    video_url = None
+    narrative = ""
 
     if action == "transform":
         if atk_transformed:
             await cq.answer("Already transformed!", show_alert=True)
             return
-
-        # Transform
         if is_challenger:
             state["challenger_transformed"] = True
         else:
             state["opponent_transformed"] = True
-
-        boost  = atk_char["transform_power"]
-        atk_pow = int(atk_pow * boost)
-        video_url  = atk_char["videos"]["transform"]
-        narrative  = (
-            f"🌟 **{atk_name}** TRANSFORMS into **{atk_char['transform_name']}**!\n"
-            f"⚡ Power surges to `{atk_pow:,}`! ×{boost}"
+        video_url = atk_char["videos"]["transform"]
+        narrative = (
+            f"🌟 {atk_dot} **{atk_name}** TRANSFORMS into **{atk_char['transform_name']}**!\n"
+            f"⚡ Power: `{int(atk_pow * atk_char['transform_power']):,}` x{atk_char['transform_power']}"
         )
-        # No damage on transform
-        damage = 0
 
     elif action == "special":
-        # Special move — big damage, can miss 20%
         if random.random() < 0.20:
-            miss      = True
-            narrative = f"💨 **{atk_name}** fires **{atk_char['signature']}** but **{def_name} DODGES!**"
+            narrative = f"💨 {atk_dot} **{atk_name}** fires **{atk_char['signature']}** but {def_dot} **{def_name} DODGES!**"
         else:
-            mult   = random.uniform(1.5, 2.5)
-            if atk_transformed:
-                mult += 0.5
-            damage = int(atk_pow / def_pow * mult * random.uniform(18, 30))
-            damage = max(5, min(damage, 45))
-            video_url  = atk_char["videos"]["attack"]
-            narrative  = (
-                f"💥 **{atk_name}** unleashes **{atk_char['signature']}**!\n"
-                f"🔥 Critical hit! `-{damage} HP` to {def_name}!"
+            mult      = random.uniform(1.5, 2.5)
+            damage    = int(atk_pow / max(def_pow, 1) * mult * random.uniform(18, 30))
+            damage    = max(8, min(damage, 45))
+            video_url = atk_char["videos"]["attack"]
+            narrative = (
+                f"💥 {atk_dot} **{atk_name}** unleashes **{atk_char['signature']}**!\n"
+                f"🔥 `-{damage} HP` to {def_dot} {def_name}!"
             )
-
-    else:
-        # Normal attack — miss 15%
+    else:  # attack
         if random.random() < 0.15:
-            miss      = True
-            narrative = f"💨 **{atk_name}** attacks but **{def_name} DODGES!**"
+            narrative = f"💨 {atk_dot} **{atk_name}** attacks but {def_dot} **{def_name} DODGES!**"
         else:
             mult   = random.uniform(0.8, 1.3)
-            if atk_transformed:
-                mult += 0.3
-            damage = int(atk_pow / def_pow * mult * random.uniform(10, 20))
+            damage = int(atk_pow / max(def_pow, 1) * mult * random.uniform(10, 20))
             damage = max(3, min(damage, 30))
-            narrative = (
-                f"⚔️ **{atk_name}** attacks **{def_name}**!\n"
-                f"💥 `-{damage} HP`"
-            )
+            narrative = f"⚔️ {atk_dot} **{atk_name}** attacks! `-{damage} HP` to {def_dot} {def_name}!"
 
     # Apply damage
     if is_challenger:
-        state["opponent_hp"]    = max(0, state["opponent_hp"] - damage)
+        state["opponent_hp"]   = max(0, state["opponent_hp"] - damage)
     else:
-        state["challenger_hp"]  = max(0, state["challenger_hp"] - damage)
+        state["challenger_hp"] = max(0, state["challenger_hp"] - damage)
 
-    # Send video if available
     if video_url:
         try:
             await cq.message.reply_video(video_url, caption=narrative)
         except Exception:
-            pass
-    elif narrative:
-        await cq.answer(narrative[:200], show_alert=False)
+            if narrative:
+                await cq.message.reply(narrative)
+    elif narrative and damage > 0:
+        pass  # shown in board update below
 
-    # Check if fight is over
-    c_hp = state["challenger_hp"]
-    o_hp = state["opponent_hp"]
+    c_hp     = state["challenger_hp"]
+    o_hp     = state["opponent_hp"]
+    c_char_d = FIGHTERS[state["challenger_char"]]
+    o_char_d = FIGHTERS[state["opponent_char"]]
+    c_dot2   = TEAM_COLOR.get(c_char_d["team"], "⚪")
+    o_dot2   = TEAM_COLOR.get(o_char_d["team"], "⚪")
 
-    c_char_data = FIGHTERS[state["challenger_char"]]
-    o_char_data = FIGHTERS[state["opponent_char"]]
-
+    # Check fight over
     if c_hp <= 0 or o_hp <= 0:
-        # Fight over
         state["state"] = "ended"
-
         if c_hp <= 0 and o_hp <= 0:
             outcome = "draw"
         elif c_hp <= 0:
             outcome = "opponent_wins"
         else:
             outcome = "challenger_wins"
-
-        await _resolve_fight(cq, state, fight_id, outcome, c_char_data, o_char_data)
+        await _resolve_fight(cq, state, fight_id, outcome)
         del _active_fights[fight_id]
         return
+
+    # Auto-transform at low HP
+    def_transformed = state["opponent_transformed"] if is_challenger else state["challenger_transformed"]
+    def_hp_now      = o_hp if is_challenger else c_hp
+    def_max_hp      = o_char_d["hp"] if is_challenger else c_char_d["hp"]
+    if not def_transformed and def_hp_now < def_max_hp * 0.35 and random.random() < 0.65:
+        if is_challenger:
+            state["opponent_transformed"] = True
+        else:
+            state["challenger_transformed"] = True
+        t_vid     = def_char["videos"]["transform"]
+        t_caption = (
+            f"😤 {def_dot} **{def_name}** won't go down!\n"
+            f"🌟 TRANSFORMS into **{def_char['transform_name']}**!"
+        )
+        if t_vid:
+            try:
+                await cq.message.reply_video(t_vid, caption=t_caption)
+            except Exception:
+                await cq.message.reply(t_caption)
+        else:
+            await cq.message.reply(t_caption)
 
     # Swap turn
     state["turn"]  = def_uid
     state["round"] += 1
 
-    c_bar = _build_fight_hp_bar(c_hp, c_char_data["hp"])
-    o_bar = _build_fight_hp_bar(o_hp, o_char_data["hp"])
-
-    next_name = def_name
+    c_bar     = _hp_bar(c_hp, c_char_d["hp"])
+    o_bar     = _hp_bar(o_hp, o_char_d["hp"])
+    c_t       = "✨" if state["challenger_transformed"] else ""
+    o_t       = "✨" if state["opponent_transformed"]   else ""
     next_uid  = def_uid
+    next_t    = state["opponent_transformed"] if is_challenger else state["challenger_transformed"]
+    next_name = state["opponent_name"] if is_challenger else state["challenger_name"]
 
-    # Mid-fight transformation trigger at low HP
-    def_transformed = state["opponent_transformed"] if is_challenger else state["challenger_transformed"]
-    if not def_transformed:
-        def_hp    = o_hp if is_challenger else c_hp
-        def_maxhp = o_char_data["hp"] if is_challenger else c_char_data["hp"]
-        if def_hp < def_maxhp * 0.35 and random.random() < 0.6:
-            # Auto-transform defender
-            if is_challenger:
-                state["opponent_transformed"] = True
-            else:
-                state["challenger_transformed"] = True
-            t_video = def_char["videos"]["transform"]
-            t_caption = (
-                f"😤 **{def_name}** won't go down that easy!\n"
-                f"🌟 TRANSFORMS into **{def_char['transform_name']}**!"
-            )
-            if t_video:
-                try:
-                    await cq.message.reply_video(t_video, caption=t_caption)
-                except Exception:
-                    await cq.message.reply(t_caption)
-            else:
-                await cq.message.reply(t_caption)
+    hit_line = f"\n💥 {narrative}" if narrative and not video_url else ""
 
     await cq.message.edit_caption(
         caption=(
-            f"⚡ **ROUND {state['round']}** ⚡\n\n"
-            f"{c_char_data['emoji']} **{state['challenger_name']}** "
-            f"{'✨' if state['challenger_transformed'] else ''}"
-            f"({c_char_data['name']})\n"
-            f"❤️ {c_bar} `{c_hp}/{c_char_data['hp']}`\n\n"
-            f"{o_char_data['emoji']} **{state['opponent_name']}** "
-            f"{'✨' if state['opponent_transformed'] else ''}"
-            f"({o_char_data['name']})\n"
-            f"❤️ {o_bar} `{o_hp}/{o_char_data['hp']}`\n\n"
-            f"⚔️ **{next_name}'s turn!** Choose your move:"
+            f"⚡ **ROUND {state['round']}** ⚡{hit_line}\n\n"
+            f"{c_dot2} {c_char_d['emoji']} **{state['challenger_name']}** {c_t}({c_char_d['name']})\n"
+            f"❤️ {c_bar} `{c_hp}/{c_char_d['hp']}`\n\n"
+            f"{o_dot2} {o_char_d['emoji']} **{state['opponent_name']}** {o_t}({o_char_d['name']})\n"
+            f"❤️ {o_bar} `{o_hp}/{o_char_d['hp']}`\n\n"
+            f"⚔️ **{next_name}'s turn!**"
         ),
-        reply_markup=_action_keyboard(fight_id, next_uid),
+        reply_markup=_action_keyboard(fight_id, next_uid, next_t),
     )
     await cq.answer()
 
 
 # ── Resolve Fight ─────────────────────────────────────────────────────────────
 
-async def _resolve_fight(cq: CallbackQuery, state: dict, fight_id: str, outcome: str, c_char, o_char):
-    c_name = state["challenger_name"]
-    o_name = state["opponent_name"]
+async def _resolve_fight(cq: CallbackQuery, state: dict, fight_id: str, outcome: str):
     c_uid  = state["challenger_id"]
     o_uid  = state["opponent_id"]
+    c_name = state["challenger_name"]
+    o_name = state["opponent_name"]
+    c_char = FIGHTERS[state["challenger_char"]]
+    o_char = FIGHTERS[state["opponent_char"]]
+    c_dot  = TEAM_COLOR.get(c_char["team"], "⚪")
+    o_dot  = TEAM_COLOR.get(o_char["team"], "⚪")
 
     kakera_reward = 300
     xp_reward     = 150
     kakera_loss   = 150
 
-    if outcome == "challenger_wins":
-        winner_uid, loser_uid     = c_uid, o_uid
-        winner_name, loser_name   = c_name, o_name
-        winner_char, loser_char   = c_char, o_char
-        win_video  = c_char["videos"]["win"]
-        lose_video = o_char["videos"]["lose"]
-    elif outcome == "opponent_wins":
-        winner_uid, loser_uid     = o_uid, c_uid
-        winner_name, loser_name   = o_name, c_name
-        winner_char, loser_char   = o_char, c_char
-        win_video  = o_char["videos"]["win"]
-        lose_video = c_char["videos"]["lose"]
-    else:
-        # Draw
+    if outcome == "draw":
         for uid in (c_uid, o_uid):
             await add_xp(uid, 50)
             await add_balance(uid, 50)
+            await _col("db_fight_stats").update_one(
+                {"user_id": uid}, {"$inc": {"draws": 1, "total": 1}}, upsert=True
+            )
         await cq.message.edit_caption(
             caption=(
                 f"🤝 **DRAW!**\n\n"
-                f"Both **{c_name}** and **{o_name}** fought to a standstill!\n"
-                f"⭐ +50 XP | 💰 +50 kakera each"
+                f"{c_dot} **{c_name}** ({c_char['name']}) vs {o_dot} **{o_name}** ({o_char['name']})\n"
+                f"Both earn ⭐ +50 XP | 💰 +50 kakera"
             )
         )
         return
 
-    # Winner rewards
-    await add_balance(winner_uid, kakera_reward)
-    await add_xp(winner_uid, xp_reward)
-    await deduct_balance(loser_uid, kakera_loss)
-    await add_xp(loser_uid, 30)
+    if outcome == "challenger_wins":
+        w_uid, l_uid   = c_uid, o_uid
+        w_name, l_name = c_name, o_name
+        w_char, l_char = c_char, o_char
+        w_dot,  l_dot  = c_dot,  o_dot
+    else:
+        w_uid, l_uid   = o_uid, c_uid
+        w_name, l_name = o_name, c_name
+        w_char, l_char = o_char, c_char
+        w_dot,  l_dot  = o_dot,  c_dot
 
-    # Winner gets a random character added to harem
-    harem_char = await get_random_character()
-    harem_added = False
-    if harem_char:
+    await add_balance(w_uid, kakera_reward)
+    await add_xp(w_uid, xp_reward)
+    await deduct_balance(l_uid, kakera_loss)
+    await add_xp(l_uid, 30)
+
+    await _col("db_fight_stats").update_one(
+        {"user_id": w_uid}, {"$inc": {"wins": 1, "total": 1}}, upsert=True
+    )
+    await _col("db_fight_stats").update_one(
+        {"user_id": l_uid}, {"$inc": {"losses": 1, "total": 1}}, upsert=True
+    )
+
+    harem_line = ""
+    try:
+        harem_char = await get_random_character()
+        if harem_char:
+            await add_to_harem(w_uid, harem_char["id"])
+            harem_line = f"🎁 **{w_name}** captured **{harem_char['name']}** from battle! Added to harem!\n"
+    except Exception:
+        pass
+
+    lose_vid = l_char["videos"].get("lose")
+    if lose_vid:
         try:
-            await add_to_harem(winner_uid, harem_char["id"])
-            harem_added = True
+            await cq.message.reply_video(lose_vid, caption=f"💀 {l_dot} **{l_name}** has been defeated!")
         except Exception:
             pass
 
-    # Update fight stats in DB
-    await _col("db_fighters").update_one(
-        {"user_id": winner_uid},
-        {"$inc": {"wins": 1, "total_battles": 1}},
-        upsert=True,
-    )
-    await _col("db_fighters").update_one(
-        {"user_id": loser_uid},
-        {"$inc": {"losses": 1, "total_battles": 1}},
-        upsert=True,
-    )
-
-    # Send lose video
-    if lose_video:
+    win_vid = w_char["videos"].get("win")
+    if win_vid:
         try:
-            await cq.message.reply_video(
-                lose_video,
-                caption=f"💀 **{loser_name}** has been defeated!"
-            )
+            await cq.message.reply_video(win_vid, caption=f"🏆 {w_dot} **{w_name}** WINS!")
         except Exception:
             pass
-
-    # Send win video
-    if win_video:
-        try:
-            await cq.message.reply_video(
-                win_video,
-                caption=f"🏆 **{winner_name}** WINS!"
-            )
-        except Exception:
-            pass
-
-    harem_line = (
-        f"🎁 **{winner_name}** captured **{harem_char['name']}** from the battle! Added to harem!\n"
-        if harem_added and harem_char else ""
-    )
 
     await cq.message.edit_caption(
         caption=(
             f"🏆 **FIGHT OVER!** 🏆\n\n"
-            f"🥇 **{winner_name}** defeats **{loser_name}**!\n\n"
-            f"💰 **{winner_name}**: +{kakera_reward} kakera | ⭐ +{xp_reward} XP\n"
-            f"😔 **{loser_name}**: -{kakera_loss} kakera | ⭐ +30 XP\n\n"
+            f"🥇 {w_dot} **{w_name}** ({w_char['name']}) defeats {l_dot} **{l_name}** ({l_char['name']})!\n\n"
+            f"💰 **{w_name}**: +{kakera_reward} kakera | ⭐ +{xp_reward} XP\n"
+            f"😔 **{l_name}**: -{kakera_loss} kakera | ⭐ +30 XP\n\n"
             f"{harem_line}"
-            f"🔄 Challenge again with `/dbfight`!"
+            f"🔄 Use `/dbfight` to battle again!"
         )
     )
 
 
-# ── /dbupgrade ────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# POWER UPGRADE
+# ══════════════════════════════════════════════════════════════════════════════
 
 @_soul.app.on_message(filters.command(["dbupgrade", "powerup", "plup"]))
 async def dbupgrade_cmd(_, m: Message):
-    uid = m.from_user.id
-    upg = await _get_upgrades(uid)
-    cur_tier = upg.get("tier", 0)
+    uid   = m.from_user.id
+    upg   = await _get_upgrades(uid)
+    cur   = upg.get("tier", 0)
+    bonus = upg.get("bonus_power", 0)
+    bal   = await get_balance(uid)
 
-    if cur_tier >= len(UPGRADE_TIERS):
-        pl_name = _power_tier_name(99999 + upg.get("bonus_power", 0))
+    if cur >= len(UPGRADE_TIERS):
         await m.reply(
             f"🌟 **MAX POWER REACHED!**\n\n"
             f"You've achieved **Ultra Instinct** tier!\n"
-            f"Bonus Power: `+{upg.get('bonus_power', 0):,}`\n"
-            f"Total Kakera Spent: `{upg.get('total_spent', 0):,}`"
+            f"⚡ Bonus Power: `+{bonus:,}`\n"
+            f"💰 Total Spent: `{upg.get('total_spent', 0):,}` kakera"
         )
         return
 
-    next_tier = UPGRADE_TIERS[cur_tier]
-    bal       = await get_balance(uid)
-    bonus     = upg.get("bonus_power", 0)
-
-    # Show upgrade info + button
-    buttons = IKM([[
-        IKB(f"💰 Spend {next_tier['cost']:,} Kakera", callback_data=f"dbupg:{uid}:{cur_tier}"),
-        IKB("❌ Cancel", callback_data=f"dbupg:{uid}:cancel"),
-    ]])
+    next_t = UPGRADE_TIERS[cur]
 
     tiers_display = "\n".join(
-        f"{'✅' if i < cur_tier else ('⏭️' if i == cur_tier else '🔒')} "
+        f"{'✅' if i < cur else ('⏩' if i == cur else '🔒')} "
         f"**{t['label']}** — +{t['boost']:,} PL | `{t['cost']:,}` kakera"
         for i, t in enumerate(UPGRADE_TIERS)
     )
 
+    # Upgrade button: success (green) — power growth energy
+    # Cancel button: danger (red)
+    buttons = _raw_markup([
+        [_raw_btn(f"⚡  Spend {next_t['cost']:,} Kakera", f"dbupg:{uid}:{cur}", style="success")],
+        [_raw_btn("❌  Cancel",                           f"dbupg:{uid}:cancel", style="danger")],
+    ])
+
     await m.reply(
         f"⚡ **POWER UPGRADE SYSTEM** ⚡\n\n"
-        f"💰 Your Balance: `{bal:,}` kakera\n"
-        f"🔥 Current Bonus: `+{bonus:,}` power\n\n"
+        f"💰 Balance: `{bal:,}` kakera\n"
+        f"🔥 Current Bonus: `+{bonus:,}` power\n"
+        f"🏆 Tier: **{_power_tier_name(9000 + bonus)}**\n\n"
         f"**Upgrade Tiers:**\n{tiers_display}\n\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"⬆️ **Next: {next_tier['label']}**\n"
-        f"Cost: `{next_tier['cost']:,}` kakera\n"
-        f"Reward: `+{next_tier['boost']:,}` power",
+        f"⬆️ **Next: {next_t['label']}**\n"
+        f"Cost: `{next_t['cost']:,}` kakera → +`{next_t['boost']:,}` power",
         reply_markup=buttons,
     )
 
@@ -1138,92 +1303,53 @@ async def dbupg_cb(_, cq: CallbackQuery):
         return
 
     if tier_str == "cancel":
-        await cq.message.edit_caption(caption="❌ Upgrade cancelled.")
+        await cq.message.edit_text("❌ Upgrade cancelled.")
         await cq.answer()
         return
 
-    cur_tier = int(tier_str)
-    upg      = await _get_upgrades(uid)
+    cur_tier  = int(tier_str)
+    upg       = await _get_upgrades(uid)
 
     if upg.get("tier", 0) != cur_tier:
-        await cq.answer("Tier mismatch, re-run /dbupgrade", show_alert=True)
+        await cq.answer("Re-run /dbupgrade", show_alert=True)
         return
 
     tier_data = UPGRADE_TIERS[cur_tier]
-    cost      = tier_data["cost"]
     bal       = await get_balance(uid)
 
-    if bal < cost:
-        await cq.answer(
-            f"❌ Need {cost:,} kakera, you have {bal:,}!", show_alert=True
-        )
+    if bal < tier_data["cost"]:
+        await cq.answer(f"❌ Need {tier_data['cost']:,} kakera, you have {bal:,}!", show_alert=True)
         return
 
-    await deduct_balance(uid, cost)
+    await deduct_balance(uid, tier_data["cost"])
     await _col("db_upgrades").update_one(
         {"user_id": uid},
-        {"$inc": {"tier": 1, "bonus_power": tier_data["boost"], "total_spent": cost}},
+        {"$inc": {"tier": 1, "bonus_power": tier_data["boost"], "total_spent": tier_data["cost"]}},
         upsert=True,
     )
 
-    upg = await _get_upgrades(uid)
+    upg       = await _get_upgrades(uid)
     new_bonus = upg["bonus_power"]
-    pl_name   = _power_tier_name(FIGHTERS["goku"]["base_power"] + new_bonus)
+    maxed     = upg["tier"] >= len(UPGRADE_TIERS)
 
-    await cq.message.edit_caption(
-        caption=(
-            f"🌟 **POWER UP!** 🌟\n\n"
-            f"✅ **{tier_data['label']}** unlocked!\n"
-            f"⚡ Bonus Power: `+{new_bonus:,}`\n"
-            f"🏆 Tier: **{pl_name}**\n\n"
-            f"{'🔥 All tiers maxed! You are unstoppable!' if upg['tier'] >= len(UPGRADE_TIERS) else 'Keep upgrading with /dbupgrade!'}"
-        )
+    await cq.message.edit_text(
+        f"🌟 **POWER UP!** 🌟\n\n"
+        f"✅ **{tier_data['label']}** unlocked!\n"
+        f"⚡ Total Bonus Power: `+{new_bonus:,}`\n"
+        f"🏆 Tier: **{_power_tier_name(9000 + new_bonus)}**\n\n"
+        f"{'🔥 **MAX POWER REACHED! You are unstoppable!**' if maxed else 'Keep going with `/dbupgrade`!'}"
     )
-    await cq.answer(f"Power up! +{tier_data['boost']:,} power gained!")
+    await cq.answer(f"Power up! +{tier_data['boost']:,} power!")
 
 
-# ── /powerlevel ───────────────────────────────────────────────────────────────
-
-@_soul.app.on_message(filters.command(["powerlevel", "pl", "power"]))
-async def power_level_cmd(_, m: Message):
-    target  = m.reply_to_message.from_user if m.reply_to_message else m.from_user
-    upg     = await _get_upgrades(target.id)
-    stats   = await _col("db_fighters").find_one({"user_id": target.id}) or {}
-    bonus   = upg.get("bonus_power", 0)
-    tier    = upg.get("tier", 0)
-
-    # Find their most used character
-    fighter_key = stats.get("character_key", "goku")
-    char        = FIGHTERS.get(fighter_key, FIGHTERS["goku"])
-    total_pl    = char["base_power"] + bonus
-    pl_name     = _power_tier_name(total_pl)
-    stars       = "⭐" * min(tier + 1, 10)
-
-    w = stats.get("wins", 0)
-    l = stats.get("losses", 0)
-    pct = int(w / max(w + l, 1) * 100)
-
-    tier_label = UPGRADE_TIERS[tier - 1]["label"] if tier > 0 else "No upgrades yet"
-
-    await m.reply(
-        f"⚡ **{target.first_name}'s Power Level** ⚡\n\n"
-        f"🐉 Fighter: **{char['emoji']} {char['name']}**\n"
-        f"💪 Base PL: `{char['base_power']:,}`\n"
-        f"⬆️ Bonus PL: `+{bonus:,}`\n"
-        f"🔥 Total PL: `{total_pl:,}` {stars}\n"
-        f"🏆 Tier: **{pl_name}**\n"
-        f"📊 W/L: `{w}/{l}` ({pct}% win rate)\n"
-        f"💎 Upgrade: **{tier_label}**\n\n"
-        f"💡 Use `/dbupgrade` to power up!"
-    )
-
-
-# ── Dragon Ball Collection ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# DRAGON BALL COLLECTION
+# ══════════════════════════════════════════════════════════════════════════════
 
 @_soul.app.on_message(filters.command(["searchball", "sball", "findball"]))
 async def search_ball(_, m: Message):
-    uid  = m.from_user.id
-    u    = m.from_user
+    uid = m.from_user.id
+    u   = m.from_user
     await get_or_create_user(uid, u.username or "", u.first_name or "", u.last_name or "")
 
     doc      = await _get_user_balls(uid)
@@ -1236,47 +1362,37 @@ async def search_ball(_, m: Message):
             last_s = datetime.fromisoformat(last_s)
         elapsed = (now - last_s).total_seconds()
         if elapsed < cooldown:
-            remaining = cooldown - elapsed
-            mins = int(remaining // 60)
-            await m.reply(f"🔭 **Search again in `{mins}m`...**")
+            mins = int((cooldown - elapsed) // 60)
+            await m.reply(f"🔭 Search again in `{mins}m`...")
             return
 
     if await _has_all_balls(uid):
-        await m.reply("✨ You have ALL 7 Dragon Balls! Use `/wish` to summon Shenron!")
+        await m.reply("✨ You have ALL 7! Use `/wish` to summon Shenron!")
         return
 
-    found_ball = None
+    found = None
     if random.random() < 0.45:
         owned  = set(doc.get("balls", []))
         needed = [i for i in range(1, 8) if i not in owned]
         if needed:
-            found_ball = random.choice(needed)
+            found = random.choice(needed)
 
-    await _col("db_dragon_balls").update_one(
-        {"user_id": uid},
-        {"$set": {"last_search": now}},
-    )
+    await _col("db_dragon_balls").update_one({"user_id": uid}, {"$set": {"last_search": now}})
 
-    if found_ball:
+    if found:
         await _col("db_dragon_balls").update_one(
             {"user_id": uid},
-            {"$addToSet": {"balls": found_ball}, "$inc": {"total_collected": 1}},
+            {"$addToSet": {"balls": found}, "$inc": {"total_collected": 1}},
         )
-        owned_now = set(doc.get("balls", [])) | {found_ball}
-        ball_name = BALL_NAMES[found_ball - 1]
-        stars_str = DRAGON_BALLS[found_ball - 1]
-
+        owned_now = set(doc.get("balls", [])) | {found}
         await m.reply(
             f"🐉 **Dragon Ball Found!**\n\n"
-            f"{stars_str} **{ball_name} Ball** (#{found_ball})\n\n"
+            f"{DRAGON_BALLS[found-1]} **{BALL_NAMES[found-1]} Ball** (#{found})\n\n"
             f"📦 Collection: `{len(owned_now)}/7`\n"
-            + ("✨ **You have all 7! Use `/wish` now!**" if len(owned_now) >= 7 else "🔭 Keep searching!")
+            + ("✨ **ALL 7! Use `/wish` now!**" if len(owned_now) >= 7 else "🔭 Keep searching!")
         )
     else:
-        await m.reply(
-            "🌌 *You searched but found nothing...*\n"
-            "🔭 Try again in 1 hour!"
-        )
+        await m.reply("🌌 *Nothing found this time...*\n🔭 Try again in 1 hour!")
 
 
 @_soul.app.on_message(filters.command(["dragonballs", "myballs", "balls"]))
@@ -1302,33 +1418,35 @@ async def my_balls(_, m: Message):
     )
 
 
-# ── Wish / Shenron ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# WISH / SHENRON
+# ══════════════════════════════════════════════════════════════════════════════
 
 @_soul.app.on_message(filters.command("wish"))
 async def wish_cmd(_, m: Message):
     uid = m.from_user.id
-    doc = await _get_user_balls(uid)
 
     if not await _has_all_balls(uid):
+        doc   = await _get_user_balls(uid)
         owned = len(set(doc.get("balls", [])))
-        await m.reply(f"❌ You need all 7 Dragon Balls! You have `{owned}/7`.")
+        await m.reply(f"❌ Need all 7 Dragon Balls! You have `{owned}/7`.")
         return
 
-    last_wish = await _col("db_wishes").find_one(
-        {"user_id": uid}, sort=[("wished_at", -1)]
-    )
-    if last_wish:
-        elapsed = (datetime.utcnow() - last_wish["wished_at"]).total_seconds()
+    last = await _col("db_wishes").find_one({"user_id": uid}, sort=[("wished_at", -1)])
+    if last:
+        elapsed = (datetime.utcnow() - last["wished_at"]).total_seconds()
         if elapsed < WISH_COOLDOWN:
             days  = int((WISH_COOLDOWN - elapsed) // 86400)
             hours = int(((WISH_COOLDOWN - elapsed) % 86400) // 3600)
             await m.reply(f"⏳ Dragon Balls recharging for **{days}d {hours}h**.")
             return
 
-    buttons = IKM([
-        [IKB(v["label"], callback_data=f"wish:{uid}:{k}")] for k, v in WISHES.items()
+    # Wish buttons — cycle through styles to look vibrant
+    _wish_styles = ["primary", "success", "danger", "primary", "success"]
+    buttons = _raw_markup([
+        [_raw_btn(v["label"], f"wish:{uid}:{k}", style=_wish_styles[i])]
+        for i, (k, v) in enumerate(WISHES.items())
     ])
-
     await m.reply(
         "🐉 **SHENRON AWAKENS!** 🐉\n\n"
         "*'I will grant you one wish...'*\n\n"
@@ -1356,70 +1474,74 @@ async def wish_cb(_, cq: CallbackQuery):
     result = ""
     if wish_key == "kakera":
         await add_balance(uid, 10_000)
-        result = "💰 **10,000 kakera** added to your balance!"
+        result = "💰 **10,000 kakera** added!"
     elif wish_key == "xp":
         await add_xp(uid, 2_000)
         result = "⭐ **2,000 XP** gained!"
-    elif wish_key == "power":
-        await _col("db_upgrades").update_one(
-            {"user_id": uid},
-            {"$inc": {"bonus_power": 500}},
-            upsert=True,
-        )
-        result = "⚡ **+500 Power Level** added to your fighter!"
+    elif wish_key == "fighter":
+        owned   = await _get_owned(uid)
+        unowned = [k for k in FIGHTERS if k not in owned and FIGHTERS[k]["price"] > 0]
+        if unowned:
+            gift_key = random.choice(unowned)
+            await _add_owned(uid, gift_key)
+            gift     = FIGHTERS[gift_key]
+            gift_dot = TEAM_COLOR.get(gift["team"], "⚪")
+            result = f"🎁 You received {gift_dot} **{gift['emoji']} {gift['name']}** for free!"
+        else:
+            await add_balance(uid, 5_000)
+            result = "🎁 You own all fighters! +5,000 kakera instead!"
     elif wish_key == "immunity":
         result = "🛡 **1-week immunity** granted!"
     elif wish_key == "reroll":
         result = "🎲 Your next `/daily` gives **double** kakera!"
 
-    await _col("db_wishes").insert_one({
-        "user_id":   uid,
-        "wish":      wish_key,
-        "wished_at": datetime.utcnow(),
-    })
+    await _col("db_wishes").insert_one({"user_id": uid, "wish": wish_key, "wished_at": datetime.utcnow()})
 
     await cq.message.edit_text(
         f"🌟 **Wish Granted!**\n\n{result}\n\n"
         "*'Until we meet again...'* — Shenron 🐉\n\n"
-        "_Dragon Balls will return in 7 days._"
+        "_Dragon Balls return in 7 days._"
     )
 
 
-# ── /dbchars — List all fighters ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MISC COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
 
-@_soul.app.on_message(filters.command(["dbchars", "fighters", "roster"]))
-async def dbchars_cmd(_, m: Message):
-    heroes   = [(k, v) for k, v in FIGHTERS.items() if v["team"] == "hero"]
-    villains = [(k, v) for k, v in FIGHTERS.items() if v["team"] == "villain"]
-    neutral  = [(k, v) for k, v in FIGHTERS.items() if v["team"] == "neutral"]
+@_soul.app.on_message(filters.command(["powerlevel", "pl", "power"]))
+async def power_level_cmd(_, m: Message):
+    target = m.reply_to_message.from_user if m.reply_to_message else m.from_user
+    upg    = await _get_upgrades(target.id)
+    stats  = await _col("db_fight_stats").find_one({"user_id": target.id}) or {}
+    bonus  = upg.get("bonus_power", 0)
+    tier   = upg.get("tier", 0)
+    owned  = await _get_owned(target.id)
 
-    def fmt(items):
-        return "\n".join(
-            f"{v['emoji']} **{v['name']}** — `{v['base_power']:,}` PL | {v['signature']}"
-            for _, v in items
-        )
+    w   = stats.get("wins", 0)
+    l   = stats.get("losses", 0)
+    pct = int(w / max(w + l, 1) * 100)
+
+    tier_label    = UPGRADE_TIERS[tier - 1]["label"] if tier > 0 else "No upgrades yet"
+    stars         = "⭐" * min(tier + 1, 6)
+    hero_count    = sum(1 for k in owned if FIGHTERS.get(k, {}).get("team") == "hero")
+    villain_count = sum(1 for k in owned if FIGHTERS.get(k, {}).get("team") == "villain")
+    neutral_count = sum(1 for k in owned if FIGHTERS.get(k, {}).get("team") == "neutral")
 
     await m.reply(
-        f"🐉 **Dragon Ball Roster** 🐉\n\n"
-        f"🦸 **HEROES** ({len(heroes)})\n{fmt(heroes)}\n\n"
-        f"😈 **VILLAINS** ({len(villains)})\n{fmt(villains)}\n\n"
-        f"⚖️ **NEUTRAL** ({len(neutral)})\n{fmt(neutral)}\n\n"
-        f"💡 Use `/dbfight @user` to start a fight!\n"
-        f"⚡ Use `/dbupgrade` to boost your power!"
+        f"⚡ **{target.first_name}'s Power** ⚡\n\n"
+        f"⬆️ Bonus PL: `+{bonus:,}`\n"
+        f"🏆 Tier: **{_power_tier_name(9000 + bonus)}** {stars}\n"
+        f"💎 Upgrade: **{tier_label}**\n\n"
+        f"🥋 Fighters: `{len(owned)}/{len(FIGHTERS)}`\n"
+        f"🔵 Heroes: `{hero_count}`  🔴 Villains: `{villain_count}`  ⚪ Neutral: `{neutral_count}`\n\n"
+        f"📊 W/L: `{w}/{l}` ({pct}% win rate)\n\n"
+        f"💡 `/dbupgrade` to power up | `/dbshop` to buy fighters"
     )
 
 
-# ── /dbtop — Leaderboard ──────────────────────────────────────────────────────
-
-@_soul.app.on_message(filters.command(["dbtop", "battletop", "fightlb"]))
+@_soul.app.on_message(filters.command(["dbtop", "fightlb", "battletop"]))
 async def dbtop_cmd(_, m: Message):
-    fighters = (
-        await _col("db_fighters")
-        .find({})
-        .sort("wins", -1)
-        .limit(10)
-        .to_list(10)
-    )
+    fighters = await _col("db_fight_stats").find({}).sort("wins", -1).limit(10).to_list(10)
 
     if not fighters:
         await m.reply("🏆 No battles yet. Use `/dbfight` to start!")
@@ -1429,17 +1551,54 @@ async def dbtop_cmd(_, m: Message):
     for i, f in enumerate(fighters, 1):
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"`{i}.`")
         uid   = f["user_id"]
-        name  = f.get("display_name", str(uid))
         w     = f.get("wins", 0)
         l     = f.get("losses", 0)
         upg   = await _get_upgrades(uid)
         bonus = upg.get("bonus_power", 0)
         lines.append(
-            f"{medal} [{name}](tg://user?id={uid})\n"
-            f"   🏆 `{w}W/{l}L` | ⚡ Bonus PL: `+{bonus:,}`"
+            f"{medal} [User](tg://user?id={uid})\n"
+            f"   🏆 `{w}W/{l}L` | ⚡ `+{bonus:,}` PL"
         )
 
     await m.reply(
         "⚡ **Dragon Ball Fight Leaderboard** ⚡\n\n" + "\n\n".join(lines),
         disable_web_page_preview=True,
+    )
+
+
+@_soul.app.on_message(filters.command(["dbhelp", "dbcommands"]))
+async def dbhelp_cmd(_, m: Message):
+    uid = m.from_user.id
+    # Help menu buttons — color-coded sections:
+    #   Shop      → primary (blue)
+    #   Hero/Villain filter → team colors
+    #   Power up  → success (green)
+    #   Collection → danger (red — dragon ball urgency)
+    help_buttons = _raw_markup([
+        [_raw_btn("🛒  Open Shop",        f"dbshop_page:{uid}:0",   style="primary")],
+        [_raw_btn("🔵 Hero Fighters",     f"dbshop_page:{uid}:0",   style="primary"),
+         _raw_btn("🔴 Villain Fighters",  f"dbshop_page:{uid}:1",   style="danger")],
+        [_raw_btn("⚪ Neutral Fighters",  f"dbshop_page:{uid}:3",   style="success"),
+         _raw_btn("⚡ Power Up",          f"dbupg:{uid}:cancel",    style="success")],
+        [_raw_btn("🥋 My Collection",     f"dbshop_mine:{uid}",     style="primary"),
+         _raw_btn("🐉 My Dragon Balls",   f"dbshop_mine:{uid}",     style="danger")],
+    ])
+    await m.reply(
+        "🐉 **Dragon Ball Game — Commands** 🐉\n\n"
+        "🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n\n"
+        "**🛒 Shop**\n"
+        "`/dbshop` — Browse & buy fighters\n"
+        "`/mydb` — See your owned fighters\n\n"
+        "**⚔️ Fight**\n"
+        "`/dbfight` — Challenge someone (reply to them)\n"
+        "`/powerlevel` — Check your power stats\n"
+        "`/dbtop` — Fight leaderboard\n\n"
+        "**⚡ Upgrade**\n"
+        "`/dbupgrade` — Spend kakera to boost all fighters\n\n"
+        "**🐉 Dragon Balls**\n"
+        "`/searchball` — Hunt for Dragon Balls (1hr cooldown)\n"
+        "`/myballs` — Check your collection\n"
+        "`/wish` — Summon Shenron with all 7 balls\n\n"
+        "💡 Buy fighters from `/dbshop` first, then fight!",
+        reply_markup=help_buttons,
     )
