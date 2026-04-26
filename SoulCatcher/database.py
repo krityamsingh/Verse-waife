@@ -62,22 +62,81 @@ def _col(name: str):
 
 # ── Indexes ───────────────────────────────────────────────────────────────────
 
-async def _safe_index(col, keys, **kwargs) -> None:
-    from pymongo.errors import OperationFailure
-    try:
-        await col.create_index(keys, **kwargs)
-    except OperationFailure as e:
-        if e.code == 86:
-            name = kwargs.get("name") or (
-                f"{keys}_1" if isinstance(keys, str)
-                else "_".join(f"{k}_{v}" for k, v in keys)
+def _index_name(keys, kwargs) -> str:
+    return kwargs.get("name") or (
+        f"{keys}_1" if isinstance(keys, str)
+        else "_".join(f"{k}_{v}" for k, v in keys)
+    )
+
+
+async def _deduplicate_field(col, field: str) -> int:
+    """
+    For a unique-indexed field, keep the first document for each value and
+    reassign duplicate documents a fresh UUID hex so the index can be built.
+    Returns the number of documents fixed.
+    """
+    pipeline = [
+        {"$group": {"_id": f"${field}", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    duplicates = await col.aggregate(pipeline).to_list(None)
+    fixed = 0
+    for group in duplicates:
+        # Skip the first _id, patch all others with a fresh unique value
+        for dup_id in group["ids"][1:]:
+            new_val = uuid.uuid4().hex.upper()
+            await col.update_one({"_id": dup_id}, {"$set": {field: new_val}})
+            fixed += 1
+            log.warning(
+                "Deduplication: patched %s=%r → %r on _id=%s",
+                field, group["_id"], new_val, dup_id,
             )
+    return fixed
+
+
+async def _safe_index(col, keys, **kwargs) -> None:
+    from pymongo.errors import OperationFailure, DuplicateKeyError
+
+    async def _try_create():
+        await col.create_index(keys, **kwargs)
+
+    try:
+        await _try_create()
+    except (OperationFailure, DuplicateKeyError) as e:
+        code = getattr(e, "code", None)
+        name = _index_name(keys, kwargs)
+        is_unique = kwargs.get("unique", False)
+
+        if code == 86:
+            # Index definition conflict — drop and recreate
             log.warning("Index conflict on '%s' — dropping and recreating.", name)
             try:
                 await col.drop_index(name)
-                await col.create_index(keys, **kwargs)
+                await _try_create()
             except Exception as ex:
                 log.warning("Could not recreate index '%s': %s", name, ex)
+
+        elif code == 11000 and is_unique:
+            # Existing duplicate data is blocking a unique index build.
+            # Determine which field(s) to deduplicate.
+            field = keys if isinstance(keys, str) else keys[0][0]
+            log.warning(
+                "Unique index '%s' blocked by duplicate data on field '%s' — "
+                "deduplicating collection before retrying.",
+                name, field,
+            )
+            fixed = await _deduplicate_field(col, field)
+            log.warning("Deduplication complete: %d document(s) patched. Retrying index build.", fixed)
+            try:
+                # Drop any partial index left from the failed build, then retry
+                await col.drop_index(name)
+            except Exception:
+                pass
+            try:
+                await _try_create()
+            except Exception as ex:
+                log.error("Index '%s' still failed after deduplication: %s", name, ex)
+
         else:
             raise
 
