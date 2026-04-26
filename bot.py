@@ -166,14 +166,6 @@ async def main():
     if not await init_db_with_retry(init_db):
         sys.exit(1)
 
-    # DragonBall DB init
-    try:
-        from SoulCatcher.modules.dragonball import init_db as db_init
-        await asyncio.wait_for(db_init(), timeout=15)
-        log.info("✅ DragonBall DB ready")
-    except Exception as exc:
-        log.warning("⚠️  DragonBall DB skipped (non-fatal): %s", exc)
-
     # Phase 2: Permission caches
     log.info("Phase 2/4: Loading permission caches")
     for label, getter, refresher in [
@@ -191,6 +183,15 @@ async def main():
     log.info("Phase 3/4: Loading modules")
     real_client = _make_client(API_ID, API_HASH, BOT_TOKEN)
     SoulCatcher.app._set(real_client)
+
+    # DragonBall DB init — must run AFTER _set() so module decorators can register
+    try:
+        from SoulCatcher.modules.dragonball import init_db as db_init
+        await asyncio.wait_for(db_init(), timeout=15)
+        log.info("✅ DragonBall DB ready")
+    except Exception as exc:
+        log.warning("⚠️  DragonBall DB skipped (non-fatal): %s", exc)
+
     loaded, failed = load_modules()
     if not loaded:
         log.critical("❌ No modules loaded — check SoulCatcher/modules/")
