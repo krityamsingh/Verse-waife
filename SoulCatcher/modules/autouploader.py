@@ -19,8 +19,7 @@ from ..database import insert_character, get_character, update_character
 
 log = logging.getLogger("SoulCatcher.autouploader")
 
-UPLOAD_CHANNEL_ID: int  = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1888855632
-BACKUP_CHANNEL_ID: int  = -1546960434   # t.me/ITssBackUP
+UPLOAD_CHANNEL_ID: int  = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003869604435
 CATBOX_API        = "https://catbox.moe/user/api.php"
 CATBOX_USERHASH   = "de47eb51da1e8bc98c5ca9cf3"   # catbox.moe authenticated uploads
 MAX_FILE_BYTES    = 50 * 1024 * 1024  # 50 MB
@@ -485,46 +484,30 @@ async def _do_upload(
             + ("  _(video)_" if is_video else "")
         )
 
-        # 4. Post to main channel + backup channel (using local file — no re-download needed)
-        async def _broadcast(channel_id: int, label: str) -> Optional[str]:
-            """Send to one channel; returns error string or None on success."""
-            try:
-                if is_video:
-                    await client.send_video(channel_id, file_path, caption=caption)
-                else:
-                    await client.send_photo(channel_id, file_path, caption=caption)
-                log.info(f"{label} post OK — char_id={char_id} channel={channel_id}")
-                return None
-            except Exception as media_exc:
-                log.warning(f"{label} media post failed (char_id={char_id}): {media_exc}")
-                try:
-                    await client.send_message(channel_id, caption)
-                    log.info(f"{label} text fallback OK — char_id={char_id}")
-                    return None
-                except Exception as text_exc:
-                    log.error(f"{label} text fallback also failed (char_id={char_id}): {text_exc}")
-                    return f"media → `{media_exc}`\ntext  → `{text_exc}`"
-
-        channel_err:  Optional[str] = None
-        backup_err:   Optional[str] = None
+        # 4. Post to channel (using local file — no re-download needed)
+        channel_err: Optional[str] = None
 
         if UPLOAD_CHANNEL_ID:
-            channel_err = await _broadcast(UPLOAD_CHANNEL_ID, "Main channel")
+            try:
+                if is_video:
+                    await client.send_video(UPLOAD_CHANNEL_ID, file_path, caption=caption)
+                else:
+                    await client.send_photo(UPLOAD_CHANNEL_ID, file_path, caption=caption)
+                log.info(f"Channel post OK — char_id={char_id} channel={UPLOAD_CHANNEL_ID}")
+            except Exception as media_exc:
+                log.warning(f"Channel media post failed (char_id={char_id}): {media_exc}")
+                try:
+                    await client.send_message(UPLOAD_CHANNEL_ID, caption)
+                    log.info(f"Channel text fallback OK — char_id={char_id}")
+                except Exception as text_exc:
+                    log.error(f"Channel text fallback also failed (char_id={char_id}): {text_exc}")
+                    channel_err = f"media → `{media_exc}`\ntext  → `{text_exc}`"
 
-        if BACKUP_CHANNEL_ID:
-            backup_err = await _broadcast(BACKUP_CHANNEL_ID, "Backup channel")
-
-        # Report any broadcast failures — character is already saved either way
-        if channel_err or backup_err:
-            err_lines = []
-            if channel_err:
-                err_lines.append(f"⚠️ **Main channel failed**\n{channel_err}")
-            if backup_err:
-                err_lines.append(f"⚠️ **Backup channel failed**\n{backup_err}")
+        if channel_err:
             await status.edit_text(
                 caption
                 + f"\n\n{'─' * 28}\n"
-                + "\n".join(err_lines)
+                + f"⚠️ **Channel post failed**\n{channel_err}"
                 + f"\nCharacter was saved — ID: `{char_id}`"
             )
             return char_id
