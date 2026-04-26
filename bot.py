@@ -1,24 +1,12 @@
-"""bot.py — SoulCatcher entry point.
+"""
+bot.py — SoulCatcher entry point.
 
-Architecture: ONE client, one assignment, one .start()
-─────────────────────────────────────────────────────
-The fundamental rule for Pyrogram handler registration:
-
-    @app.on_message(...)  binds the handler to whichever Client object
-    `app` points to AT DECORATION TIME (i.e. at module import).
-
-So the correct boot sequence is:
-
-    1. Create Client X
-    2. Assign SoulCatcher.app = Client X
-    3. Import all modules  →  handlers register on Client X
-    4. Call Client X.start()   (NOT a new client — the SAME one)
-
-If you call _make_fresh_client() again after step 3, the new client has
-zero handlers and commands never fire.
-
-On a DC5 timeout retry, we reload ALL modules onto the new client so
-handlers re-register correctly.
+Boot sequence:
+  1. Create ONE Pyrogram Client
+  2. Assign SoulCatcher.app = that client
+  3. Import all modules (handlers register on that client)
+  4. Call client.start() — the SAME object
+  5. Wait for stop signal
 """
 
 import asyncio
@@ -39,19 +27,17 @@ ROOT = Path(__file__).parent.resolve()
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# ── Retry tunables ────────────────────────────────────────────────────────────
+# ── Retry config ──────────────────────────────────────────────────────────────
 
 DB_RETRY_ATTEMPTS  = 5
 DB_RETRY_BASE_WAIT = 3
-
 TG_RETRY_ATTEMPTS  = 10
 TG_RETRY_BASE_WAIT = 5
 
 
 # ── Client factory ────────────────────────────────────────────────────────────
 
-def _make_fresh_client(API_ID, API_HASH, BOT_TOKEN):
-    """Return a brand-new Pyrogram Client with zero stale internal state."""
+def _make_client(API_ID, API_HASH, BOT_TOKEN):
     from pyrogram import Client
     return Client(
         "SoulCatcher",
@@ -66,14 +52,6 @@ def _make_fresh_client(API_ID, API_HASH, BOT_TOKEN):
 # ── Module loader ─────────────────────────────────────────────────────────────
 
 def load_modules(reload: bool = False) -> tuple[list[str], list[str]]:
-    """Import (or reload) every module under SoulCatcher/modules/.
-
-    MUST be called after SoulCatcher.app is assigned — each module does
-    `from .. import app` at import time and registers @app.on_message
-    handlers on that exact object.
-
-    Pass reload=True on a retry to re-register handlers on the new client.
-    """
     modules_dir = ROOT / "SoulCatcher" / "modules"
     loaded, failed = [], []
 
@@ -87,10 +65,10 @@ def load_modules(reload: bool = False) -> tuple[list[str], list[str]]:
             else:
                 importlib.import_module(mod_path)
             loaded.append(f.stem)
-            log.info(f"  ✅ {f.stem}")
+            log.info("  ✅ %s", f.stem)
         except Exception as exc:
             failed.append(f.stem)
-            log.error(f"  ❌ {f.stem}: {exc}", exc_info=True)
+            log.error("  ❌ %s: %s", f.stem, exc, exc_info=True)
 
     summary = f"Modules: {len(loaded)} ✅  {len(failed)} ❌"
     if failed:
@@ -105,24 +83,24 @@ async def init_db_with_retry(init_db_fn) -> bool:
     wait = DB_RETRY_BASE_WAIT
     for attempt in range(1, DB_RETRY_ATTEMPTS + 1):
         try:
-            log.info(f"📦 MongoDB connection attempt {attempt}/{DB_RETRY_ATTEMPTS}...")
+            log.info("📦 MongoDB attempt %d/%d...", attempt, DB_RETRY_ATTEMPTS)
             await asyncio.wait_for(init_db_fn(), timeout=35)
             log.info("✅ MongoDB connected.")
             return True
         except asyncio.TimeoutError:
-            log.warning(f"⏳ MongoDB timed out (attempt {attempt}).")
+            log.warning("⏳ MongoDB timed out (attempt %d).", attempt)
         except Exception as exc:
-            log.warning(f"⚠️  MongoDB error (attempt {attempt}): {type(exc).__name__}: {exc}")
+            log.warning("⚠️  MongoDB error (attempt %d): %s: %s", attempt, type(exc).__name__, exc)
 
         if attempt < DB_RETRY_ATTEMPTS:
-            log.info(f"   Retrying in {wait}s...")
+            log.info("   Retrying in %ds...", wait)
             await asyncio.sleep(wait)
-            wait *= 2
+            wait = min(wait * 2, 60)
 
     log.critical(
         "❌ MongoDB unavailable after all retries.\n"
-        "   • Check MONGO_URI in your config vars\n"
-        "   • Make sure the Atlas cluster is not paused\n"
+        "   • Check MONGO_URI in config vars\n"
+        "   • Ensure Atlas cluster is not paused\n"
         "   • Atlas Network Access must allow 0.0.0.0/0"
     )
     return False
@@ -130,88 +108,43 @@ async def init_db_with_retry(init_db_fn) -> bool:
 
 # ── Telegram connection with retry ────────────────────────────────────────────
 
-async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN) -> object | None:
-    """Connect to Telegram, retrying up to TG_RETRY_ATTEMPTS times.
-
-    CRITICAL: on the first attempt, SoulCatcher.app is already the client
-    that has all handlers registered on it. We call .start() on THAT object.
-
-    Only on failure do we create a new client — and we also reload all
-    modules so handlers re-bind to the new object.
-    """
+async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN):
     import SoulCatcher
-
     wait = TG_RETRY_BASE_WAIT
 
     for attempt in range(1, TG_RETRY_ATTEMPTS + 1):
-
-        client = SoulCatcher.app  # always use whatever is currently assigned
-
+        client = SoulCatcher.app
         try:
-            log.info(f"📡 Telegram connection attempt {attempt}/{TG_RETRY_ATTEMPTS}...")
+            log.info("📡 Telegram attempt %d/%d...", attempt, TG_RETRY_ATTEMPTS)
             await asyncio.wait_for(client.start(), timeout=40)
             me = client.me
-            log.info(f"✅ Connected as @{me.username} (id={me.id})")
+            log.info("✅ Connected as @%s (id=%d)", me.username, me.id)
             return client
 
         except asyncio.TimeoutError:
-            log.warning(
-                f"⚠️  Telegram timed out (attempt {attempt}) — "
-                "DC5 msg_id loop. Rebuilding client + reloading modules..."
-            )
-            # Do NOT call .stop() — client is wedged, it will hang too.
-            new_client = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-            SoulCatcher.app = new_client
-            log.info("   Reloading modules onto new client...")
-            load_modules(reload=True)
+            log.warning("⚠️  Telegram timed out (attempt %d) — rebuilding client.", attempt)
 
-        except KeyError as exc:
-            log.warning(f"⚠️  DC handshake KeyError (attempt {attempt}): {exc}")
+        except (KeyError, ConnectionError, OSError, Exception) as exc:
+            log.warning("⚠️  Connection error (attempt %d): %s: %s", attempt, type(exc).__name__, exc)
             try:
                 await client.stop()
             except Exception:
                 pass
-            SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-            load_modules(reload=True)
 
-        except ConnectionError as exc:
-            log.warning(f"⚠️  ConnectionError (attempt {attempt}): {exc}")
-            try:
-                await client.stop()
-            except Exception:
-                pass
-            SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-            load_modules(reload=True)
-
-        except OSError as exc:
-            log.warning(f"⚠️  OSError (attempt {attempt}): {exc}")
-            try:
-                await client.stop()
-            except Exception:
-                pass
-            SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-            load_modules(reload=True)
-
-        except Exception as exc:
-            log.warning(f"⚠️  app.start() error (attempt {attempt}): {type(exc).__name__}: {exc}")
-            try:
-                await client.stop()
-            except Exception:
-                pass
-            SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
-            load_modules(reload=True)
+        # Build fresh client and reload modules on retry
+        SoulCatcher.app = _make_client(API_ID, API_HASH, BOT_TOKEN)
+        load_modules(reload=True)
 
         if attempt < TG_RETRY_ATTEMPTS:
-            capped_wait = min(wait, 60)
-            log.info(f"   Retrying in {capped_wait}s...")
-            await asyncio.sleep(capped_wait)
+            capped = min(wait, 60)
+            log.info("   Retrying in %ds...", capped)
+            await asyncio.sleep(capped)
             wait *= 2
         else:
             log.critical(
                 "❌ Could not connect to Telegram after all retries.\n"
-                "   • Verify BOT_TOKEN, API_ID, API_HASH in config vars\n"
-                "   • If DC5 msg_id loop persists, your hosting provider\n"
-                "     may have MTProto port issues — try Railway or a VPS"
+                "   • Verify BOT_TOKEN, API_ID, API_HASH\n"
+                "   • MTProto port issues? Try Railway or a VPS"
             )
 
     return None
@@ -225,22 +158,22 @@ async def main():
     from SoulCatcher import refresh_sudo, refresh_dev, refresh_uploader
     import SoulCatcher
 
-    log.info("🌸 SoulCatcher starting up...")
+    log.info("🌸 SoulCatcher v2.0 starting up...")
 
-    if not API_ID or API_ID == 0:
-        log.critical("❌ API_ID is 0 or missing.")
-        sys.exit(1)
-
-    if not BOT_TOKEN or ":" not in str(BOT_TOKEN):
-        log.critical("❌ BOT_TOKEN looks invalid.")
-        sys.exit(1)
-
-    log.info(f"✅ Config OK — API_ID={API_ID}, token ends ...{str(BOT_TOKEN)[-6:]}")
-
+    # Phase 1: DB
     log.info("Phase 1/4: Database connection")
     if not await init_db_with_retry(init_db):
         sys.exit(1)
 
+    # DragonBall DB init
+    try:
+        from SoulCatcher.modules.dragonball import init_db as db_init
+        await asyncio.wait_for(db_init(), timeout=15)
+        log.info("✅ DragonBall DB ready")
+    except Exception as exc:
+        log.warning("⚠️  DragonBall DB skipped (non-fatal): %s", exc)
+
+    # Phase 2: Permission caches
     log.info("Phase 2/4: Loading permission caches")
     for label, getter, refresher in [
         ("sudo",     get_sudo_ids,     refresh_sudo),
@@ -249,50 +182,47 @@ async def main():
     ]:
         try:
             refresher(await getter())
-            log.info(f"  ✅ {label} cache loaded")
+            log.info("  ✅ %s cache loaded", label)
         except Exception as exc:
-            log.warning(f"  ⚠️  {label} cache failed (non-fatal): {exc}")
+            log.warning("  ⚠️  %s cache failed (non-fatal): %s", label, exc)
 
-    # ── Create the ONE client, assign it, THEN load modules ──────────────────
-    # Modules do `from .. import app` — they bind to this exact object.
-    # .start() will be called on this same object in Phase 4.
+    # Phase 3: Modules — create client FIRST, then import modules
     log.info("Phase 3/4: Loading modules")
-    SoulCatcher.app = _make_fresh_client(API_ID, API_HASH, BOT_TOKEN)
+    SoulCatcher.app = _make_client(API_ID, API_HASH, BOT_TOKEN)
     loaded, failed = load_modules()
     if not loaded:
         log.critical("❌ No modules loaded — check SoulCatcher/modules/")
         sys.exit(1)
 
-    # ── start_telegram_with_retry calls .start() on SoulCatcher.app ──────────
-    # First attempt uses the same client handlers are registered on.
-    # Only on retry does it build a fresh client + reload modules.
+    # Phase 4: Connect
     log.info("Phase 4/4: Connecting to Telegram")
     client = await start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN)
     if client is None:
         sys.exit(1)
 
+    # Shutdown handler
     stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def _signal_handler():
-        log.info("🛑 Shutdown signal — stopping gracefully...")
+    def _stop():
+        log.info("🛑 Shutdown signal received.")
         stop_event.set()
 
-    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _signal_handler)
+            loop.add_signal_handler(sig, _stop)
         except (NotImplementedError, RuntimeError):
             pass
 
-    log.info("🌸 Bot is running. Press Ctrl+C or send SIGTERM to stop.")
+    log.info("🌸 SoulCatcher is running! Press Ctrl+C to stop.")
     await stop_event.wait()
 
     log.info("🌸 Stopping client...")
     try:
         await client.stop()
-        log.info("✅ Client stopped cleanly.")
+        log.info("✅ Stopped cleanly.")
     except Exception as exc:
-        log.warning(f"⚠️  Error during stop: {exc}")
+        log.warning("⚠️  Error during stop: %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -305,5 +235,5 @@ if __name__ == "__main__":
     except SystemExit as exc:
         sys.exit(exc.code)
     except Exception as exc:
-        log.critical(f"💥 Unhandled exception: {exc}", exc_info=True)
+        log.critical("💥 Unhandled exception: %s", exc, exc_info=True)
         sys.exit(1)
