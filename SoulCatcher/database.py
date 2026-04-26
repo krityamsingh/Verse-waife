@@ -69,38 +69,50 @@ def _index_name(keys, kwargs) -> str:
     )
 
 
-async def _deduplicate_field(col, field: str) -> int:
+async def _deduplicate_fields(col, fields: list[str]) -> int:
     """
-    For a unique-indexed field, keep the earliest document for each value and
-    reassign later duplicates a fresh UUID hex so the index can build cleanly.
+    Deduplicate on one or more fields (handles both simple and compound unique indexes).
+    Keeps the earliest document (_id min) for each duplicated key combination,
+    and reassigns later duplicates a fresh UUID hex on the FIRST field only
+    (enough to make the compound value unique).
 
-    Uses $min (not $push) so no large arrays are built in memory, and passes
-    allowDiskUse=True so the $group stage can spill to disk on Atlas free-tier.
+    Uses allowDiskUse=True and cursor-based patching to stay within Atlas limits.
     """
-    # Phase 1: find the minimum _id (earliest insert) for each duplicated value.
+    # Build a group _id that captures all fields in the compound key
+    if len(fields) == 1:
+        group_id = f"${fields[0]}"
+    else:
+        group_id = {f: f"${f}" for f in fields}
+
     pipeline = [
-        {"$group": {"_id": f"${field}", "keep_id": {"$min": "$_id"}, "count": {"$sum": 1}}},
+        {"$group": {"_id": group_id, "keep_id": {"$min": "$_id"}, "count": {"$sum": 1}}},
         {"$match": {"count": {"$gt": 1}}},
         {"$project": {"_id": 1, "keep_id": 1}},
     ]
-    dup_values = await col.aggregate(pipeline, allowDiskUse=True).to_list(None)
+    dup_groups = await col.aggregate(pipeline, allowDiskUse=True).to_list(None)
     fixed = 0
-    for entry in dup_values:
-        field_value = entry["_id"]
-        keep_id     = entry["keep_id"]
-        # Phase 2: cursor over duplicates one at a time — no large list in memory.
-        async for doc in col.find(
-            {field: field_value, "_id": {"$ne": keep_id}},
-            {"_id": 1},
-        ):
+    for entry in dup_groups:
+        key_value = entry["_id"]
+        keep_id   = entry["keep_id"]
+
+        # Build the match filter for this exact compound key
+        if len(fields) == 1:
+            match_filter = {fields[0]: key_value}
+        else:
+            match_filter = {f: key_value[f] for f in fields}
+        match_filter["_id"] = {"$ne": keep_id}
+
+        async for doc in col.find(match_filter, {"_id": 1}):
             new_val = uuid.uuid4().hex.upper()
-            await col.update_one({"_id": doc["_id"]}, {"$set": {field: new_val}})
+            # Patch only the first field — enough to break the duplicate compound key
+            await col.update_one({"_id": doc["_id"]}, {"$set": {fields[0]: new_val}})
             fixed += 1
             log.warning(
-                "Deduplication: patched %s=%r -> %r on _id=%s",
-                field, field_value, new_val, doc["_id"],
+                "Deduplication: patched compound key %r field '%s' -> %r on _id=%s",
+                key_value, fields[0], new_val, doc["_id"],
             )
     return fixed
+
 
 async def _safe_index(col, keys, **kwargs) -> None:
     from pymongo.errors import OperationFailure, DuplicateKeyError
@@ -126,14 +138,17 @@ async def _safe_index(col, keys, **kwargs) -> None:
 
         elif code == 11000 and is_unique:
             # Existing duplicate data is blocking a unique index build.
-            # Determine which field(s) to deduplicate.
-            field = keys if isinstance(keys, str) else keys[0][0]
+            # Extract ALL fields from the index spec so compound keys are handled correctly.
+            if isinstance(keys, str):
+                fields = [keys]
+            else:
+                fields = [k for k, _ in keys]
             log.warning(
-                "Unique index '%s' blocked by duplicate data on field '%s' — "
+                "Unique index '%s' blocked by duplicate data on fields %r — "
                 "deduplicating collection before retrying.",
-                name, field,
+                name, fields,
             )
-            fixed = await _deduplicate_field(col, field)
+            fixed = await _deduplicate_fields(col, fields)
             log.warning("Deduplication complete: %d document(s) patched. Retrying index build.", fixed)
             try:
                 # Drop any partial index left from the failed build, then retry
@@ -629,7 +644,15 @@ async def set_char_note(user_id: int, instance_id: str, note: str) -> bool:
 # ── Spawns ────────────────────────────────────────────────────────────────────
 
 async def create_spawn(doc: dict) -> None:
-    await _col("active_spawns").insert_one(doc)
+    # Use replace_one+upsert instead of insert_one so that if a spawn for this
+    # (chat_id, char_id) pair already exists (e.g. from a race condition or
+    # bot restart), it is cleanly replaced rather than creating a duplicate that
+    # would violate the unique index.
+    await _col("active_spawns").replace_one(
+        {"chat_id": doc["chat_id"], "char_id": doc["char_id"]},
+        doc,
+        upsert=True,
+    )
 
 
 async def get_spawn(chat_id: int) -> Optional[dict]:
