@@ -45,76 +45,159 @@ def _bold(text: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CATBOX UPLOAD
+# UPLOAD PROVIDER CHAIN
+# Priority: Catbox (auth) → 0x0.st → Oshi.at
+# One file download, try each host once, fall back automatically.
 # ──────────────────────────────────────────────────────────────────────────────
 
-async def _upload_to_catbox(file_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """Upload a local file to catbox using authenticated userhash.
-    Returns (url, None) on success or (None, error) on failure."""
-    try:
-        async with aiohttp.ClientSession() as session:
+_PROVIDERS = [
+    {
+        "name":  "Catbox",
+        "emoji": "📦",
+        "permanent": True,
+    },
+    {
+        "name":  "0x0.st",
+        "emoji": "🗂️",
+        "permanent": True,
+    },
+    {
+        "name":  "Oshi.at",
+        "emoji": "☁️",
+        "permanent": True,
+    },
+]
+
+# How long (seconds) to tell the user to wait before retrying when all fail
+_ALL_FAILED_RETRY_SECONDS = 300
+
+
+async def _try_catbox(session: aiohttp.ClientSession, file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Catbox authenticated upload. Handles 412 'paused' with one backoff retry."""
+    filename = os.path.basename(file_path)
+    delay    = _CATBOX_RETRY_BASE
+
+    for attempt in range(1, _CATBOX_MAX_RETRIES + 1):
+        try:
             with open(file_path, "rb") as f:
                 form = aiohttp.FormData()
-                form.add_field("reqtype", "fileupload")
-                form.add_field("userhash", CATBOX_USERHASH)
-                form.add_field(
-                    "fileToUpload", f,
-                    filename=os.path.basename(file_path),
-                    content_type="application/octet-stream",
-                )
+                form.add_field("reqtype",      "fileupload")
+                form.add_field("userhash",     CATBOX_USERHASH)
+                form.add_field("fileToUpload", f,
+                               filename=filename,
+                               content_type="application/octet-stream")
                 async with session.post(
                     CATBOX_API, data=form,
-                    timeout=aiohttp.ClientTimeout(
-                        total=300, connect=15, sock_read=270
-                    ),
+                    timeout=aiohttp.ClientTimeout(total=300, connect=15, sock_read=270),
                 ) as resp:
                     text = (await resp.text()).strip()
+                    if resp.status == 412:
+                        if attempt < _CATBOX_MAX_RETRIES:
+                            log.warning("Catbox 412 — retry %d/%d in %ds", attempt, _CATBOX_MAX_RETRIES, delay)
+                            await asyncio.sleep(delay)
+                            delay *= 2
+                            continue
+                        return None, f"Catbox 412 (uploads paused) after {attempt} attempts"
                     if resp.status != 200:
-                        return None, f"HTTP {resp.status}: {text[:200]}"
+                        return None, f"Catbox HTTP {resp.status}: {text[:200]}"
                     if text.startswith(("https://", "http://")):
                         return text.replace("http://", "https://", 1), None
                     if text and "/" not in text and len(text) < 80:
                         return f"https://files.catbox.moe/{text}", None
-                    return None, f"Unexpected response: {text[:200]}"
+                    return None, f"Catbox unexpected response: {text[:200]}"
+        except Exception as e:
+            return None, f"Catbox {type(e).__name__}: {e}"
 
-    except aiohttp.ClientError as e:
-        return None, f"Network error: {e}"
-    except OSError as e:
-        return None, f"File error: {e}"
+    return None, "Catbox: exhausted retries"
+
+
+async def _try_0x0(session: aiohttp.ClientSession, file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """0x0.st — anonymous, permanent hosting, no auth needed."""
+    try:
+        with open(file_path, "rb") as f:
+            form = aiohttp.FormData()
+            form.add_field("file", f,
+                           filename=os.path.basename(file_path),
+                           content_type="application/octet-stream")
+            async with session.post(
+                "https://0x0.st",
+                data=form,
+                timeout=aiohttp.ClientTimeout(total=300, connect=15, sock_read=270),
+            ) as resp:
+                text = (await resp.text()).strip()
+                if resp.status == 200 and text.startswith(("https://", "http://")):
+                    return text.replace("http://", "https://", 1), None
+                return None, f"0x0.st HTTP {resp.status}: {text[:200]}"
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+        return None, f"0x0.st {type(e).__name__}: {e}"
 
 
-async def _upload_with_retry(file_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """Wrap _upload_to_catbox with exponential-backoff retry on HTTP 412.
+async def _try_oshi(session: aiohttp.ClientSession, file_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Oshi.at — anonymous, permanent, up to 5 GB."""
+    try:
+        filename = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            form = aiohttp.FormData()
+            form.add_field("f", f,
+                           filename=filename,
+                           content_type="application/octet-stream")
+            async with session.post(
+                "https://oshi.at",
+                data=form,
+                headers={"User-Agent": "SoulCatcher-Bot/2.0"},
+                timeout=aiohttp.ClientTimeout(total=300, connect=15, sock_read=270),
+            ) as resp:
+                text = (await resp.text()).strip()
+                if resp.status == 200:
+                    # oshi returns plain-text URL or JSON
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if line.startswith(("https://", "http://")):
+                            return line.replace("http://", "https://", 1), None
+                return None, f"Oshi.at HTTP {resp.status}: {text[:200]}"
+    except Exception as e:
+        return None, f"Oshi.at {type(e).__name__}: {e}"
 
-    Catbox returns 412 when it temporarily pauses uploads.
-    Retries up to 3 times: 10s → 20s → 40s wait between attempts.
+
+_PROVIDER_FNS = [_try_catbox, _try_0x0, _try_oshi]
+
+
+async def _upload_with_fallback(
+    file_path: str,
+    status_msg=None,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
-    delay    = _CATBOX_RETRY_BASE
-    last_err: Optional[str] = None
+    Try each upload provider in order. Returns (url, provider_name, error).
+    - On success: (url, provider_name, None)
+    - On total failure: (None, None, combined_error)
 
-    for attempt in range(1, _CATBOX_MAX_RETRIES + 1):
-        url, err = await _upload_to_catbox(file_path)
-        if url:
-            return url, None
+    One file download — no re-downloading between providers.
+    Updates status_msg live so the uploader can see which host is being tried.
+    """
+    errors: list[str] = []
 
-        last_err = err
-        is_412   = err and ("412" in err or "paused" in err.lower())
+    async with aiohttp.ClientSession() as session:
+        for i, (provider, fn) in enumerate(zip(_PROVIDERS, _PROVIDER_FNS)):
+            label = f"{provider['emoji']} Trying {provider['name']}…"
+            if status_msg:
+                try:
+                    suffix = f"  _(fallback {i}/{len(_PROVIDERS)-1})_" if i > 0 else ""
+                    await status_msg.edit_text(f"⏫ Uploading… {label}{suffix}")
+                except Exception:
+                    pass
 
-        if is_412 and attempt < _CATBOX_MAX_RETRIES:
-            log.warning(
-                f"Catbox 412 'Uploads paused' — retry {attempt}/{_CATBOX_MAX_RETRIES} "
-                f"in {delay}s"
-            )
-            await asyncio.sleep(delay)
-            delay *= 2
-            continue
+            log.info("Upload attempt via %s (provider %d/%d)", provider["name"], i + 1, len(_PROVIDERS))
+            url, err = await fn(session, file_path)
 
-        log.error(f"Catbox upload failed (attempt {attempt}): {err}")
-        break
+            if url:
+                log.info("✅ Upload OK via %s — %s", provider["name"], url)
+                return url, provider["name"], None
 
-    return None, last_err
+            log.warning("❌ %s failed: %s", provider["name"], err)
+            errors.append(f"{provider['name']}: {err}")
+
+    combined = " | ".join(errors)
+    return None, None, combined
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -329,16 +412,19 @@ async def _do_upload(
     status = await message.reply_text(f"⏫ Uploading {_bold(char_name)}…")
 
     try:
-        # 1. Upload to catbox (with retry on 412)
-        url, err = await _upload_with_retry(file_path)
+        # 1. Try each upload provider in order; one file download, no re-downloads
+        url, provider, err = await _upload_with_fallback(file_path, status_msg=status)
         if not url:
+            mins = _ALL_FAILED_RETRY_SECONDS // 60
             await status.edit_text(
-                f"❌ Catbox upload failed for {_bold(char_name)}\n"
-                f"Reason: `{err}`"
+                f"❌ **All upload providers failed** for {_bold(char_name)}\n\n"
+                f"Tried: Catbox → 0x0.st → Oshi.at\n"
+                f"Errors:\n`{err}`\n\n"
+                f"⏳ Please retry in ~{mins} minutes."
             )
             return None
 
-        log.info(f"Catbox OK: {url}")
+        log.info(f"Upload OK via {provider}: {url}")
 
         # 2. Build DB document
         doc: Dict[str, Any] = {
@@ -559,12 +645,18 @@ async def cmd_uchar(client, message: Message):
 
         status = await message.reply_text("⏫ Uploading new media…")
         try:
-            url, err = await _upload_with_retry(file_path)
+            url, provider, err = await _upload_with_fallback(file_path, status_msg=status)
         finally:
             _cleanup(file_path)
 
         if not url:
-            return await status.edit_text(f"❌ Upload failed.\nReason: `{err}`")
+            mins = _ALL_FAILED_RETRY_SECONDS // 60
+            return await status.edit_text(
+                f"❌ **All upload providers failed**\n\n"
+                f"Tried: Catbox → 0x0.st → Oshi.at\n"
+                f"Errors:\n`{err}`\n\n"
+                f"⏳ Please retry in ~{mins} minutes."
+            )
 
         await update_character(char_id, {"$set": (
             {"video_url": url, "img_url": ""} if is_vid else {"img_url": url, "video_url": ""}
