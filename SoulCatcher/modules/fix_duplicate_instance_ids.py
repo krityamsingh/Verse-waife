@@ -29,12 +29,14 @@ print(f"✅  Connected to: {DB_NAME}.user_characters")
 print("🔍  Scanning for duplicate instance_id values...\n")
 
 # ── Find all duplicated instance_id values ────────────────────────────────────
+# Use $min (not $push) to avoid accumulating all _ids in memory.
+# allowDiskUse lets the $group spill to disk on Atlas free-tier.
 pipeline = [
-    {"$group": {"_id": "$instance_id", "docs": {"$push": "$_id"}, "count": {"$sum": 1}}},
+    {"$group": {"_id": "$instance_id", "keep_id": {"$min": "$_id"}, "count": {"$sum": 1}}},
     {"$match": {"count": {"$gt": 1}}},
     {"$sort":  {"count": -1}},
 ]
-duplicates = list(col.aggregate(pipeline))
+duplicates = list(col.aggregate(pipeline, allowDiskUse=True))
 
 if not duplicates:
     print("🎉  No duplicates found — collection is clean!")
