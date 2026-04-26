@@ -20,7 +20,6 @@ from ..database import insert_character, get_character, update_character
 log = logging.getLogger("SoulCatcher.autouploader")
 
 UPLOAD_CHANNEL_ID: int  = _CFG_UPLOAD_CHANNEL_ID if _CFG_UPLOAD_CHANNEL_ID else -1003869604435
-CATBOX_API        = "https://catbox.moe/user/api.php"
 CATBOX_USERHASH   = "de47eb51da1e8bc98c5ca9cf3"   # catbox.moe authenticated uploads
 MAX_FILE_BYTES    = 50 * 1024 * 1024  # 50 MB
 
@@ -86,7 +85,7 @@ async def _try_catbox(session: aiohttp.ClientSession, file_path: str) -> Tuple[O
                                filename=filename,
                                content_type="application/octet-stream")
                 async with session.post(
-                    CATBOX_API, data=form,
+                    "https://catbox.moe/user/api.php", data=form,
                     timeout=aiohttp.ClientTimeout(total=300, connect=15, sock_read=270),
                 ) as resp:
                     text = (await resp.text()).strip()
@@ -804,11 +803,6 @@ async def cmd_charinfo(_, message: Message):
         f"{_sub_line(char)}\n"
         f"{'─' * 28}\n"
         f"{media_type}:  `{media_url}`\n"
-        f"💰  `{char.get('sell_price_min', 0):,} – {char.get('sell_price_max', 0):,}`\n"
-        f"🌸  Kakera: `{char.get('kakera_reward', '?')}`\n"
-        f"Trade: `{char.get('trade_allowed', '?')}`  "
-        f"Gift: `{char.get('gift_allowed', '?')}`  "
-        f"Max: `{char.get('max_per_user', 0) or 'unlimited'}`\n"
         f"{'─' * 28}\n"
         f"📤  {char.get('mention', '?')}\n"
         f"🕒  `{char.get('added_at', '?')}`"
