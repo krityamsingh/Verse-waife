@@ -1,515 +1,274 @@
-"""
-spawn.py — Character spawn & guess engine for SoulCatcher.
-
-Key improvements over previous version
-───────────────────────────────────────
-• Per-chat asyncio.Lock  → eliminates all race conditions
-• dataclass SpawnSession → typed, readable, IDE-friendly state
-• Compiled regex          → faster normalization (re.compile once)
-• asyncio.gather          → parallel wishlist DMs
-• Single DB read per msg  → group data cached into session on spawn
-• Structured logging      → every important event is traceable
-• Narrow exception catches → swallowed bugs are now visible
-"""
-
+"""SoulCatcher/modules/spawn.py — Character spawning & claiming system."""
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-import unicodedata
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from typing import Optional
+import random
+from datetime import datetime, timedelta
 
+import SoulCatcher as _soul
 from pyrogram import filters
-from pyrogram.errors import MessageNotModified, FloodWait
 from pyrogram.types import Message
 
-from .. import app
-from ..rarity import (
-    roll_rarity, roll_sub_rarity, rarity_display, get_rarity,
-    get_kakera_reward, SPAWN_SETTINGS, get_claim_window,
+from SoulCatcher.database import (
+    get_or_create_user,
+    get_group_settings,
+    track_group,
+    get_random_character,
+    create_spawn,
+    get_spawn,
+    delete_spawn,
+    add_to_harem,
+    add_xp,
+    add_balance,
+    get_wishlist_users,
+    increment_drop_log,
+    get_drop_count,
+    is_user_banned,
+    is_globally_banned,
+    increment_char_stat,
 )
-from ..database import (
-    get_group, increment_group_msg, reset_group_msg,
-    check_and_record_drop, get_random_character,
-    create_spawn, expire_spawn,
-    add_to_harem, get_or_create_user, add_balance,
-    count_rarity_in_harem, get_wishers, is_user_banned,
-    get_character, set_group_spawn_limit,
+from SoulCatcher.rarity import (
+    roll_rarity,
+    roll_sub_rarity,
+    get_rarity,
+    rarity_display,
+    get_kakera_reward,
+    get_xp_reward,
+    get_claim_window,
+    get_drop_limit,
+    SPAWN_SETTINGS,
 )
+from SoulCatcher.config import LOG_CHANNEL_ID
 
-# ─────────────────────────────────────────────────────────────────────────────
 log = logging.getLogger("SoulCatcher.spawn")
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-_DEFAULT_SPAWN_THRESHOLD: int = 100
-_BOT_OWNER_ID: int = 6118760915
-_BLOCK_CHAR = "░"
-
-# Pre-compiled for speed — called on every incoming message.
-_WHITESPACE_RE = re.compile(r"\s+")
-
-# ── Commands excluded from the message counter ────────────────────────────────
-_ALL_COMMANDS: list[str] = [
-    "start", "drop", "spawn", "harem", "view", "setfav", "burn", "sort",
-    "daily", "bal", "spin", "pay", "shop", "sell", "buy", "market",
-    "trade", "gift", "marry", "propose", "epropose", "basket",
-    "wish", "wishlist", "profile", "status", "rank", "top", "toprarity",
-    "richest", "rarityinfo", "event",
-    "topcollector", "topc", "tc",
-    "wguess",
-    "gban", "ungban", "gmute", "ungmute", "broadcast", "transfer",
-    "eval", "ev", "shell", "sh", "bash", "gitpull", "update",
-    "addchar", "delchar", "setmode", "forcedrop", "ban", "unban",
-    "addsudo", "rmsudo", "sudolist", "adddev", "rmdev", "devlist",
-    "adduploader", "rmuploader", "uploaderlist",
-    "upload", "il", "uchar",
-    "setspawn",
-    "summon", "exitsummon", "reloadsummon",
-]
+# ── Per-group message counters ────────────────────────────────────────────────
+_msg_counters:  dict[int, int]      = {}
+_last_spawn:    dict[int, datetime] = {}
+_active_spawns: dict[int, dict]     = {}   # chat_id → spawn doc cache
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Session state
-# ─────────────────────────────────────────────────────────────────────────────
-
-@dataclass
-class SpawnSession:
-    """All live-spawn metadata for a single chat."""
-    spawn_id:      str
-    char:          dict
-    eff:           object          # Rarity object
-    msg:           Message
-    claim_win:     int
-    answer_tokens: frozenset[str]  # frozenset → O(1) lookup
-    lock:          asyncio.Lock = field(default_factory=asyncio.Lock)
-    claimed:       bool = False
-
-
-# chat_id → SpawnSession
-_active_spawns: dict[int, SpawnSession] = {}
-
-# Per-chat spawn lock so only one spawn can be created at a time.
-_spawn_creation_locks: dict[int, asyncio.Lock] = {}
-
-
-def _get_creation_lock(chat_id: int) -> asyncio.Lock:
-    if chat_id not in _spawn_creation_locks:
-        _spawn_creation_locks[chat_id] = asyncio.Lock()
-    return _spawn_creation_locks[chat_id]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Text helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _normalize(text: str) -> str:
-    """
-    Lowercase + strip accents + collapse whitespace.
-    'Náruto' → 'naruto', 'Monkey D Luffy' → 'monkey d luffy'.
-    """
-    nfkd = unicodedata.normalize("NFKD", text)
-    ascii_text = nfkd.encode("ascii", "ignore").decode()
-    return _WHITESPACE_RE.sub(" ", ascii_text).strip().lower()
-
-
-def _name_tokens(name: str) -> frozenset[str]:
-    """
-    Returns a frozenset of every accepted guess for *name*.
-
-    Rules
-    ─────
-    • Full normalized name is always accepted.
-    • Individual words that are ≥ 2 characters are accepted (avoids
-      single-letter initials like the 'D' in 'Monkey D Luffy').
-
-    'Monkey D Luffy' → frozenset({'monkey d luffy', 'monkey', 'luffy'})
-    """
-    full_norm = _normalize(name)
-    parts = [p for p in full_norm.split() if len(p) >= 2]
-    parts.append(full_norm)
-    return frozenset(parts)
-
-
-def _obscure_name(name: str) -> str:
-    """
-    Shows first letter of every word, the rest become ░.
-    'Monkey D Luffy' → 'M░░░░░ D L░░░░'
-    """
-    return " ".join(
-        w if len(w) <= 1 else w[0] + _BLOCK_CHAR * (len(w) - 1)
-        for w in name.split()
-    )
-
-
-def _now_utc() -> datetime:
-    """Current UTC time as a **timezone-naive** datetime.
-
-    MongoDB / most ORMs store datetimes without tzinfo, so we stay naive
-    throughout to avoid "can't subtract offset-naive and offset-aware
-    datetimes" TypeErrors.
-    """
-    return datetime.utcnow()
-
-
-def _seconds_since(dt: "Optional[datetime]") -> float:
-    """Seconds elapsed since *dt*, which may be naive **or** aware.
-
-    Normalises *dt* to naive UTC before subtracting so callers never
-    have to worry about what the database returned.
-    Returns ``inf`` when *dt* is ``None`` (i.e. never happened).
-    """
-    if dt is None:
-        return float("inf")
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return (_now_utc() - dt).total_seconds()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /setspawn — owner-only command
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("setspawn") & filters.group)
-async def cmd_setspawn(client, message: Message) -> None:
-    """Set how many messages trigger a spawn.  Owner-only."""
-    if message.from_user.id != _BOT_OWNER_ID:
-        return await message.reply_text("❌ Only the bot owner can change the spawn limit.")
-
-    args = message.command[1:]
-    if not args or not args[0].isdigit():
-        return await message.reply_text(
-            "⚙️ **Usage:** `/setspawn <messages>`\n"
-            "Example: `/setspawn 100` — spawn after every 100 messages.\n"
-            "Allowed values: **1 – 10 000**"
-        )
-
-    limit = int(args[0])
-    if not 1 <= limit <= 10_000:
-        return await message.reply_text("⚠️ Limit must be between **1** and **10 000**.")
-
-    await set_group_spawn_limit(message.chat.id, limit)
-    log.info("spawn_limit_set chat=%d limit=%d by=%d", message.chat.id, limit, message.from_user.id)
-    await message.reply_text(
-        f"✅ Spawn message limit set to **{limit}** messages.\n"
-        f"A character will appear after every **{limit}** messages sent in this group."
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Message counter → auto-spawn
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.group & filters.text & ~filters.command(_ALL_COMMANDS))
-async def on_group_message(client, message: Message) -> None:
-    chat_id = message.chat.id
-
-    # ── Active session: check guess first, never count toward the threshold ──
-    session = _active_spawns.get(chat_id)
-    if session:
-        await _check_guess(client, message, chat_id, session)
-        return
-
-    # ── Load group once ──────────────────────────────────────────────────────
-    group = await get_group(chat_id)
-    if not group.get("spawn_enabled", True) or group.get("banned"):
-        return
-
-    # ── Threshold & cooldown check ───────────────────────────────────────────
-    threshold: int = group.get(
-        "spawn_msg_limit",
-        SPAWN_SETTINGS.get("messages_per_spawn", _DEFAULT_SPAWN_THRESHOLD),
-    )
-    count = await increment_group_msg(chat_id)
+def _should_spawn(chat_id: int, threshold: int) -> bool:
+    count = _msg_counters.get(chat_id, 0) + 1
+    _msg_counters[chat_id] = count
     if count < threshold:
+        return False
+    now = datetime.utcnow()
+    last = _last_spawn.get(chat_id)
+    cooldown = SPAWN_SETTINGS["cooldown_seconds"]
+    if last and (now - last).total_seconds() < cooldown:
+        return False
+    _msg_counters[chat_id] = 0
+    _last_spawn[chat_id] = now
+    return True
+
+
+async def _do_spawn(client, chat_id: int) -> None:
+    # Pick rarity
+    rarity_tier = roll_rarity()
+    sub_tier    = roll_sub_rarity(rarity_tier.name)
+    final_tier  = sub_tier or rarity_tier
+
+    # Check daily drop limit
+    limit = get_drop_limit(final_tier.name)
+    if limit:
+        count = await get_drop_count(chat_id, final_tier.name)
+        if count >= limit:
+            # Fall back to common
+            from SoulCatcher.rarity import RARITIES
+            final_tier = RARITIES["common"]
+
+    # Get a character
+    char = await get_random_character(final_tier.name)
+    if not char:
+        # Fallback to any common
+        from SoulCatcher.rarity import RARITIES
+        char = await get_random_character(RARITIES["common"].name)
+    if not char:
+        log.warning("No characters in DB for chat %d — skipping spawn.", chat_id)
         return
 
-    cooldown: int = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
-    last: Optional[datetime] = group.get("last_spawn")
-    if _seconds_since(last) < cooldown:
-        await reset_group_msg(chat_id)
-        return
+    # Increment drop log
+    await increment_drop_log(chat_id, final_tier.name)
 
-    await reset_group_msg(chat_id)
-    await _do_spawn(client, message, chat_id)
+    # Build spawn doc
+    expires = datetime.utcnow() + timedelta(seconds=get_claim_window(final_tier.name))
+    spawn_doc = {
+        "chat_id":    chat_id,
+        "char_id":    char["id"],
+        "rarity":     final_tier.name,
+        "expires_at": expires,
+        "spawned_at": datetime.utcnow(),
+        "claimed":    False,
+    }
 
+    # Remove old spawn if any
+    await delete_spawn(chat_id)
+    await create_spawn(spawn_doc)
+    _active_spawns[chat_id] = {**spawn_doc, "char": char, "tier": final_tier}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# /drop — manual spawn command
-# ─────────────────────────────────────────────────────────────────────────────
+    # Build announcement
+    rarity_str = rarity_display(final_tier.name)
+    window     = get_claim_window(final_tier.name)
 
-@app.on_message(filters.command(["drop", "spawn"]) & filters.group)
-async def cmd_drop(client, message: Message) -> None:
-    chat_id = message.chat.id
+    if final_tier.announce_spawn:
+        header = f"🚨 **RARE SPAWN!** 🚨\n\n"
+    else:
+        header = "🌸 **A character appeared!**\n\n"
 
-    group = await get_group(chat_id)
-    if not group.get("spawn_enabled", True) or group.get("banned"):
-        return await message.reply_text("❌ Spawning is disabled in this group.")
-
-    if chat_id in _active_spawns:
-        return await message.reply_text("⚠️ A character is already waiting to be guessed!")
-
-    cooldown: int = group.get("spawn_cooldown", SPAWN_SETTINGS.get("cooldown_seconds", 0))
-    last: Optional[datetime] = group.get("last_spawn")
-    elapsed = _seconds_since(last)
-    if elapsed < cooldown:
-        remaining = int(cooldown - elapsed)
-        return await message.reply_text(f"⏳ Next drop in **{remaining}s**")
-
-    await _do_spawn(client, message, chat_id)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Core spawn logic
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _do_spawn(client, message: Message, chat_id: int) -> None:
-    """Roll a character, post the spawn message, register the session."""
-    async with _get_creation_lock(chat_id):
-        # Double-check: another coroutine may have spawned while we waited.
-        if chat_id in _active_spawns:
-            return
-
-        # ── Roll rarity ──────────────────────────────────────────────────────
-        tier = roll_rarity()
-        if not await check_and_record_drop(chat_id, tier.name):
-            tier = get_rarity("common")
-
-        if tier.spawn_requires_activity:
-            g = await get_group(chat_id)
-            if g.get("message_count", 0) < SPAWN_SETTINGS.get("activity_threshold", 0):
-                tier = get_rarity("common")
-
-        sub = roll_sub_rarity(tier.name)
-        eff = sub or tier
-
-        # ── Pick character ───────────────────────────────────────────────────
-        char = await get_random_character(eff.name) or await get_random_character("common")
-        if not char:
-            log.warning("spawn_no_char chat=%d rarity=%s", chat_id, eff.name)
-            return
-
-        if char["rarity"] != eff.name:
-            eff = get_rarity(char["rarity"]) or eff
-
-        # ── Build spawn message ──────────────────────────────────────────────
-        reveal      = SPAWN_SETTINGS.get("reveal_rarity_on_spawn", True)
-        rarity_hint = rarity_display(eff.name) if reveal else "❓ **???**"
-        claim_win   = get_claim_window(eff.name)
-        banner      = f"🚨 **RARE SPAWN ALERT!** {eff.emoji}\n\n" if eff.announce_spawn else ""
-        hidden_name = _obscure_name(char["name"])
-
-        text = (
-            f"{banner}✨ **A mystery soul has appeared!**\n\n"
-            f"👤 **{hidden_name}**\n"
-            f"📖 _{char.get('anime', 'Unknown')}_\n"
-            f"⭐ {rarity_hint}\n\n"
-            f"🔤 **Type the character's name to claim!**\n"
-            f"💡 _First, middle, or last name all work!_ (`{claim_win}s`)"
-        )
-
-        # ── Send spawn message ───────────────────────────────────────────────
-        try:
-            if char.get("video_url"):
-                msg = await message.reply_video(char["video_url"], caption=text)
-            elif char.get("img_url"):
-                msg = await message.reply_photo(char["img_url"], caption=text)
-            else:
-                msg = await message.reply_text(text)
-        except FloodWait as e:
-            log.warning("spawn_flood_wait chat=%d seconds=%d", chat_id, e.value)
-            await asyncio.sleep(e.value)
-            return
-        except Exception:
-            log.exception("spawn_send_failed chat=%d char=%s", chat_id, char.get("name"))
-            return
-
-        # ── Persist & register session ───────────────────────────────────────
-        spawn_id = await create_spawn(chat_id, msg.id, char, eff.name)
-
-        _active_spawns[chat_id] = SpawnSession(
-            spawn_id      = spawn_id,
-            char          = char,
-            eff           = eff,
-            msg           = msg,
-            claim_win     = claim_win,
-            answer_tokens = _name_tokens(char["name"]),
-        )
-
-        log.info(
-            "spawned chat=%d char=%r rarity=%s spawn_id=%s window=%ds",
-            chat_id, char["name"], eff.name, spawn_id, claim_win,
-        )
-
-    # Background tasks run outside the creation lock.
-    asyncio.create_task(_expire(client, chat_id, msg, spawn_id, claim_win))
-    asyncio.create_task(_ping_wishlist(client, char["id"], chat_id))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Guess handler
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _check_guess(
-    client,
-    message: Message,
-    chat_id: int,
-    session: SpawnSession,
-) -> None:
-    """
-    Validate a message as a character-name guess.
-    Uses per-session asyncio.Lock to safely handle concurrent correct guesses.
-    """
-    guess = _normalize(message.text or "")
-    if not guess or guess not in session.answer_tokens:
-        return
-
-    # ── Acquire session lock ─────────────────────────────────────────────────
-    async with session.lock:
-        # Re-check inside lock: another user may have claimed between
-        # the token lookup and acquiring the lock.
-        if session.claimed or _active_spawns.get(chat_id) is not session:
-            return
-
-        user = message.from_user
-
-        if await is_user_banned(user.id):
-            return await message.reply_text("🚫 You are banned and cannot claim characters.")
-
-        await get_or_create_user(
-            user.id,
-            user.username   or "",
-            user.first_name or "",
-            getattr(user, "last_name", "") or "",
-        )
-
-        char        = session.char
-        eff         = session.eff
-        rarity_name = eff.name
-
-        # ── Rarity cap ───────────────────────────────────────────────────────
-        if eff.max_per_user > 0:
-            current_count = await count_rarity_in_harem(user.id, rarity_name)
-            if current_count >= eff.max_per_user:
-                return await message.reply_text(
-                    f"⚠️ You already have the max **{eff.max_per_user}** "
-                    f"{eff.display_name} characters allowed!"
-                )
-
-        # ── Mark claimed & remove from active table ──────────────────────────
-        session.claimed = True
-        _active_spawns.pop(chat_id, None)
-
-        # ── Record claim ─────────────────────────────────────────────────────
-        typed       = (message.text or "").strip()
-        full_name   = char["name"]
-        guessed_full = _normalize(typed) == _normalize(full_name)
-        name_label  = (
-            f"**{full_name}**"
-            if guessed_full
-            else f"**{full_name}** _(guessed as '{typed}')_"
-        )
-
-        kakera = get_kakera_reward(rarity_name)   # sync helper — no await needed
-        iid, *_ = await asyncio.gather(
-            add_to_harem(user.id, char),
-            add_balance(user.id, kakera),
-            expire_spawn(session.spawn_id),
-        )
-
-        log.info(
-            "claimed chat=%d user=%d char=%r rarity=%s kakera=%d spawn_id=%s",
-            chat_id, user.id, full_name, rarity_name, kakera, session.spawn_id,
-        )
-
-    # ── Edit spawn message with result ───────────────────────────────────────
-    result_text = (
-        f"🎉 **{user.first_name}** guessed correctly and claimed {name_label}!\n\n"
-        f"{eff.emoji} **{eff.display_name}**\n"
-        f"📖 _{char.get('anime', 'Unknown')}_\n"
-        f"🆔 `{iid}`\n"
-        f"💰 +**{kakera:,} kakera**!"
-    )
-    await _safe_edit(session, result_text, fallback_message=message)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Expiry timer
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _expire(client, chat_id: int, msg: Message, spawn_id: str, delay: int) -> None:
-    await asyncio.sleep(delay)
-
-    session = _active_spawns.pop(chat_id, None)
-    if not session or session.spawn_id != spawn_id:
-        return   # already claimed — nothing to do
-
-    await expire_spawn(spawn_id)
-
-    char = session.char
-    answer_text = (
-        f"⏰ **Time's up!** Nobody guessed the character.\n"
-        f"The answer was: **{char['name']}** "
-        f"_({char.get('anime', 'Unknown')})_ 👻"
-    )
-    await _safe_edit(session, answer_text, fallback_client=client, fallback_chat=chat_id)
-    log.info("expired chat=%d spawn_id=%s char=%r", chat_id, spawn_id, char["name"])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Wishlist ping  (runs in parallel for all wishers)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _ping_wishlist(client, char_id: str, chat_id: int) -> None:
-    wishers = await get_wishers(char_id)
-    if not wishers:
-        return
-
-    char = await get_character(char_id)
-    name = char["name"] if char else "A character"
-    text = (
-        f"💛 **{name}** (on your wishlist) just spawned!\n"
-        f"Type their first, middle, or last name to claim — fast! 🏃"
+    caption = (
+        f"{header}"
+        f"**{char['name']}**\n"
+        f"📺 *{char.get('anime', 'Unknown')}*\n"
+        f"✨ Rarity: **{rarity_str}**\n\n"
+        f"⏳ Type the **character's name** to claim!\n"
+        f"⏱ Window: `{window}s`"
     )
 
-    async def _dm(uid: int) -> None:
-        try:
-            await client.send_message(uid, text)
-        except Exception:
-            pass   # DMs may be blocked; silently skip
-
-    await asyncio.gather(*(_dm(uid) for uid in wishers))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Shared edit helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def _safe_edit(
-    session: SpawnSession,
-    text: str,
-    *,
-    fallback_message: Optional[Message] = None,
-    fallback_client=None,
-    fallback_chat: Optional[int] = None,
-) -> None:
-    """Edit the spawn message caption/text; fall back to a new message on failure."""
-    char = session.char
+    # Send spawn message
     try:
-        if char.get("video_url") or char.get("img_url"):
-            await session.msg.edit_caption(text)
+        if char.get("video_url"):
+            msg = await client.send_video(chat_id, char["video_url"], caption=caption)
+        elif char.get("img_url"):
+            msg = await client.send_photo(chat_id, char["img_url"], caption=caption)
         else:
-            await session.msg.edit_text(text)
-    except MessageNotModified:
-        pass   # content already matches — ignore
-    except Exception:
-        log.exception("safe_edit_failed")
+            msg = await client.send_message(chat_id, caption)
+        _active_spawns[chat_id]["msg_id"] = msg.id
+    except Exception as exc:
+        log.error("Failed to send spawn in %d: %s", chat_id, exc)
+
+    # Ping wishlist users
+    if final_tier.wishlist_ping:
+        wishlist_uids = await get_wishlist_users(char["id"])
+        if wishlist_uids:
+            pings = " ".join(f"[👤](tg://user?id={uid})" for uid in wishlist_uids[:5])
+            try:
+                await client.send_message(
+                    chat_id,
+                    f"🔔 Wishlist ping! {pings}\n**{char['name']}** just spawned!",
+                    disable_notification=False,
+                )
+            except Exception:
+                pass
+
+    # Schedule expiry cleanup
+    asyncio.create_task(_expire_spawn(client, chat_id, char["id"], window))
+
+
+async def _expire_spawn(client, chat_id: int, char_id: str, window: int) -> None:
+    await asyncio.sleep(window + 2)
+    spawn = _active_spawns.get(chat_id)
+    if spawn and spawn.get("char_id") == char_id and not spawn.get("claimed"):
+        await delete_spawn(chat_id)
+        _active_spawns.pop(chat_id, None)
         try:
-            if fallback_message:
-                await fallback_message.reply_text(text)
-            elif fallback_client and fallback_chat:
-                await fallback_client.send_message(fallback_chat, text)
+            char_name = spawn["char"]["name"]
+            await client.send_message(
+                chat_id,
+                f"⌛ **{char_name}** fled! Nobody claimed them in time.",
+            )
         except Exception:
-            log.exception("fallback_send_failed")
+            pass
+
+
+# ── Message listener ──────────────────────────────────────────────────────────
+
+@_soul.app.on_message(filters.group & filters.text & ~filters.command(""))
+async def message_listener(client, m: Message):
+    if not m.from_user:
+        return
+
+    chat_id = m.chat.id
+    uid     = m.from_user.id
+    text    = m.text.strip()
+
+    # Track group
+    asyncio.create_task(track_group(chat_id, m.chat.title or ""))
+
+    # Check for active claim attempt
+    spawn = _active_spawns.get(chat_id)
+    if spawn and not spawn.get("claimed"):
+        char      = spawn["char"]
+        char_name = char["name"].lower().strip()
+        guess     = text.lower().strip()
+
+        # Allow partial match (first word at minimum)
+        char_words  = char_name.split()
+        guess_words = guess.split()
+
+        matched = (
+            guess == char_name
+            or (len(char_words) > 1 and guess == char_words[0])
+            or char_name in guess
+            or guess in char_name
+        )
+
+        if matched:
+            # Check bans
+            if await is_globally_banned(uid) or await is_user_banned(uid):
+                await m.reply("❌ You are banned from the game.")
+                return
+
+            # Claim!
+            spawn["claimed"] = True
+            await delete_spawn(chat_id)
+            _active_spawns.pop(chat_id, None)
+
+            u = m.from_user
+            await get_or_create_user(uid, u.username or "", u.first_name or "", u.last_name or "")
+
+            instance_id = await add_to_harem(uid, char)
+            kakera      = get_kakera_reward(spawn["rarity"])
+            xp_gain     = get_xp_reward(spawn["rarity"])
+
+            await add_balance(uid, kakera)
+            new_xp, new_level, levelled_up = await add_xp(uid, xp_gain)
+            await increment_char_stat(char["id"], "claims")
+
+            tier        = spawn["tier"]
+            rarity_str  = rarity_display(spawn["rarity"])
+
+            reply = (
+                f"🎉 **{u.first_name}** claimed **{char['name']}**!\n"
+                f"📺 *{char.get('anime', 'Unknown')}*\n"
+                f"✨ {rarity_str}\n"
+                f"🆔 Instance: `{instance_id}`\n"
+                f"💰 +{kakera:,} kakera | ⭐ +{xp_gain:,} XP"
+            )
+
+            if levelled_up:
+                reply += f"\n\n🆙 **Level Up!** You are now level **{new_level}**!"
+
+            await m.reply(reply)
+
+            # Log to log channel
+            if LOG_CHANNEL_ID:
+                try:
+                    await client.send_message(
+                        LOG_CHANNEL_ID,
+                        f"🎴 **Claim Log**\n"
+                        f"👤 {u.first_name} (`{uid}`)\n"
+                        f"🎭 {char['name']} — {rarity_str}\n"
+                        f"👥 Chat: `{chat_id}`",
+                    )
+                except Exception:
+                    pass
+            return
+
+    # Auto-spawn logic
+    gs = await get_group_settings(chat_id)
+    if not gs.get("spawn_enabled", True):
+        return
+    threshold = gs.get("spawn_frequency", SPAWN_SETTINGS["messages_per_spawn"])
+    if _should_spawn(chat_id, threshold):
+        asyncio.create_task(_do_spawn(client, chat_id))
+
+
+# ── /drop command ─────────────────────────────────────────────────────────────
+
+@_soul.app.on_message(filters.command("drop") & filters.group & _soul.sudo_filter)
+async def force_drop(client, m: Message):
+    await m.reply("🌀 Forcing a spawn...")
+    _last_spawn.pop(m.chat.id, None)   # reset cooldown for sudo
+    asyncio.create_task(_do_spawn(client, m.chat.id))

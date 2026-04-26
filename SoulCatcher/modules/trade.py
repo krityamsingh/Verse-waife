@@ -1,204 +1,233 @@
-"""SoulCatcher/modules/trade.py
-Command: /trade
-Callbacks: trade:
-"""
-
+"""SoulCatcher/modules/trade.py — /trade, /gift."""
 from __future__ import annotations
-import uuid
+
 import logging
+import uuid
 from datetime import datetime
-from html import escape as he
 
-from pyrogram import filters, enums
-from pyrogram.types import Message, InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB
+import SoulCatcher as _soul
+from pyrogram import filters
+from pyrogram.types import Message, InlineKeyboardMarkup as IKM, InlineKeyboardButton as IKB, CallbackQuery
 
-from .. import app
-from ..rarity import get_rarity, can_trade
-from ..database import (
-    get_harem_char, transfer_harem_char,
-    deduct_balance,
-    create_trade, get_trade, update_trade,
-    _col,
+from SoulCatcher.database import (
+    get_harem_char,
+    transfer_harem_char,
+    create_trade,
+    get_trade,
+    update_trade,
+    get_pending_trade,
+    add_balance,
+    update_user,
 )
+from SoulCatcher.rarity import can_trade, can_gift, rarity_display, ECONOMY
 
 log = logging.getLogger("SoulCatcher.trade")
 
-PM = enums.ParseMode.HTML   # use HTML everywhere — no markdown entity issues
 
+# ── /gift ─────────────────────────────────────────────────────────────────────
 
-def _fmt(n) -> str:
-    try:
-        return f"{int(n):,}"
-    except Exception:
-        return str(n)
+@_soul.app.on_message(filters.command("gift"))
+async def gift_cmd(_, m: Message):
+    if not m.reply_to_message:
+        await m.reply("↩️ Reply to a user to gift them a character.")
+        return
 
+    parts = m.text.split()
+    if len(parts) < 2:
+        await m.reply("Usage: `/gift <instanceID>` (reply to recipient)")
+        return
 
-def _mention(name: str, uid: int) -> str:
-    return f'<a href="tg://user?id={uid}">{he(name)}</a>'
+    instance_id = parts[1].upper()
+    sender      = m.from_user
+    target      = m.reply_to_message.from_user
 
+    if target.id == sender.id:
+        await m.reply("❌ You can't gift yourself!")
+        return
+    if target.is_bot:
+        await m.reply("❌ You can't gift a bot.")
+        return
 
-# ─────────────────────────────────────────────────────────────────────────────
-# /trade
-# ─────────────────────────────────────────────────────────────────────────────
+    char = await get_harem_char(sender.id, instance_id)
+    if not char:
+        await m.reply("❌ Character not found in your harem.")
+        return
 
-@app.on_message(filters.command("trade"))
-async def cmd_trade(_, message: Message):
-    if not message.reply_to_message:
-        return await message.reply_text(
-            "Reply to the user you want to trade with:\n"
-            "<code>/trade &lt;your_iid&gt; &lt;their_iid&gt;</code>",
-            parse_mode=PM,
-        )
+    if not can_gift(char["rarity"]):
+        r_str = rarity_display(char["rarity"])
+        await m.reply(f"❌ **{r_str}** characters cannot be gifted.")
+        return
 
-    args = message.command
-    if len(args) < 3:
-        return await message.reply_text(
-            "Usage: <code>/trade &lt;your_iid&gt; &lt;their_iid&gt;</code>",
-            parse_mode=PM,
-        )
-
-    proposer = message.from_user
-    receiver = message.reply_to_message.from_user
-
-    if receiver.is_bot or receiver.id == proposer.id:
-        return await message.reply_text("❌ Can't trade with bots or yourself!", parse_mode=PM)
-
-    my_iid    = args[1].upper()
-    their_iid = args[2].upper()
-
-    my_char    = await get_harem_char(proposer.id, my_iid)
-    their_char = await get_harem_char(receiver.id, their_iid)
-
-    if not my_char:
-        return await message.reply_text(
-            f"❌ <code>{he(my_iid)}</code> not found in your harem.",
-            parse_mode=PM,
-        )
-    if not their_char:
-        return await message.reply_text(
-            f"❌ <code>{he(their_iid)}</code> not found in {he(receiver.first_name)}'s harem.",
-            parse_mode=PM,
-        )
-
-    if not can_trade(my_char.get("rarity", "")):
-        return await message.reply_text(
-            f"❌ <b>{he(my_char['name'])}</b> cannot be traded!",
-            parse_mode=PM,
-        )
-    if not can_trade(their_char.get("rarity", "")):
-        return await message.reply_text(
-            f"❌ <b>{he(their_char['name'])}</b> cannot be traded!",
-            parse_mode=PM,
-        )
-
-    fee      = 500
-    trade_id = str(uuid.uuid4())[:8].upper()
-
-    await create_trade({
-        "trade_id":      trade_id,
-        "proposer_id":   proposer.id,
-        "receiver_id":   receiver.id,
-        "proposer_char": my_iid,
-        "receiver_char": their_iid,
-        "fee":           fee,
-        "status":        "pending",
-        "created_at":    datetime.utcnow(),
-    })
-
-    my_tier    = get_rarity(my_char.get("rarity", ""))
-    their_tier = get_rarity(their_char.get("rarity", ""))
-
-    kb = IKM([[
-        IKB("✅ Accept",  callback_data=f"trade:accept:{trade_id}"),
-        IKB("❌ Decline", callback_data=f"trade:decline:{trade_id}"),
+    buttons = IKM([[
+        IKB("✅ Confirm Gift", callback_data=f"gift_do:{sender.id}:{target.id}:{instance_id}"),
+        IKB("❌ Cancel",       callback_data=f"gift_cancel:{sender.id}"),
     ]])
 
-    await message.reply_text(
-        f"🔄 <b>Trade Proposal</b> (<code>{trade_id}</code>)\n\n"
-        f"<b>{he(proposer.first_name)}</b> offers:\n"
-        f"  {my_tier.emoji if my_tier else '?'} <b>{he(my_char['name'])}</b> <code>{my_iid}</code>\n\n"
-        f"For {_mention(receiver.first_name, receiver.id)}'s:\n"
-        f"  {their_tier.emoji if their_tier else '?'} <b>{he(their_char['name'])}</b> <code>{their_iid}</code>\n\n"
-        f"Fee: <code>{_fmt(fee)}</code> kakera each\n\n"
-        f"{_mention(receiver.first_name, receiver.id)} — accept or decline?",
-        reply_markup=kb,
-        parse_mode=PM,
+    r_str = rarity_display(char["rarity"])
+    await m.reply(
+        f"🎁 Gift **{char['name']}** ({r_str}) to **{target.first_name}**?",
+        reply_markup=buttons,
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Callback
-# ─────────────────────────────────────────────────────────────────────────────
+@_soul.app.on_callback_query(filters.regex(r"^gift_do:(\d+):(\d+):(\w+)$"))
+async def gift_do_cb(_, cq: CallbackQuery):
+    _, from_uid, to_uid, instance_id = cq.data.split(":")
+    from_uid, to_uid = int(from_uid), int(to_uid)
 
-@app.on_callback_query(filters.regex(r"^trade:"))
-async def trade_cb(_, cb):
-    await cb.answer()
-    _, action, trade_id = cb.data.split(":")
-    uid   = cb.from_user.id
+    if cq.from_user.id != from_uid:
+        await cq.answer("Not your gift!", show_alert=True)
+        return
+
+    char = await get_harem_char(from_uid, instance_id)
+    if not char:
+        await cq.answer("Character not found!", show_alert=True)
+        return
+
+    success = await transfer_harem_char(instance_id, from_uid, to_uid)
+    if success:
+        await update_user(from_uid, {"$inc": {"total_gifted": 1}})
+        await cq.message.edit_text(
+            f"🎁 **{char['name']}** gifted successfully!\n"
+            f"✅ Transferred to user `{to_uid}`."
+        )
+    else:
+        await cq.answer("Transfer failed. Try again.", show_alert=True)
+
+
+@_soul.app.on_callback_query(filters.regex(r"^gift_cancel:(\d+)$"))
+async def gift_cancel_cb(_, cq: CallbackQuery):
+    if cq.from_user.id != int(cq.data.split(":")[1]):
+        await cq.answer("Not yours!", show_alert=True)
+        return
+    await cq.message.edit_text("❌ Gift cancelled.")
+
+
+# ── /trade ────────────────────────────────────────────────────────────────────
+
+@_soul.app.on_message(filters.command("trade"))
+async def trade_cmd(_, m: Message):
+    if not m.reply_to_message:
+        await m.reply("↩️ Reply to a user to propose a trade.")
+        return
+
+    parts = m.text.split()
+    if len(parts) < 3:
+        await m.reply("Usage: `/trade <yourID> <theirID>` (reply to trade partner)")
+        return
+
+    my_instance    = parts[1].upper()
+    their_instance = parts[2].upper()
+    sender         = m.from_user
+    target         = m.reply_to_message.from_user
+
+    if target.id == sender.id:
+        await m.reply("❌ You can't trade with yourself!")
+        return
+    if target.is_bot:
+        await m.reply("❌ You can't trade with a bot.")
+        return
+
+    # Validate both characters
+    my_char    = await get_harem_char(sender.id, my_instance)
+    their_char = await get_harem_char(target.id, their_instance)
+
+    if not my_char:
+        await m.reply(f"❌ `{my_instance}` not found in your harem.")
+        return
+    if not their_char:
+        await m.reply(f"❌ `{their_instance}` not found in {target.first_name}'s harem.")
+        return
+    if not can_trade(my_char["rarity"]):
+        await m.reply(f"❌ **{rarity_display(my_char['rarity'])}** characters cannot be traded.")
+        return
+    if not can_trade(their_char["rarity"]):
+        await m.reply(f"❌ **{rarity_display(their_char['rarity'])}** characters cannot be traded.")
+        return
+
+    # Check for pending trade
+    pending = await get_pending_trade(sender.id)
+    if pending:
+        await m.reply("❌ You already have a pending trade. Complete or cancel it first.")
+        return
+
+    trade_id = str(uuid.uuid4())[:8].upper()
+    await create_trade({
+        "trade_id":         trade_id,
+        "from_uid":         sender.id,
+        "to_uid":           target.id,
+        "from_instance":    my_instance,
+        "to_instance":      their_instance,
+        "from_char_name":   my_char["name"],
+        "to_char_name":     their_char["name"],
+        "status":           "pending",
+        "created_at":       datetime.utcnow(),
+    })
+
+    my_r    = rarity_display(my_char["rarity"])
+    their_r = rarity_display(their_char["rarity"])
+
+    buttons = IKM([[
+        IKB("✅ Accept",  callback_data=f"trade_accept:{trade_id}:{target.id}"),
+        IKB("❌ Decline", callback_data=f"trade_decline:{trade_id}:{target.id}"),
+    ]])
+
+    await m.reply(
+        f"🔄 **Trade Proposal** `{trade_id}`\n\n"
+        f"**{sender.first_name}** offers:\n"
+        f"  {my_r} **{my_char['name']}** (`{my_instance}`)\n\n"
+        f"**{target.first_name}** gives:\n"
+        f"  {their_r} **{their_char['name']}** (`{their_instance}`)\n\n"
+        f"👆 **{target.first_name}**, accept or decline?",
+        reply_markup=buttons,
+    )
+
+
+@_soul.app.on_callback_query(filters.regex(r"^trade_accept:(\w+):(\d+)$"))
+async def trade_accept_cb(_, cq: CallbackQuery):
+    _, trade_id, to_uid = cq.data.split(":")
+    to_uid = int(to_uid)
+
+    if cq.from_user.id != to_uid:
+        await cq.answer("This trade isn't for you!", show_alert=True)
+        return
+
     trade = await get_trade(trade_id)
-
     if not trade or trade["status"] != "pending":
-        return await cb.message.edit_text("❌ Trade no longer active.", parse_mode=PM)
+        await cq.answer("Trade no longer active.", show_alert=True)
+        return
 
-    if action == "decline":
-        if uid not in (trade["proposer_id"], trade["receiver_id"]):
-            return await cb.answer("Not your trade.", show_alert=True)
-        await update_trade(trade_id, {"$set": {"status": "declined"}})
-        return await cb.message.edit_text("❌ Trade declined.", parse_mode=PM)
+    # Execute swap
+    ok1 = await transfer_harem_char(trade["from_instance"], trade["from_uid"], trade["to_uid"])
+    ok2 = await transfer_harem_char(trade["to_instance"], trade["to_uid"], trade["from_uid"])
 
-    if action == "accept":
-        if uid != trade["receiver_id"]:
-            return await cb.answer("Only the receiver can accept.", show_alert=True)
+    if ok1 and ok2:
+        await update_trade(trade_id, {"$set": {"status": "completed", "completed_at": datetime.utcnow()}})
+        for uid in (trade["from_uid"], trade["to_uid"]):
+            await update_user(uid, {"$inc": {"total_traded": 1}})
+        await cq.message.edit_text(
+            f"✅ **Trade `{trade_id}` completed!**\n\n"
+            f"**{trade['from_char_name']}** ↔️ **{trade['to_char_name']}**\n"
+            "Characters have been swapped!"
+        )
+    else:
+        await update_trade(trade_id, {"$set": {"status": "failed"}})
+        await cq.message.edit_text("❌ Trade failed. One or both characters may have moved.")
 
-        receiver_char = await get_harem_char(trade["receiver_id"], trade["receiver_char"])
-        proposer_char = await get_harem_char(trade["proposer_id"], trade["proposer_char"])
 
-        if not receiver_char or not proposer_char:
-            return await cb.message.edit_text("❌ One or both characters were deleted.", parse_mode=PM)
+@_soul.app.on_callback_query(filters.regex(r"^trade_decline:(\w+):(\d+)$"))
+async def trade_decline_cb(_, cq: CallbackQuery):
+    _, trade_id, to_uid = cq.data.split(":")
+    to_uid = int(to_uid)
 
-        receiver_gets_rarity = get_rarity(proposer_char["rarity"])
-        proposer_gets_rarity = get_rarity(receiver_char["rarity"])
+    if cq.from_user.id != to_uid:
+        await cq.answer("Not your trade!", show_alert=True)
+        return
 
-        if receiver_gets_rarity and receiver_gets_rarity.max_per_user > 0:
-            count = await _col("user_characters").count_documents({
-                "user_id": trade["receiver_id"],
-                "rarity":  proposer_char["rarity"],
-            })
-            if count >= receiver_gets_rarity.max_per_user:
-                return await cb.answer(
-                    f"❌ Receiver already has max {receiver_gets_rarity.max_per_user} "
-                    f"{receiver_gets_rarity.display_name} characters!",
-                    show_alert=True,
-                )
+    trade = await get_trade(trade_id)
+    if not trade or trade["status"] != "pending":
+        await cq.answer("Trade no longer active.", show_alert=True)
+        return
 
-        if proposer_gets_rarity and proposer_gets_rarity.max_per_user > 0:
-            count = await _col("user_characters").count_documents({
-                "user_id": trade["proposer_id"],
-                "rarity":  receiver_char["rarity"],
-            })
-            if count >= proposer_gets_rarity.max_per_user:
-                return await cb.answer(
-                    f"❌ Proposer would exceed max {proposer_gets_rarity.max_per_user} "
-                    f"{proposer_gets_rarity.display_name} characters!",
-                    show_alert=True,
-                )
-
-        ok1 = await transfer_harem_char(trade["proposer_char"], trade["proposer_id"], trade["receiver_id"])
-        ok2 = await transfer_harem_char(trade["receiver_char"], trade["receiver_id"], trade["proposer_id"])
-
-        if ok1 and ok2:
-            await deduct_balance(trade["proposer_id"], trade["fee"])
-            await deduct_balance(trade["receiver_id"],  trade["fee"])
-            await update_trade(trade_id, {"$set": {"status": "completed"}})
-            log.info(
-                "TRADE COMPLETED: %d <-> %d  (%s <-> %s)",
-                trade["proposer_id"], trade["receiver_id"],
-                trade["proposer_char"], trade["receiver_char"],
-            )
-            await cb.message.edit_text(
-                f"✅ <b>Trade Complete!</b> Fee: <code>{_fmt(trade['fee'])}</code> kakera each.",
-                parse_mode=PM,
-            )
-        else:
-            await cb.message.edit_text("❌ Trade failed — characters may have moved.", parse_mode=PM)
-            log.warning("TRADE FAILED: %s", trade_id)
+    await update_trade(trade_id, {"$set": {"status": "declined"}})
+    await cq.message.edit_text(f"❌ Trade `{trade_id}` was declined.")
