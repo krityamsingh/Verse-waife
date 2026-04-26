@@ -429,20 +429,35 @@ async def increment_char_stat(char_id: str, field: str, amount: int = 1) -> None
 # ── Harem (user_characters) ───────────────────────────────────────────────────
 
 async def add_to_harem(user_id: int, char: dict) -> str:
-    iid = str(uuid.uuid4())[:8].upper()
-    await _col("user_characters").insert_one({
-        "instance_id": iid,
-        "user_id":     user_id,
-        "char_id":     char["id"],
-        "name":        char["name"],
-        "anime":       char.get("anime", "Unknown"),
-        "rarity":      char["rarity"],
-        "img_url":     char.get("img_url", ""),
-        "video_url":   char.get("video_url", ""),
-        "is_favorite": False,
-        "note":        "",
-        "obtained_at": datetime.utcnow(),
-    })
+    from pymongo.errors import DuplicateKeyError as _DKE
+
+    # Use the full UUID hex (32 chars) — collision probability is negligible.
+    # The inner retry loop handles the astronomically rare case where two
+    # concurrent inserts race to the same value.
+    for _attempt in range(5):
+        iid = uuid.uuid4().hex.upper()  # e.g. "A3F1B2C4D5E6F7A8B9C0D1E2F3A4B5C6"
+        try:
+            await _col("user_characters").insert_one({
+                "instance_id": iid,
+                "user_id":     user_id,
+                "char_id":     char["id"],
+                "name":        char["name"],
+                "anime":       char.get("anime", "Unknown"),
+                "rarity":      char["rarity"],
+                "img_url":     char.get("img_url", ""),
+                "video_url":   char.get("video_url", ""),
+                "is_favorite": False,
+                "note":        "",
+                "obtained_at": datetime.utcnow(),
+            })
+            break  # success
+        except _DKE:
+            log.warning(
+                "add_to_harem: instance_id collision on '%s' (attempt %d/5) — retrying",
+                iid, _attempt + 1,
+            )
+    else:
+        raise RuntimeError("add_to_harem: failed to generate a unique instance_id after 5 attempts")
     await _col("users").update_one(
         {"user_id": user_id},
         {"$inc": {"total_claimed": 1}},
