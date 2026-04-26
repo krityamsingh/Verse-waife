@@ -124,6 +124,7 @@ async def _create_indexes() -> None:
     qz  = _col("quizzes")
 
     # users
+    await u.delete_many({"user_id": None})
     await _safe_index(u, "user_id", unique=True)
     await _safe_index(u, [("balance", -1)])
     await _safe_index(u, [("level", -1)])
@@ -131,12 +132,14 @@ async def _create_indexes() -> None:
 
     # characters
     await _safe_index(c, [("name", "text"), ("anime", "text")])
+    await c.delete_many({"id": None})
     await _safe_index(c, "id", unique=True)
     await _safe_index(c, [("rarity", 1), ("enabled", 1)])
 
     # user_characters (harem)
     await _safe_index(uc, [("user_id", 1), ("rarity", 1)])
     await _safe_index(uc, [("user_id", 1), ("char_id", 1)])
+    await uc.delete_many({"instance_id": None})
     await _safe_index(uc, "instance_id", unique=True)
     await _safe_index(uc, [("user_id", 1), ("obtained_at", -1)])
 
@@ -154,9 +157,11 @@ async def _create_indexes() -> None:
     await _safe_index(dl, [("chat_id", 1), ("rarity", 1), ("date", 1)], unique=True)
 
     # group settings
+    await gs.delete_many({"chat_id": None})
     await _safe_index(gs, "chat_id", unique=True)
 
     # market
+    await ml.delete_many({"listing_id": None})
     await _safe_index(ml, "listing_id", unique=True)
     await _safe_index(ml, [("status", 1), ("added_at", -1)])
     await _safe_index(ml, [("status", 1), ("rarity", 1)])
@@ -168,6 +173,7 @@ async def _create_indexes() -> None:
     await _safe_index(wl, [("user_id", 1), ("char_id", 1)], unique=True)
 
     # trades
+    await tr.delete_many({"trade_id": None})
     await _safe_index(tr, "trade_id", unique=True)
 
     # marriages
@@ -175,12 +181,15 @@ async def _create_indexes() -> None:
 
     # moderation
     for col_obj in (gb, gm, su, dv, up):
+        await col_obj.delete_many({"user_id": None})
         await _safe_index(col_obj, "user_id", unique=True)
 
-    # top groups
+    # top groups — purge any null/malformed chat_id docs before building unique index
+    await tg.delete_many({"chat_id": None})
     await _safe_index(tg, "chat_id", unique=True)
 
     # quizzes
+    await qz.delete_many({"chat_id": None})
     await _safe_index(qz, "chat_id", unique=True)
 
     log.info("✅ All indexes ready")
