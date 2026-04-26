@@ -1033,3 +1033,28 @@ async def end_quiz(chat_id: int) -> None:
 
 async def delete_quiz(chat_id: int) -> None:
     await _col("quizzes").delete_many({"chat_id": chat_id})
+
+
+# ── Compatibility aliases ─────────────────────────────────────────────────────
+# Modules import these names; they map to the canonical implementations above.
+
+add_to_global_ban        = add_global_ban
+remove_from_global_ban   = remove_global_ban
+is_user_globally_banned  = is_globally_banned
+
+add_to_global_mute       = add_global_mute
+remove_from_global_mute  = remove_global_mute
+is_user_globally_muted   = is_globally_muted
+
+get_all_chats            = get_all_group_ids
+get_all_tracked_group_ids = get_all_group_ids
+
+
+async def fetch_globally_banned_users() -> list[dict]:
+    """Alias: return all globally-banned user records."""
+    return await get_all_gbanned()
+
+
+async def fetch_globally_muted_users() -> list[dict]:
+    """Return all globally-muted user records."""
+    return await _col("global_mutes").find({}).to_list(None)
