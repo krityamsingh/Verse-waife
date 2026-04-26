@@ -1,54 +1,38 @@
 """
-SoulCatcher/database.py
-═══════════════════════════════════════════════════════════════════════════════
-Complete async MongoDB layer.  Every data operation lives here.
-No module should ever import motor / pymongo directly.
+SoulCatcher/database.py — Complete async MongoDB data layer.
 
-COLLECTIONS
-  users                profile, economy, streaks, badges, level/xp
-  characters           master catalogue
-  user_characters      harem (owned instances)
-  active_spawns        live unclaimed spawns
-  drop_logs            per-group daily counters
-  group_settings       per-group config
-  market_listings      stock-based market (new schema)
-  market_purchases     per-buyer purchase history + audit trail (new)
-  wishlists            user wishlists (max 25)
-  trades               trade sessions
-  marriages            active marriages
+All DB operations live here. No module imports motor/pymongo directly.
+
+Collections:
+  users              — profile, economy, streaks, badges, xp/level
+  characters         — master catalogue
+  user_characters    — owned instances (harem)
+  active_spawns      — live unclaimed spawns
+  drop_logs          — per-group daily counters
+  group_settings     — per-group config
+  market_listings    — stock-based market
+  market_purchases   — purchase audit trail
+  wishlists          — user wishlists (max 25)
+  trades             — trade sessions
+  marriages          — active marriages
   global_bans
   global_mutes
   sudo_users
   dev_users
   uploaders
-  sequences            auto-increment char IDs
-  top_groups           tracked group IDs
-
-CHANGE LOG (vs original)
-  • deduct_balance       → now fully atomic via find_one_and_update filter
-  • count_characters     → fixed enabled=False branch (was always True)
-  • get_or_create_user   → added last_claim, total_bought_market, xp_level fields
-  • add_xp               → now handles level-up and returns (new_xp, new_level, levelled_up)
-  • _create_indexes      → added all market_listings stock indexes +
-                           full market_purchases collection indexes
-  • Market section       → replaced old single-copy functions with stock-based variants:
-                               create_market_listing / get_market_listing /
-                               update_market_listing / get_active_market_listings /
-                               count_active_market_listings /
-                               atomic_market_buy / log_market_purchase /
-                               get_user_market_purchase_count / get_user_market_history /
-                               market_aggregate_stats / top_market_listings
-  • Kept all legacy helpers untouched so existing modules compile without changes
-═══════════════════════════════════════════════════════════════════════════════
+  sequences          — auto-increment char IDs
+  top_groups         — tracked group IDs
+  quizzes            — quiz sessions
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 
 from .config import MONGO_URI, DB_NAME
 
@@ -58,16 +42,14 @@ _client = None
 _db     = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Init
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Init ──────────────────────────────────────────────────────────────────────
 
 async def init_db() -> None:
     global _client, _db
-    _client = AsyncIOMotorClient(MONGO_URI)
+    _client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=30_000)
     _db     = _client[DB_NAME]
     await _create_indexes()
-    log.info("✅ MongoDB → %s", DB_NAME)
+    log.info("✅ MongoDB connected → %s", DB_NAME)
 
 
 def get_db():
@@ -78,99 +60,106 @@ def _col(name: str):
     return _db[name]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Indexes
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Indexes ───────────────────────────────────────────────────────────────────
 
-async def _safe_create_index(collection, keys, **kwargs) -> None:
-    """Create an index, dropping the old one first if there's a spec conflict (code 86)."""
+async def _safe_index(col, keys, **kwargs) -> None:
     from pymongo.errors import OperationFailure
     try:
-        await collection.create_index(keys, **kwargs)
+        await col.create_index(keys, **kwargs)
     except OperationFailure as e:
-        if e.code == 86:  # IndexKeySpecsConflict
-            # Derive the auto-generated index name the same way MongoDB does
-            if isinstance(keys, str):
-                index_name = f"{keys}_1"
-            else:
-                index_name = "_".join(f"{k}_{v}" for k, v in keys)
-            log.warning("⚠️  Index spec conflict on '%s' — dropping and recreating.", index_name)
+        if e.code == 86:
+            name = kwargs.get("name") or (
+                f"{keys}_1" if isinstance(keys, str)
+                else "_".join(f"{k}_{v}" for k, v in keys)
+            )
+            log.warning("Index conflict on '%s' — dropping and recreating.", name)
             try:
-                await collection.drop_index(index_name)
-            except Exception:
-                pass
-            await collection.create_index(keys, **kwargs)
+                await col.drop_index(name)
+                await col.create_index(keys, **kwargs)
+            except Exception as ex:
+                log.warning("Could not recreate index '%s': %s", name, ex)
         else:
             raise
 
 
 async def _create_indexes() -> None:
-    # ── Users ──────────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("users"), "user_id",  unique=True)
-    await _safe_create_index(_col("users"), "balance")
-    await _safe_create_index(_col("users"), "xp")
-    await _safe_create_index(_col("users"), "level")
+    u   = _col("users")
+    c   = _col("characters")
+    uc  = _col("user_characters")
+    sp  = _col("active_spawns")
+    dl  = _col("drop_logs")
+    gs  = _col("group_settings")
+    ml  = _col("market_listings")
+    mp  = _col("market_purchases")
+    wl  = _col("wishlists")
+    tr  = _col("trades")
+    mar = _col("marriages")
+    gb  = _col("global_bans")
+    gm  = _col("global_mutes")
+    su  = _col("sudo_users")
+    dv  = _col("dev_users")
+    up  = _col("uploaders")
+    tg  = _col("top_groups")
+    qz  = _col("quizzes")
 
-    # ── Characters ─────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("characters"), "id",     unique=True)
-    await _safe_create_index(_col("characters"), "rarity")
-    await _safe_create_index(_col("characters"), "enabled")
-    await _safe_create_index(_col("characters"), [("name", "text"), ("anime", "text")])
+    # users
+    await _safe_index(u, "user_id", unique=True)
+    await _safe_index(u, [("balance", -1)])
+    await _safe_index(u, [("level", -1)])
+    await _safe_index(u, [("total_claimed", -1)])
 
-    # ── User characters (harem) ────────────────────────────────────────────────
-    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("instance_id", 1)], unique=True)
-    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("rarity", 1)])
-    await _safe_create_index(_col("user_characters"), [("user_id", 1), ("char_id", 1)])
-    await _safe_create_index(_col("user_characters"), "obtained_at")
+    # characters
+    await _safe_index(c, [("name", "text"), ("anime", "text")])
+    await _safe_index(c, "id", unique=True)
+    await _safe_index(c, [("rarity", 1), ("enabled", 1)])
 
-    # ── Market listings (stock-based) ─────────────────────────────────────────
-    await _safe_create_index(_col("market_listings"), "listing_id",  unique=True)
-    await _safe_create_index(_col("market_listings"), "char_id")
-    await _safe_create_index(_col("market_listings"), "status")
-    await _safe_create_index(_col("market_listings"), "added_by")
-    await _safe_create_index(_col("market_listings"), "added_at")
-    await _safe_create_index(_col("market_listings"), [("status", 1), ("rarity", 1)])
-    await _safe_create_index(_col("market_listings"), [("status", 1), ("added_at", -1)])
-    await _safe_create_index(_col("market_listings"), [("status", 1), ("stock_remaining", 1)])
+    # user_characters (harem)
+    await _safe_index(uc, [("user_id", 1), ("rarity", 1)])
+    await _safe_index(uc, [("user_id", 1), ("char_id", 1)])
+    await _safe_index(uc, "instance_id", unique=True)
+    await _safe_index(uc, [("user_id", 1), ("obtained_at", -1)])
 
-    # ── Market purchases ───────────────────────────────────────────────────────
-    await _safe_create_index(_col("market_purchases"), "purchase_id",  unique=True)
-    await _safe_create_index(_col("market_purchases"), "listing_id")
-    await _safe_create_index(_col("market_purchases"), "buyer_id")
-    await _safe_create_index(_col("market_purchases"), "char_id")
-    await _safe_create_index(_col("market_purchases"), "purchased_at")
-    await _safe_create_index(_col("market_purchases"), [("listing_id", 1), ("buyer_id", 1)])
+    # spawns
+    await _safe_index(sp, [("chat_id", 1), ("char_id", 1)], unique=True)
+    await _safe_index(sp, "expires_at")
 
-    # ── Wishlists ─────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("wishlists"), [("user_id", 1), ("char_id", 1)], unique=True)
+    # drop logs
+    await _safe_index(dl, [("chat_id", 1), ("rarity", 1), ("date", 1)], unique=True)
 
-    # ── Spawns ────────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("active_spawns"), "spawn_id",  unique=True)
-    await _safe_create_index(_col("active_spawns"), "chat_id")
-    await _safe_create_index(_col("active_spawns"), "spawned_at")
+    # group settings
+    await _safe_index(gs, "chat_id", unique=True)
 
-    # ── Group settings ────────────────────────────────────────────────────────
-    await _safe_create_index(_col("group_settings"), "chat_id",  unique=True)
-    await _safe_create_index(_col("top_groups"), "group_id",     unique=True)
+    # market
+    await _safe_index(ml, "listing_id", unique=True)
+    await _safe_index(ml, [("status", 1), ("added_at", -1)])
+    await _safe_index(ml, [("status", 1), ("rarity", 1)])
+    await _safe_index(ml, [("char_id", 1), ("status", 1)])
+    await _safe_index(mp, [("buyer_id", 1), ("listing_id", 1)])
+    await _safe_index(mp, [("buyer_id", 1), ("purchased_at", -1)])
 
-    # ── Drop logs ─────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("drop_logs"), [("chat_id", 1), ("rarity", 1), ("date", 1)])
+    # wishlists
+    await _safe_index(wl, [("user_id", 1), ("char_id", 1)], unique=True)
 
-    # ── Moderation ────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("global_bans"), "user_id",  unique=True)
-    await _safe_create_index(_col("global_mutes"), "user_id", unique=True)
+    # trades
+    await _safe_index(tr, "trade_id", unique=True)
 
-    # ── Trades ────────────────────────────────────────────────────────────────
-    await _safe_create_index(_col("trades"), "trade_id")
-    await _safe_create_index(_col("trades"), [("proposer_id", 1), ("status", 1)])
-    await _safe_create_index(_col("trades"), [("receiver_id", 1), ("status", 1)])
+    # marriages
+    await _safe_index(mar, [("user1", 1), ("user2", 1)])
 
-    log.info("✅ Indexes ready")
+    # moderation
+    for col_obj in (gb, gm, su, dv, up):
+        await _safe_index(col_obj, "user_id", unique=True)
+
+    # top groups
+    await _safe_index(tg, "chat_id", unique=True)
+
+    # quizzes
+    await _safe_index(qz, "chat_id", unique=True)
+
+    log.info("✅ All indexes ready")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  USERS
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Users ─────────────────────────────────────────────────────────────────────
 
 async def get_or_create_user(
     user_id: int,
@@ -180,10 +169,10 @@ async def get_or_create_user(
 ) -> dict:
     col  = _col("users")
     user = await col.find_one({"user_id": user_id})
+    now  = datetime.utcnow()
+
     if not user:
-        now  = datetime.utcnow()
         user = {
-            # Identity
             "user_id":    user_id,
             "username":   username,
             "first_name": first_name,
@@ -196,22 +185,25 @@ async def get_or_create_user(
             "saved_amount":    0,
             "loan_amount":     0,
 
-            # Collection stats
+            # Collection
             "total_claimed":       0,
             "total_married":       0,
             "marriage_count":      0,
-            "total_bought_market": 0,   # ← market purchases counter
+            "total_bought_market": 0,
+            "total_gifted":        0,
+            "total_traded":        0,
 
             # Progression
-            "xp":         0,
-            "level":      1,
-            "xp_level":   1,            # mirrors level, kept separate for UI
+            "xp":       0,
+            "level":    1,
+            "xp_level": 1,
 
             # Streaks & cooldowns
             "daily_streak": 0,
             "last_daily":   None,
             "last_spin":    None,
-            "last_claim":   None,       # ← daily free character claim
+            "last_claim":   None,
+            "last_quiz":    None,
 
             # Preferences
             "badges":          [],
@@ -219,6 +211,7 @@ async def get_or_create_user(
             "collection_mode": "all",
             "favorites":       [],
             "custom_media":    None,
+            "notifications":   True,
 
             # Moderation
             "is_banned":  False,
@@ -237,9 +230,10 @@ async def get_or_create_user(
                 "username":   username,
                 "first_name": first_name,
                 "last_name":  last_name,
-                "last_seen":  datetime.utcnow(),
+                "last_seen":  now,
             }},
         )
+
     return user
 
 
@@ -251,6 +245,15 @@ async def update_user(uid: int, upd: dict) -> None:
     await _col("users").update_one({"user_id": uid}, upd, upsert=True)
 
 
+async def get_all_user_ids() -> list[int]:
+    docs = await _col("users").find({}, {"user_id": 1}).to_list(None)
+    return [d["user_id"] for d in docs]
+
+
+async def count_all_users() -> int:
+    return await _col("users").count_documents({})
+
+
 # ── Balance ───────────────────────────────────────────────────────────────────
 
 async def get_balance(uid: int) -> int:
@@ -259,7 +262,6 @@ async def get_balance(uid: int) -> int:
 
 
 async def add_balance(uid: int, amt: int) -> None:
-    """Add (or subtract if negative) kakera. Creates user if missing."""
     await _col("users").update_one(
         {"user_id": uid},
         {"$inc": {"balance": amt}},
@@ -268,14 +270,7 @@ async def add_balance(uid: int, amt: int) -> None:
 
 
 async def deduct_balance(uid: int, amt: int) -> bool:
-    """
-    Atomically deduct *amt* kakera only if the user has enough.
-
-    Uses a single find_one_and_update with the balance condition inside the
-    query filter — fully race-condition-free (no separate read + write).
-
-    Returns True on success, False if insufficient funds.
-    """
+    """Atomically deduct amt kakera. Returns True on success."""
     result = await _col("users").find_one_and_update(
         {"user_id": uid, "balance": {"$gte": amt}},
         {"$inc": {"balance": -amt}},
@@ -283,29 +278,27 @@ async def deduct_balance(uid: int, amt: int) -> bool:
     return result is not None
 
 
-async def deduct_balance_exact(uid: int, amt: int) -> bool:
-    """Alias of deduct_balance for clarity in market/trade code."""
-    return await deduct_balance(uid, amt)
+# alias
+deduct_balance_exact = deduct_balance
 
 
 # ── XP & Levels ──────────────────────────────────────────────────────────────
 
 def xp_for_level(level: int) -> int:
-    """Total XP required to *reach* the given level from zero."""
     return int(100 * (level ** 1.4))
 
 
 async def add_xp(uid: int, xp: int) -> tuple[int, int, bool]:
     """
-    Add XP to a user and handle level-ups.
-
+    Add XP and handle level-ups.
     Returns (new_xp, new_level, levelled_up).
-    Grants 50 kakera per level-up as a bonus.
     """
     user = await _col("users").find_one({"user_id": uid}, {"xp": 1, "level": 1})
     if not user:
         await _col("users").update_one(
-            {"user_id": uid}, {"$set": {"xp": xp, "level": 1, "xp_level": 1}}, upsert=True
+            {"user_id": uid},
+            {"$set": {"xp": xp, "level": 1, "xp_level": 1}},
+            upsert=True,
         )
         return xp, 1, False
 
@@ -314,19 +307,19 @@ async def add_xp(uid: int, xp: int) -> tuple[int, int, bool]:
     new_level     = current_level
     levelled_up   = False
 
-    # Check for level-up(s) — handles multiple level-ups in one call
     while current_xp >= xp_for_level(new_level + 1):
         new_level  += 1
         levelled_up = True
 
-    updates: dict = {"xp": current_xp, "level": new_level, "xp_level": new_level}
-    await _col("users").update_one({"user_id": uid}, {"$set": updates})
+    await _col("users").update_one(
+        {"user_id": uid},
+        {"$set": {"xp": current_xp, "level": new_level, "xp_level": new_level}},
+    )
 
     if levelled_up:
-        # Kakera bonus for levelling up
         bonus = 50 * (new_level - current_level)
         await add_balance(uid, bonus)
-        log.info("LEVEL UP uid=%d  %d→%d  +%d kakera bonus", uid, current_level, new_level, bonus)
+        log.info("LEVEL UP uid=%d %d→%d +%d kakera", uid, current_level, new_level, bonus)
 
     return current_xp, new_level, levelled_up
 
@@ -353,36 +346,35 @@ async def unban_user_db(uid: int) -> None:
     )
 
 
-# ── Bulk user helpers ─────────────────────────────────────────────────────────
-
-async def get_all_user_ids() -> list[int]:
-    docs = await _col("users").find({}, {"user_id": 1}).to_list(None)
-    return [d["user_id"] for d in docs]
-
-
-async def count_all_users() -> int:
-    return await _col("users").count_documents({})
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  CHARACTERS  (master catalogue)
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Characters ────────────────────────────────────────────────────────────────
 
 async def next_char_id() -> str:
-    docs     = await _col("characters").find({"id": {"$exists": True}}, {"id": 1}).to_list(None)
-    existing = [int(c["id"]) for c in docs if str(c.get("id", "")).isdigit()]
-    seq      = await _col("sequences").find_one({"_id": "character_id"})
-    nxt      = max(max(existing, default=0), seq["v"] if seq else 0) + 1
-    await _col("sequences").update_one(
-        {"_id": "character_id"}, {"$set": {"v": nxt}}, upsert=True
+    seq = await _col("sequences").find_one({"_id": "character_id"})
+    if seq is None:
+        docs = await _col("characters").find({"id": {"$exists": True}}, {"id": 1}).to_list(None)
+        existing = [int(c["id"]) for c in docs if str(c.get("id", "")).isdigit()]
+        seed = max(existing, default=0)
+        await _col("sequences").update_one(
+            {"_id": "character_id"},
+            {"$setOnInsert": {"v": seed}},
+            upsert=True,
+        )
+
+    result = await _col("sequences").find_one_and_update(
+        {"_id": "character_id"},
+        {"$inc": {"v": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
-    return str(nxt).zfill(4)
+    return str(result["v"]).zfill(4)
 
 
 async def insert_character(doc: dict) -> str:
     doc["id"]       = await next_char_id()
     doc["enabled"]  = doc.get("enabled", True)
     doc["added_at"] = doc.get("added_at", datetime.utcnow())
+    doc.setdefault("views", 0)
+    doc.setdefault("claims", 0)
     await _col("characters").insert_one(doc)
     return doc["id"]
 
@@ -395,11 +387,12 @@ async def update_character(cid: str, upd: dict) -> None:
     await _col("characters").update_one({"id": cid}, upd)
 
 
+async def delete_character(cid: str) -> bool:
+    res = await _col("characters").delete_one({"id": cid})
+    return res.deleted_count > 0
+
+
 async def count_characters(enabled: bool = True) -> int:
-    """
-    Count characters.  enabled=True → only active chars.
-                        enabled=False → ALL chars (active + disabled).
-    """
     if enabled:
         return await _col("characters").count_documents({"enabled": True})
     return await _col("characters").count_documents({})
@@ -423,16 +416,19 @@ async def search_characters(query: str, limit: int = 10) -> list[dict]:
     ).limit(limit).to_list(limit)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  USER CHARACTERS  (harem — owned instances)
-# ═════════════════════════════════════════════════════════════════════════════
+async def get_characters_by_rarity(rarity: str, limit: int = 20) -> list[dict]:
+    return await _col("characters").find(
+        {"rarity": rarity, "enabled": True}
+    ).limit(limit).to_list(limit)
+
+
+async def increment_char_stat(char_id: str, field: str, amount: int = 1) -> None:
+    await _col("characters").update_one({"id": char_id}, {"$inc": {field: amount}})
+
+
+# ── Harem (user_characters) ───────────────────────────────────────────────────
 
 async def add_to_harem(user_id: int, char: dict) -> str:
-    """
-    Add a character instance to a user's harem.
-    Increments total_claimed counter.
-    Returns the generated instance_id.
-    """
     iid = str(uuid.uuid4())[:8].upper()
     await _col("user_characters").insert_one({
         "instance_id": iid,
@@ -452,7 +448,16 @@ async def add_to_harem(user_id: int, char: dict) -> str:
         {"$inc": {"total_claimed": 1}},
         upsert=True,
     )
+    await increment_char_stat(char["id"], "claims")
     return iid
+
+
+SORT_MAP = {
+    "rarity": [("rarity", 1), ("name", 1)],
+    "name":   [("name", 1)],
+    "anime":  [("anime", 1)],
+    "recent": [("obtained_at", -1)],
+}
 
 
 async def get_harem(
@@ -461,12 +466,6 @@ async def get_harem(
     per_page: int = 10,
     sort_by: str = "rarity",
 ) -> tuple[list[dict], int]:
-    SORT_MAP = {
-        "rarity": [("rarity", 1), ("name", 1)],
-        "name":   [("name", 1)],
-        "anime":  [("anime", 1)],
-        "recent": [("obtained_at", -1)],
-    }
     col   = _col("user_characters")
     total = await col.count_documents({"user_id": user_id})
     skip  = (page - 1) * per_page
@@ -529,30 +528,191 @@ async def get_harem_char_by_name(user_id: int, name: str) -> Optional[dict]:
     )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MARKET LISTINGS  (stock-based, new schema)
-# ═════════════════════════════════════════════════════════════════════════════
-#
-#  Document schema:
-#    listing_id       str      "MKT-XXXXXX"
-#    char_id          str      catalogue ID
-#    char_name        str
-#    anime            str
-#    rarity           str      rarity key
-#    img_url          str
-#    video_url        str
-#    price            int      kakera per copy
-#    stock_total      int      original stock
-#    stock_sold       int      copies sold so far
-#    stock_remaining  int      stock_total − stock_sold  (denormalised)
-#    per_user_limit   int      0 = unlimited
-#    added_by         int      user_id of uploader
-#    added_at         datetime
-#    status           str      "active" | "soldout" | "removed"
-# ─────────────────────────────────────────────────────────────────────────────
+async def set_favorite(user_id: int, instance_id: str, value: bool) -> bool:
+    res = await _col("user_characters").update_one(
+        {"user_id": user_id, "instance_id": instance_id},
+        {"$set": {"is_favorite": value}},
+    )
+    return res.modified_count > 0
+
+
+async def set_char_note(user_id: int, instance_id: str, note: str) -> bool:
+    res = await _col("user_characters").update_one(
+        {"user_id": user_id, "instance_id": instance_id},
+        {"$set": {"note": note}},
+    )
+    return res.modified_count > 0
+
+
+# ── Spawns ────────────────────────────────────────────────────────────────────
+
+async def create_spawn(doc: dict) -> None:
+    await _col("active_spawns").insert_one(doc)
+
+
+async def get_spawn(chat_id: int) -> Optional[dict]:
+    now = datetime.utcnow()
+    return await _col("active_spawns").find_one(
+        {"chat_id": chat_id, "expires_at": {"$gt": now}}
+    )
+
+
+async def get_spawn_by_char(chat_id: int, char_id: str) -> Optional[dict]:
+    return await _col("active_spawns").find_one(
+        {"chat_id": chat_id, "char_id": char_id}
+    )
+
+
+async def delete_spawn(chat_id: int) -> None:
+    await _col("active_spawns").delete_many({"chat_id": chat_id})
+
+
+async def delete_expired_spawns() -> int:
+    res = await _col("active_spawns").delete_many(
+        {"expires_at": {"$lt": datetime.utcnow()}}
+    )
+    return res.deleted_count
+
+
+# ── Drop Logs ─────────────────────────────────────────────────────────────────
+
+async def increment_drop_log(chat_id: int, rarity: str) -> int:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    doc = await _col("drop_logs").find_one_and_update(
+        {"chat_id": chat_id, "rarity": rarity, "date": today},
+        {"$inc": {"count": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return doc["count"]
+
+
+async def get_drop_count(chat_id: int, rarity: str) -> int:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    doc = await _col("drop_logs").find_one(
+        {"chat_id": chat_id, "rarity": rarity, "date": today}
+    )
+    return doc["count"] if doc else 0
+
+
+# ── Group Settings ────────────────────────────────────────────────────────────
+
+async def get_group_settings(chat_id: int) -> dict:
+    doc = await _col("group_settings").find_one({"chat_id": chat_id})
+    if not doc:
+        doc = {
+            "chat_id":           chat_id,
+            "spawn_enabled":     True,
+            "spawn_frequency":   15,
+            "announcement_mode": True,
+            "language":          "en",
+            "created_at":        datetime.utcnow(),
+        }
+        await _col("group_settings").insert_one(doc)
+    return doc
+
+
+async def update_group_settings(chat_id: int, upd: dict) -> None:
+    await _col("group_settings").update_one(
+        {"chat_id": chat_id},
+        {"$set": upd},
+        upsert=True,
+    )
+
+
+# ── Wishlist ──────────────────────────────────────────────────────────────────
+
+async def add_to_wishlist(user_id: int, char_id: str) -> bool:
+    count = await _col("wishlists").count_documents({"user_id": user_id})
+    if count >= 25:
+        return False
+    try:
+        await _col("wishlists").insert_one({
+            "user_id": user_id,
+            "char_id": char_id,
+            "added_at": datetime.utcnow(),
+        })
+        return True
+    except Exception:
+        return False
+
+
+async def remove_from_wishlist(user_id: int, char_id: str) -> bool:
+    res = await _col("wishlists").delete_one({"user_id": user_id, "char_id": char_id})
+    return res.deleted_count > 0
+
+
+async def get_wishlist(user_id: int) -> list[str]:
+    docs = await _col("wishlists").find({"user_id": user_id}).to_list(25)
+    return [d["char_id"] for d in docs]
+
+
+async def is_in_wishlist(user_id: int, char_id: str) -> bool:
+    doc = await _col("wishlists").find_one({"user_id": user_id, "char_id": char_id})
+    return doc is not None
+
+
+async def get_wishlist_users(char_id: str) -> list[int]:
+    docs = await _col("wishlists").find({"char_id": char_id}).to_list(200)
+    return [d["user_id"] for d in docs]
+
+
+# ── Trades ────────────────────────────────────────────────────────────────────
+
+async def create_trade(doc: dict) -> None:
+    await _col("trades").insert_one(doc)
+
+
+async def get_trade(trade_id: str) -> Optional[dict]:
+    return await _col("trades").find_one({"trade_id": trade_id})
+
+
+async def update_trade(trade_id: str, upd: dict) -> None:
+    await _col("trades").update_one({"trade_id": trade_id}, upd)
+
+
+async def get_pending_trade(user_id: int) -> Optional[dict]:
+    return await _col("trades").find_one({
+        "$or": [{"from_uid": user_id}, {"to_uid": user_id}],
+        "status": "pending",
+    })
+
+
+# ── Marriages ─────────────────────────────────────────────────────────────────
+
+async def get_marriage(user_id: int) -> Optional[dict]:
+    return await _col("marriages").find_one({
+        "$or": [{"user1": user_id}, {"user2": user_id}],
+        "active": True,
+    })
+
+
+async def create_marriage(user1: int, user2: int) -> None:
+    now = datetime.utcnow()
+    await _col("marriages").insert_one({
+        "user1": user1,
+        "user2": user2,
+        "active": True,
+        "married_at": now,
+    })
+    for uid in (user1, user2):
+        await _col("users").update_one(
+            {"user_id": uid},
+            {"$inc": {"total_married": 1, "marriage_count": 1}},
+        )
+
+
+async def end_marriage(user_id: int) -> bool:
+    res = await _col("marriages").update_one(
+        {"$or": [{"user1": user_id}, {"user2": user_id}], "active": True},
+        {"$set": {"active": False, "ended_at": datetime.utcnow()}},
+    )
+    return res.modified_count > 0
+
+
+# ── Market ────────────────────────────────────────────────────────────────────
 
 async def create_market_listing(doc: dict) -> None:
-    """Insert a new market listing document."""
     await _col("market_listings").insert_one(doc)
 
 
@@ -591,44 +751,59 @@ async def count_active_market_listings(rarity: Optional[str] = None) -> int:
 
 async def atomic_market_buy(listing_id: str) -> Optional[dict]:
     """
-    Atomically decrement stock_remaining and increment stock_sold.
-    Only succeeds when status='active' AND stock_remaining > 0.
-
-    Automatically flips status to 'soldout' when stock hits 0.
-
-    Returns the UPDATED document on success, None if unavailable.
+    Atomically decrement stock and auto-flip to 'soldout' when stock hits 0.
+    Returns updated doc on success, None if unavailable.
     """
     updated = await _col("market_listings").find_one_and_update(
         {"listing_id": listing_id, "status": "active", "stock_remaining": {"$gt": 0}},
-        {"$inc": {"stock_sold": 1, "stock_remaining": -1}},
-        return_document=True,
+        [
+            {"$set": {
+                "stock_sold":      {"$add": ["$stock_sold", 1]},
+                "stock_remaining": {"$subtract": ["$stock_remaining", 1]},
+                "status": {
+                    "$cond": {
+                        "if":   {"$lte": [{"$subtract": ["$stock_remaining", 1]}, 0]},
+                        "then": "soldout",
+                        "else": "active",
+                    }
+                },
+            }}
+        ],
+        return_document=ReturnDocument.AFTER,
     )
-    if updated is None:
-        return None
-
-    # Auto-flip to soldout when stock hits zero
-    if updated.get("stock_remaining", 0) <= 0:
-        await _col("market_listings").update_one(
-            {"listing_id": listing_id},
-            {"$set": {"status": "soldout"}},
-        )
-        updated["status"] = "soldout"
-
     return updated
 
 
+async def log_market_purchase(doc: dict) -> None:
+    await _col("market_purchases").insert_one(doc)
+
+
+async def get_user_market_purchase_count(buyer_id: int, listing_id: str) -> int:
+    return await _col("market_purchases").count_documents(
+        {"buyer_id": buyer_id, "listing_id": listing_id}
+    )
+
+
+async def get_user_market_history(buyer_id: int, limit: int = 10) -> list[dict]:
+    return (
+        await _col("market_purchases")
+        .find({"buyer_id": buyer_id})
+        .sort("purchased_at", -1)
+        .limit(limit)
+        .to_list(limit)
+    )
+
+
 async def market_aggregate_stats() -> dict:
-    """Return a stats dict used by /mstats."""
-    total    = await _col("market_listings").count_documents({})
-    active   = await _col("market_listings").count_documents({"status": "active"})
-    soldout  = await _col("market_listings").count_documents({"status": "soldout"})
-    removed  = await _col("market_listings").count_documents({"status": "removed"})
-    purch    = await _col("market_purchases").count_documents({})
-
-    pipeline = [{"$group": {"_id": None, "total": {"$sum": "$price"}}}]
-    res = await _col("market_purchases").aggregate(pipeline).to_list(1)
+    total   = await _col("market_listings").count_documents({})
+    active  = await _col("market_listings").count_documents({"status": "active"})
+    soldout = await _col("market_listings").count_documents({"status": "soldout"})
+    removed = await _col("market_listings").count_documents({"status": "removed"})
+    purch   = await _col("market_purchases").count_documents({})
+    res     = await _col("market_purchases").aggregate(
+        [{"$group": {"_id": None, "total": {"$sum": "$price"}}}]
+    ).to_list(1)
     kakera_spent = res[0]["total"] if res else 0
-
     return {
         "total_listings":  total,
         "active":          active,
@@ -639,391 +814,69 @@ async def market_aggregate_stats() -> dict:
     }
 
 
-async def top_market_listings(limit: int = 5) -> list[dict]:
-    """Top listings by copies sold."""
+async def top_market_listings(limit: int = 10) -> list[dict]:
     return (
         await _col("market_listings")
-        .find({"stock_sold": {"$gt": 0}})
+        .find({"status": {"$in": ["active", "soldout"]}})
         .sort("stock_sold", -1)
         .limit(limit)
         .to_list(limit)
     )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  MARKET PURCHASES  (per-buyer audit trail)
-# ═════════════════════════════════════════════════════════════════════════════
-#
-#  Document schema:
-#    purchase_id   str
-#    listing_id    str
-#    buyer_id      int
-#    char_id       str
-#    char_name     str
-#    instance_id   str      harem instance created
-#    price         int      kakera paid
-#    purchased_at  datetime
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Global Ban / Mute ─────────────────────────────────────────────────────────
 
-async def log_market_purchase(doc: dict) -> None:
-    """Insert a purchase record. Also bumps total_bought_market on the user."""
-    await _col("market_purchases").insert_one(doc)
-    await _col("users").update_one(
-        {"user_id": doc["buyer_id"]},
-        {"$inc": {"total_bought_market": 1}},
-        upsert=True,
-    )
-
-
-async def get_user_market_purchase_count(listing_id: str, buyer_id: int) -> int:
-    """How many times has buyer_id purchased from this specific listing."""
-    return await _col("market_purchases").count_documents(
-        {"listing_id": listing_id, "buyer_id": buyer_id}
-    )
-
-
-async def get_user_market_history(buyer_id: int, limit: int = 20) -> list[dict]:
-    """Recent market purchases for a user, newest first."""
-    return (
-        await _col("market_purchases")
-        .find({"buyer_id": buyer_id})
-        .sort("purchased_at", -1)
-        .limit(limit)
-        .to_list(limit)
-    )
-
-
-# ── Legacy market helpers (kept for any code that still imports them) ─────────
-
-async def create_listing(doc: dict) -> None:
-    """Legacy alias → create_market_listing."""
-    await create_market_listing(doc)
-
-
-async def get_listing(lid: str) -> Optional[dict]:
-    """Legacy alias → get_market_listing."""
-    return await get_market_listing(lid)
-
-
-async def update_listing(lid: str, upd: dict) -> None:
-    """Legacy alias → update_market_listing."""
-    await update_market_listing(lid, upd)
-
-
-async def get_active_listings(rarity: Optional[str] = None, limit: int = 10) -> list[dict]:
-    """Legacy alias → get_active_market_listings (uses added_at sort)."""
-    return await get_active_market_listings(rarity=rarity, limit=limit)
-
-
-async def atomic_buy_listing(listing_id: str, buyer_id: int) -> Optional[dict]:
-    """
-    Legacy atomic buy — single-copy model shim.
-    Routes through the new atomic_market_buy.
-    """
-    return await atomic_market_buy(listing_id)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  SPAWNS
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def create_spawn(chat_id: int, message_id: int, char: dict, rarity_name: str) -> str:
-    spawn_id = str(uuid.uuid4())[:10].upper()
-    await _col("active_spawns").insert_one({
-        "spawn_id":   spawn_id,
-        "chat_id":    chat_id,
-        "message_id": message_id,
-        "char_id":    char["id"],
-        "char_name":  char["name"],
-        "rarity":     rarity_name,
-        "claimed":    False,
-        "claimed_by": None,
-        "expired":    False,
-        "spawned_at": datetime.utcnow(),
-    })
-    return spawn_id
-
-
-async def claim_spawn(spawn_id: str, user_id: int) -> Optional[dict]:
-    return await _col("active_spawns").find_one_and_update(
-        {"spawn_id": spawn_id, "claimed": False, "expired": False},
-        {"$set": {
-            "claimed":    True,
-            "claimed_by": user_id,
-            "claimed_at": datetime.utcnow(),
-        }},
-        return_document=True,
-    )
-
-
-async def expire_spawn(spawn_id: str) -> None:
-    await _col("active_spawns").update_one(
-        {"spawn_id": spawn_id},
-        {"$set": {"expired": True}},
-    )
-
-
-async def unclaim_spawn(spawn_id: str) -> None:
-    """Roll back a claim blocked by max_per_user."""
-    await _col("active_spawns").update_one(
-        {"spawn_id": spawn_id},
-        {"$set": {"claimed": False, "claimed_by": None, "claimed_at": None}},
-    )
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  DROP LOGS  (per-group daily rarity counters)
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def check_and_record_drop(chat_id: int, rarity_name: str) -> bool:
-    """
-    Check whether a rarity may still drop today (daily limit).
-    If yes, record it and return True.  If limit reached, return False.
-    """
-    from .rarity import get_drop_limit
-    limit = get_drop_limit(rarity_name)
-    today = str(date.today())
-
-    if limit == 0:
-        await _col("drop_logs").update_one(
-            {"chat_id": chat_id, "rarity": rarity_name, "date": today},
-            {"$inc": {"count": 1}},
-            upsert=True,
-        )
-        return True
-
-    doc   = await _col("drop_logs").find_one(
-        {"chat_id": chat_id, "rarity": rarity_name, "date": today}
-    )
-    count = doc["count"] if doc else 0
-    if count >= limit:
-        return False
-
-    await _col("drop_logs").update_one(
-        {"chat_id": chat_id, "rarity": rarity_name, "date": today},
-        {"$inc": {"count": 1}},
-        upsert=True,
-    )
-    return True
-
-
-async def get_drop_counts_today(chat_id: int) -> dict[str, int]:
-    today = str(date.today())
-    rows  = await _col("drop_logs").find(
-        {"chat_id": chat_id, "date": today}
-    ).to_list(50)
-    return {r["rarity"]: r["count"] for r in rows}
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  GROUP SETTINGS
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def get_group(chat_id: int) -> dict:
-    g = await _col("group_settings").find_one({"chat_id": chat_id})
-    if not g:
-        from .rarity import SPAWN_SETTINGS
-        g = {
-            "chat_id":        chat_id,
-            "spawn_enabled":  True,
-            "spawn_cooldown": SPAWN_SETTINGS["cooldown_seconds"],
-            "message_count":  0,
-            "last_spawn":     None,
-            "banned":         False,
-        }
-        await _col("group_settings").insert_one(g)
-    return g
-
-
-async def increment_group_msg(chat_id: int) -> int:
-    res = await _col("group_settings").find_one_and_update(
-        {"chat_id": chat_id},
-        {"$inc": {"message_count": 1}},
-        upsert=True,
-        return_document=True,
-    )
-    return res["message_count"] if res else 1
-
-
-async def reset_group_msg(chat_id: int) -> None:
-    await _col("group_settings").update_one(
-        {"chat_id": chat_id},
-        {"$set": {"message_count": 0, "last_spawn": datetime.utcnow()}},
-    )
-
-
-async def set_group_spawn_limit(chat_id: int, limit: int) -> None:
-    await _col("group_settings").update_one(
-        {"chat_id": chat_id},
-        {"$set": {"spawn_msg_limit": limit}},
-        upsert=True,
-    )
-    log.info("Group %s: spawn_msg_limit → %s", chat_id, limit)
-
-
-async def get_all_group_ids() -> list[int]:
-    docs = await _col("group_settings").find({}, {"chat_id": 1}).to_list(None)
-    return [d["chat_id"] for d in docs]
-
-
-async def track_group(group_id: int, title: str = "") -> None:
-    await _col("top_groups").update_one(
-        {"group_id": group_id},
-        {"$set": {"group_id": group_id, "title": title}},
-        upsert=True,
-    )
-
-
-async def get_all_tracked_group_ids() -> list[int]:
-    docs = await _col("top_groups").find({}, {"group_id": 1}).to_list(None)
-    return [d["group_id"] for d in docs]
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  WISHLIST
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def add_wish(user_id: int, char_id: str, char_name: str, rarity: str) -> bool:
-    if await _col("wishlists").find_one({"user_id": user_id, "char_id": char_id}):
-        return False
-    if await _col("wishlists").count_documents({"user_id": user_id}) >= 25:
-        return False
-    await _col("wishlists").insert_one({
-        "user_id":   user_id,
-        "char_id":   char_id,
-        "char_name": char_name,
-        "rarity":    rarity,
-    })
-    return True
-
-
-async def remove_wish(user_id: int, char_id: str) -> bool:
-    res = await _col("wishlists").delete_one({"user_id": user_id, "char_id": char_id})
-    return res.deleted_count > 0
-
-
-async def get_wishlist(user_id: int) -> list[dict]:
-    return await _col("wishlists").find({"user_id": user_id}).to_list(25)
-
-
-async def get_wishers(char_id: str, exclude_uid: int = 0) -> list[int]:
-    docs = await _col("wishlists").find(
-        {"char_id": char_id, "user_id": {"$ne": exclude_uid}}
-    ).to_list(20)
-    return [d["user_id"] for d in docs]
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  TRADES
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def create_trade(doc: dict) -> None:
-    await _col("trades").insert_one(doc)
-
-
-async def get_trade(tid: str) -> Optional[dict]:
-    return await _col("trades").find_one({"trade_id": tid})
-
-
-async def update_trade(tid: str, upd: dict) -> None:
-    await _col("trades").update_one({"trade_id": tid}, upd)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  MARRIAGES
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def get_marriage(uid: int) -> Optional[dict]:
-    return await _col("marriages").find_one(
-        {"$or": [{"user1": uid}, {"user2": uid}]}
-    )
-
-
-async def create_marriage(u1: int, u2: int) -> None:
-    await _col("marriages").insert_one(
-        {"user1": u1, "user2": u2, "married_at": datetime.utcnow()}
-    )
-
-
-async def divorce(uid: int) -> bool:
-    res = await _col("marriages").delete_one(
-        {"$or": [{"user1": uid}, {"user2": uid}]}
-    )
-    return res.deleted_count > 0
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  GLOBAL BAN / MUTE
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def add_to_global_ban(uid: int, reason: str, banned_by: int) -> None:
+async def add_global_ban(uid: int, reason: str = "") -> None:
     await _col("global_bans").update_one(
         {"user_id": uid},
-        {"$set": {
-            "user_id":   uid,
-            "reason":    reason,
-            "banned_by": banned_by,
-            "banned_at": datetime.utcnow(),
-        }},
+        {"$set": {"user_id": uid, "reason": reason, "added_at": datetime.utcnow()}},
         upsert=True,
     )
 
 
-async def remove_from_global_ban(uid: int) -> None:
-    await _col("global_bans").delete_one({"user_id": uid})
+async def remove_global_ban(uid: int) -> bool:
+    res = await _col("global_bans").delete_one({"user_id": uid})
+    return res.deleted_count > 0
 
 
-async def is_user_globally_banned(uid: int) -> bool:
+async def is_globally_banned(uid: int) -> bool:
     return bool(await _col("global_bans").find_one({"user_id": uid}))
 
 
-async def fetch_globally_banned_users() -> list[dict]:
+async def get_all_gbanned() -> list[dict]:
     return await _col("global_bans").find({}).to_list(None)
 
 
-async def add_to_global_mute(uid: int, reason: str, muted_by: int) -> None:
+async def add_global_mute(uid: int, reason: str = "") -> None:
     await _col("global_mutes").update_one(
         {"user_id": uid},
-        {"$set": {
-            "user_id":  uid,
-            "reason":   reason,
-            "muted_by": muted_by,
-            "muted_at": datetime.utcnow(),
-        }},
+        {"$set": {"user_id": uid, "reason": reason, "added_at": datetime.utcnow()}},
         upsert=True,
     )
 
 
-async def remove_from_global_mute(uid: int) -> None:
-    await _col("global_mutes").delete_one({"user_id": uid})
+async def remove_global_mute(uid: int) -> bool:
+    res = await _col("global_mutes").delete_one({"user_id": uid})
+    return res.deleted_count > 0
 
 
-async def is_user_globally_muted(uid: int) -> bool:
+async def is_globally_muted(uid: int) -> bool:
     return bool(await _col("global_mutes").find_one({"user_id": uid}))
 
 
-async def fetch_globally_muted_users() -> list[dict]:
-    return await _col("global_mutes").find({}).to_list(None)
-
-
-async def get_all_chats() -> list[int]:
-    uids   = await get_all_user_ids()
-    grpids = await get_all_tracked_group_ids()
-    return list(set(uids + grpids))
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  SUDO / DEV / UPLOADER
-# ═════════════════════════════════════════════════════════════════════════════
+# ── Sudo / Dev / Uploader ─────────────────────────────────────────────────────
 
 async def add_sudo(uid: int) -> None:
     await _col("sudo_users").update_one(
-        {"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True
+        {"user_id": uid},
+        {"$set": {"user_id": uid, "added_at": datetime.utcnow()}},
+        upsert=True,
     )
 
 
-async def remove_sudo(uid: int) -> None:
-    await _col("sudo_users").delete_one({"user_id": uid})
+async def remove_sudo(uid: int) -> bool:
+    res = await _col("sudo_users").delete_one({"user_id": uid})
+    return res.deleted_count > 0
 
 
 async def get_sudo_ids() -> list[int]:
@@ -1031,27 +884,22 @@ async def get_sudo_ids() -> list[int]:
     return [d["user_id"] for d in docs]
 
 
-async def is_sudo(uid: int) -> bool:
-    return bool(await _col("sudo_users").find_one({"user_id": uid}))
-
-
 async def add_dev(uid: int) -> None:
     await _col("dev_users").update_one(
-        {"user_id": uid}, {"$set": {"user_id": uid}}, upsert=True
+        {"user_id": uid},
+        {"$set": {"user_id": uid, "added_at": datetime.utcnow()}},
+        upsert=True,
     )
 
 
-async def remove_dev(uid: int) -> None:
-    await _col("dev_users").delete_one({"user_id": uid})
+async def remove_dev(uid: int) -> bool:
+    res = await _col("dev_users").delete_one({"user_id": uid})
+    return res.deleted_count > 0
 
 
 async def get_dev_ids() -> list[int]:
     docs = await _col("dev_users").find({}).to_list(None)
     return [d["user_id"] for d in docs]
-
-
-async def is_dev(uid: int) -> bool:
-    return bool(await _col("dev_users").find_one({"user_id": uid}))
 
 
 async def add_uploader(uid: int) -> None:
@@ -1062,8 +910,9 @@ async def add_uploader(uid: int) -> None:
     )
 
 
-async def remove_uploader(uid: int) -> None:
-    await _col("uploaders").delete_one({"user_id": uid})
+async def remove_uploader(uid: int) -> bool:
+    res = await _col("uploaders").delete_one({"user_id": uid})
+    return res.deleted_count > 0
 
 
 async def get_uploader_ids() -> list[int]:
@@ -1071,71 +920,57 @@ async def get_uploader_ids() -> list[int]:
     return [d["user_id"] for d in docs]
 
 
-async def is_uploader(uid: int) -> bool:
-    return bool(await _col("uploaders").find_one({"user_id": uid}))
+# ── Top Groups ────────────────────────────────────────────────────────────────
+
+async def track_group(chat_id: int, title: str = "") -> None:
+    await _col("top_groups").update_one(
+        {"chat_id": chat_id},
+        {"$set": {"chat_id": chat_id, "title": title, "last_seen": datetime.utcnow()}},
+        upsert=True,
+    )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  RANK
-# ═════════════════════════════════════════════════════════════════════════════
-
-async def count_user_rank(user_id: int) -> int:
-    """Returns collector rank (1 = most characters owned)."""
-    cnt = await _col("user_characters").count_documents({"user_id": user_id})
-    pipeline = [
-        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
-        {"$match": {"count": {"$gt": cnt}}},
-        {"$count": "ahead"},
-    ]
-    res = await _col("user_characters").aggregate(pipeline).to_list(1)
-    return (res[0]["ahead"] if res else 0) + 1
+async def get_all_group_ids() -> list[int]:
+    docs = await _col("top_groups").find({}).to_list(None)
+    return [d["chat_id"] for d in docs]
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  LEADERBOARDS
-# ═════════════════════════════════════════════════════════════════════════════
+async def count_all_groups() -> int:
+    return await _col("top_groups").count_documents({})
 
-async def top_richest(limit: int = 10) -> list[dict]:
-    """Top users by kakera balance."""
+
+# ── Leaderboards ──────────────────────────────────────────────────────────────
+
+async def get_top_users(field: str = "balance", limit: int = 10) -> list[dict]:
     return (
         await _col("users")
-        .find({"balance": {"$gt": 0}})
-        .sort("balance", -1)
+        .find({"is_banned": {"$ne": True}})
+        .sort(field, -1)
         .limit(limit)
         .to_list(limit)
     )
 
 
-async def top_collectors(limit: int = 10) -> list[dict]:
-    """Top users by total characters owned, display names joined in."""
-    pipeline = [
-        {"$group": {"_id": "$user_id", "char_count": {"$sum": 1}}},
-        {"$sort": {"char_count": -1}},
-        {"$limit": limit},
-        {"$lookup": {
-            "from":         "users",
-            "localField":   "_id",
-            "foreignField": "user_id",
-            "as":           "user_info",
-        }},
-        {"$unwind": {"path": "$user_info", "preserveNullAndEmptyArrays": True}},
-        {"$project": {
-            "_id":        0,
-            "user_id":    "$_id",
-            "char_count": 1,
-            "first_name": {"$ifNull": ["$user_info.first_name", ""]},
-            "username":   {"$ifNull": ["$user_info.username",   ""]},
-        }},
-    ]
-    return await _col("user_characters").aggregate(pipeline).to_list(limit)
+async def get_top_collectors(limit: int = 10) -> list[dict]:
+    return await get_top_users("total_claimed", limit)
 
 
-async def top_by_level(limit: int = 10) -> list[dict]:
-    """Top users by XP level."""
-    return (
-        await _col("users")
-        .find({"level": {"$gt": 1}})
-        .sort([("level", -1), ("xp", -1)])
-        .limit(limit)
-        .to_list(limit)
+# ── Quizzes ───────────────────────────────────────────────────────────────────
+
+async def get_active_quiz(chat_id: int) -> Optional[dict]:
+    return await _col("quizzes").find_one({"chat_id": chat_id, "active": True})
+
+
+async def create_quiz(doc: dict) -> None:
+    await _col("quizzes").insert_one(doc)
+
+
+async def end_quiz(chat_id: int) -> None:
+    await _col("quizzes").update_one(
+        {"chat_id": chat_id, "active": True},
+        {"$set": {"active": False, "ended_at": datetime.utcnow()}},
     )
+
+
+async def delete_quiz(chat_id: int) -> None:
+    await _col("quizzes").delete_many({"chat_id": chat_id})
