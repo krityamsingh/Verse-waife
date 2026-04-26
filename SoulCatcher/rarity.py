@@ -294,6 +294,51 @@ LEVEL_REWARDS: dict[int, dict] = {
     100: {"kakera": 50000, "badge": "✨ Eternal"},
 }
 
+
+# ── Festival Seasons (sub of Seasonal id=51) ──────────────────────────────────
+# Used by autouploader: /uchar season <id> <key>
+FESTIVAL_SEASONS: dict[str, dict] = {
+    "spring":    {"emoji": "🌸", "label": "Spring Festival",    "active_months": [3, 4, 5]},
+    "summer":    {"emoji": "☀️", "label": "Summer Festival",    "active_months": [6, 7, 8]},
+    "autumn":    {"emoji": "🍂", "label": "Autumn Festival",    "active_months": [9, 10, 11]},
+    "winter":    {"emoji": "❄️", "label": "Winter Festival",    "active_months": [12, 1, 2]},
+    "halloween": {"emoji": "🎃", "label": "Halloween Special",  "active_months": [10]},
+    "christmas": {"emoji": "🎄", "label": "Christmas Special",  "active_months": [12]},
+    "valentine": {"emoji": "💝", "label": "Valentine's Day",    "active_months": [2]},
+    "newyear":   {"emoji": "🎆", "label": "New Year Special",   "active_months": [1]},
+    "tanabata":  {"emoji": "🎋", "label": "Tanabata Festival",  "active_months": [7]},
+}
+
+# ── Mythic Sports (sub of Mythic id=62) ───────────────────────────────────────
+# Used by autouploader: /uchar sport <id> <key>
+MYTHIC_SPORTS: dict[str, dict] = {
+    "football":    {"emoji": "⚽", "label": "Football"},
+    "basketball":  {"emoji": "🏀", "label": "Basketball"},
+    "baseball":    {"emoji": "⚾", "label": "Baseball"},
+    "tennis":      {"emoji": "🎾", "label": "Tennis"},
+    "swimming":    {"emoji": "🏊", "label": "Swimming"},
+    "martial":     {"emoji": "🥋", "label": "Martial Arts"},
+    "archery":     {"emoji": "🏹", "label": "Archery"},
+    "volleyball":  {"emoji": "🏐", "label": "Volleyball"},
+    "athletics":   {"emoji": "🏃", "label": "Athletics"},
+    "esports":     {"emoji": "🎮", "label": "Esports"},
+}
+
+# ── Mythic Fantasy (sub of Mythic id=63) ──────────────────────────────────────
+# Used by autouploader: /uchar fantasy <id> <archetype>
+MYTHIC_FANTASY: dict[str, dict] = {
+    "knight":    {"emoji": "⚔️",  "label": "Knight"},
+    "mage":      {"emoji": "🔮",  "label": "Mage"},
+    "elf":       {"emoji": "🧝",  "label": "Elf"},
+    "dragon":    {"emoji": "🐉",  "label": "Dragon"},
+    "demon":     {"emoji": "😈",  "label": "Demon"},
+    "angel":     {"emoji": "👼",  "label": "Angel"},
+    "witch":     {"emoji": "🧙",  "label": "Witch"},
+    "vampire":   {"emoji": "🧛",  "label": "Vampire"},
+    "spirit":    {"emoji": "👻",  "label": "Spirit"},
+    "beast":     {"emoji": "🐺",  "label": "Beast"},
+}
+
 # ── Helper Functions ──────────────────────────────────────────────────────────
 
 def get_all_rarities() -> list[RarityTier]:
