@@ -140,11 +140,14 @@ async def _create_indexes() -> None:
     await _safe_index(uc, "instance_id", unique=True)
     await _safe_index(uc, [("user_id", 1), ("obtained_at", -1)])
 
-    # spawns — all records are stale after a restart, so clear the collection
-    # before building the unique index to avoid conflicts from accumulated history.
-    await sp.delete_many({})
-    log.info("🧹 active_spawns cleared on startup (all spawns are stale after restart).")
-    await _safe_index(sp, [("chat_id", 1), ("char_id", 1)], unique=True)
+    # spawns — non-unique index; duplicate (chat_id, char_id) pairs are allowed
+    # because uploaders replace characters and stale entries expire naturally.
+    # Drop any pre-existing unique index on this pair before recreating it non-unique.
+    try:
+        await sp.drop_index("chat_id_1_char_id_1")
+    except Exception:
+        pass
+    await _safe_index(sp, [("chat_id", 1), ("char_id", 1)])
     await _safe_index(sp, "expires_at")
 
     # drop logs
