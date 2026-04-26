@@ -71,28 +71,36 @@ def _index_name(keys, kwargs) -> str:
 
 async def _deduplicate_field(col, field: str) -> int:
     """
-    For a unique-indexed field, keep the first document for each value and
-    reassign duplicate documents a fresh UUID hex so the index can be built.
-    Returns the number of documents fixed.
+    For a unique-indexed field, keep the earliest document for each value and
+    reassign later duplicates a fresh UUID hex so the index can build cleanly.
+
+    Uses $min (not $push) so no large arrays are built in memory, and passes
+    allowDiskUse=True so the $group stage can spill to disk on Atlas free-tier.
     """
+    # Phase 1: find the minimum _id (earliest insert) for each duplicated value.
     pipeline = [
-        {"$group": {"_id": f"${field}", "ids": {"$push": "$_id"}, "count": {"$sum": 1}}},
+        {"$group": {"_id": f"${field}", "keep_id": {"$min": "$_id"}, "count": {"$sum": 1}}},
         {"$match": {"count": {"$gt": 1}}},
+        {"$project": {"_id": 1, "keep_id": 1}},
     ]
-    duplicates = await col.aggregate(pipeline).to_list(None)
+    dup_values = await col.aggregate(pipeline, allowDiskUse=True).to_list(None)
     fixed = 0
-    for group in duplicates:
-        # Skip the first _id, patch all others with a fresh unique value
-        for dup_id in group["ids"][1:]:
+    for entry in dup_values:
+        field_value = entry["_id"]
+        keep_id     = entry["keep_id"]
+        # Phase 2: cursor over duplicates one at a time — no large list in memory.
+        async for doc in col.find(
+            {field: field_value, "_id": {"$ne": keep_id}},
+            {"_id": 1},
+        ):
             new_val = uuid.uuid4().hex.upper()
-            await col.update_one({"_id": dup_id}, {"$set": {field: new_val}})
+            await col.update_one({"_id": doc["_id"]}, {"$set": {field: new_val}})
             fixed += 1
             log.warning(
-                "Deduplication: patched %s=%r → %r on _id=%s",
-                field, group["_id"], new_val, dup_id,
+                "Deduplication: patched %s=%r -> %r on _id=%s",
+                field, field_value, new_val, doc["_id"],
             )
     return fixed
-
 
 async def _safe_index(col, keys, **kwargs) -> None:
     from pymongo.errors import OperationFailure, DuplicateKeyError
