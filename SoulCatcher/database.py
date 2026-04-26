@@ -69,99 +69,38 @@ def _index_name(keys, kwargs) -> str:
     )
 
 
-async def _deduplicate_fields(col, fields: list[str]) -> int:
-    """
-    Deduplicate on one or more fields (handles both simple and compound unique indexes).
-    Keeps the earliest document (_id min) for each duplicated key combination,
-    and reassigns later duplicates a fresh UUID hex on the FIRST field only
-    (enough to make the compound value unique).
-
-    Uses allowDiskUse=True and cursor-based patching to stay within Atlas limits.
-    """
-    # Build a group _id that captures all fields in the compound key
-    if len(fields) == 1:
-        group_id = f"${fields[0]}"
-    else:
-        group_id = {f: f"${f}" for f in fields}
-
-    pipeline = [
-        {"$group": {"_id": group_id, "keep_id": {"$min": "$_id"}, "count": {"$sum": 1}}},
-        {"$match": {"count": {"$gt": 1}}},
-        {"$project": {"_id": 1, "keep_id": 1}},
-    ]
-    dup_groups = await col.aggregate(pipeline, allowDiskUse=True).to_list(None)
-    fixed = 0
-    for entry in dup_groups:
-        key_value = entry["_id"]
-        keep_id   = entry["keep_id"]
-
-        # Build the match filter for this exact compound key
-        if len(fields) == 1:
-            match_filter = {fields[0]: key_value}
-        else:
-            match_filter = {f: key_value[f] for f in fields}
-        match_filter["_id"] = {"$ne": keep_id}
-
-        async for doc in col.find(match_filter, {"_id": 1}):
-            new_val = uuid.uuid4().hex.upper()
-            # Patch only the first field — enough to break the duplicate compound key
-            await col.update_one({"_id": doc["_id"]}, {"$set": {fields[0]: new_val}})
-            fixed += 1
-            log.warning(
-                "Deduplication: patched compound key %r field '%s' -> %r on _id=%s",
-                key_value, fields[0], new_val, doc["_id"],
-            )
-    return fixed
+def _index_name(keys, kwargs) -> str:
+    return kwargs.get("name") or (
+        f"{keys}_1" if isinstance(keys, str)
+        else "_".join(f"{k}_{v}" for k, v in keys)
+    )
 
 
 async def _safe_index(col, keys, **kwargs) -> None:
-    from pymongo.errors import OperationFailure, DuplicateKeyError
+    """Create an index, handling definition conflicts (code 86) gracefully.
 
-    async def _try_create():
-        await col.create_index(keys, **kwargs)
+    For unique indexes blocked by duplicate data (code 11000): we no longer
+    attempt auto-deduplication here because patching key fields corrupts
+    documents. Collections that can accumulate duplicates are cleared explicitly
+    in _create_indexes() before their indexes are built.
+    """
+    from pymongo.errors import OperationFailure
 
     try:
-        await _try_create()
-    except (OperationFailure, DuplicateKeyError) as e:
-        code = getattr(e, "code", None)
-        name = _index_name(keys, kwargs)
-        is_unique = kwargs.get("unique", False)
-
-        if code == 86:
-            # Index definition conflict — drop and recreate
+        await col.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        if e.code == 86:
+            # Index definition changed — drop the old one and recreate.
+            name = _index_name(keys, kwargs)
             log.warning("Index conflict on '%s' — dropping and recreating.", name)
             try:
                 await col.drop_index(name)
-                await _try_create()
+                await col.create_index(keys, **kwargs)
             except Exception as ex:
                 log.warning("Could not recreate index '%s': %s", name, ex)
-
-        elif code == 11000 and is_unique:
-            # Existing duplicate data is blocking a unique index build.
-            # Extract ALL fields from the index spec so compound keys are handled correctly.
-            if isinstance(keys, str):
-                fields = [keys]
-            else:
-                fields = [k for k, _ in keys]
-            log.warning(
-                "Unique index '%s' blocked by duplicate data on fields %r — "
-                "deduplicating collection before retrying.",
-                name, fields,
-            )
-            fixed = await _deduplicate_fields(col, fields)
-            log.warning("Deduplication complete: %d document(s) patched. Retrying index build.", fixed)
-            try:
-                # Drop any partial index left from the failed build, then retry
-                await col.drop_index(name)
-            except Exception:
-                pass
-            try:
-                await _try_create()
-            except Exception as ex:
-                log.error("Index '%s' still failed after deduplication: %s", name, ex)
-
         else:
             raise
+
 
 
 async def _create_indexes() -> None:
@@ -201,7 +140,10 @@ async def _create_indexes() -> None:
     await _safe_index(uc, "instance_id", unique=True)
     await _safe_index(uc, [("user_id", 1), ("obtained_at", -1)])
 
-    # spawns
+    # spawns — all records are stale after a restart, so clear the collection
+    # before building the unique index to avoid conflicts from accumulated history.
+    await sp.delete_many({})
+    log.info("🧹 active_spawns cleared on startup (all spawns are stale after restart).")
     await _safe_index(sp, [("chat_id", 1), ("char_id", 1)], unique=True)
     await _safe_index(sp, "expires_at")
 
