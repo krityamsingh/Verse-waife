@@ -113,11 +113,12 @@ async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN):
     wait = TG_RETRY_BASE_WAIT
 
     for attempt in range(1, TG_RETRY_ATTEMPTS + 1):
-        client = SoulCatcher.app
+        # Get the real underlying client from the proxy
+        client = object.__getattribute__(SoulCatcher.app, '_client')
         try:
             log.info("📡 Telegram attempt %d/%d...", attempt, TG_RETRY_ATTEMPTS)
             await asyncio.wait_for(client.start(), timeout=40)
-            me = client.me
+            me = await client.get_me()
             log.info("✅ Connected as @%s (id=%d)", me.username, me.id)
             return client
 
@@ -132,7 +133,7 @@ async def start_telegram_with_retry(API_ID, API_HASH, BOT_TOKEN):
                 pass
 
         # Build fresh client and reload modules on retry
-        SoulCatcher.app = _make_client(API_ID, API_HASH, BOT_TOKEN)
+        SoulCatcher.app._set(_make_client(API_ID, API_HASH, BOT_TOKEN))
         load_modules(reload=True)
 
         if attempt < TG_RETRY_ATTEMPTS:
@@ -186,9 +187,10 @@ async def main():
         except Exception as exc:
             log.warning("  ⚠️  %s cache failed (non-fatal): %s", label, exc)
 
-    # Phase 3: Modules — create client FIRST, then import modules
+    # Phase 3: Modules — create client FIRST via proxy, then import modules
     log.info("Phase 3/4: Loading modules")
-    SoulCatcher.app = _make_client(API_ID, API_HASH, BOT_TOKEN)
+    real_client = _make_client(API_ID, API_HASH, BOT_TOKEN)
+    SoulCatcher.app._set(real_client)
     loaded, failed = load_modules()
     if not loaded:
         log.critical("❌ No modules loaded — check SoulCatcher/modules/")
