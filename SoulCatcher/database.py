@@ -1058,3 +1058,55 @@ async def fetch_globally_banned_users() -> list[dict]:
 async def fetch_globally_muted_users() -> list[dict]:
     """Return all globally-muted user records."""
     return await _col("global_mutes").find({}).to_list(None)
+
+
+# ── is_sudo / is_dev / is_uploader (sudo.py imports these from database) ─────
+
+async def is_sudo(uid: int) -> bool:
+    """Return True if user is in the sudo list."""
+    doc = await _col("sudo_users").find_one({"user_id": uid})
+    return doc is not None
+
+
+async def is_dev(uid: int) -> bool:
+    """Return True if user is in the dev list."""
+    doc = await _col("dev_users").find_one({"user_id": uid})
+    return doc is not None
+
+
+async def is_uploader(uid: int) -> bool:
+    """Return True if user is in the uploader list."""
+    doc = await _col("uploader_users").find_one({"user_id": uid})
+    return doc is not None
+
+
+# ── Wishlist aliases (wish.py calls add_wish / remove_wish) ──────────────────
+
+async def add_wish(user_id: int, char_id: str, name: str = "", rarity: str = "") -> bool:
+    """Alias: add a character to a user's wishlist (extra args ignored)."""
+    return await add_to_wishlist(user_id, char_id)
+
+
+async def remove_wish(user_id: int, char_id: str) -> bool:
+    """Alias: remove a character from a user's wishlist."""
+    return await remove_from_wishlist(user_id, char_id)
+
+
+# ── Leaderboard aliases ───────────────────────────────────────────────────────
+
+top_collectors = get_top_collectors
+
+
+async def top_richest(limit: int = 10) -> list[dict]:
+    """Return top users sorted by balance."""
+    return await get_top_users(field="balance", limit=limit)
+
+
+async def count_user_rank(user_id: int) -> int:
+    """Return the 1-based rank of a user by harem size."""
+    user_doc = await _col("users").find_one({"user_id": user_id}, {"harem": 1})
+    user_count = len(user_doc.get("harem", [])) if user_doc else 0
+    rank = await _col("users").count_documents(
+        {"$expr": {"$gt": [{"$size": {"$ifNull": ["$harem", []]}}, user_count]}}
+    )
+    return rank + 1
