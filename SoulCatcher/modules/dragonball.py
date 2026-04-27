@@ -53,54 +53,74 @@ _RawKBC: Any = None
 _RawRow: Any = None
 _RawMarkup: Any = None
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  COLORED BUTTON DETECTION  —  3-tier probe
+#
+#  Tier 1 (best): Pyrofork ≥ 2.3.x  — style= on InlineKeyboardButton directly
+#  Tier 2:        Pyrofork raw types — KeyboardButtonCallback(style=)
+#  Tier 3:        Standard Pyrogram  — no colors, plain InlineKeyboardButton
+# ══════════════════════════════════════════════════════════════════════════════
+
+_COLOR_MODE: str = "none"   # "hl" | "raw" | "none"
+
+# ── Tier 1: Pyrofork high-level style= on InlineKeyboardButton ───────────────
 try:
-    from pyrogram.raw.types import (                  # type: ignore[attr-defined]
-        KeyboardButtonCallback as _KBC,
-        KeyboardButtonRow as _KBRow,
-        ReplyInlineMarkup as _RIM,
-    )
-    # Probe: does this build accept `style`?
-    _KBC(text="probe", data=b"probe", style=1)
-    _RawKBC    = _KBC
-    _RawRow    = _KBRow
-    _RawMarkup = _RIM
-    _PYROFORK_COLORS = True
-    log.info("✅ Pyrofork colored buttons: ENABLED")
-except Exception:
+    _probe = InlineKeyboardButton("p", callback_data="p", style=1)
+    # If we got here the kwarg is accepted — Pyrofork HL colors available
+    _COLOR_MODE = "hl"
+    log.info("✅ Pyrofork colored buttons: ENABLED (high-level mode)")
+except TypeError:
+    pass
+
+# ── Tier 2: Pyrofork raw KeyboardButtonCallback(style=) ──────────────────────
+if _COLOR_MODE == "none":
+    try:
+        from pyrogram.raw.types import (            # type: ignore[attr-defined]
+            KeyboardButtonCallback as _RawKBC,
+            KeyboardButtonRow      as _RawRow,
+            ReplyInlineMarkup      as _RawMarkup,
+        )
+        _RawKBC(text="p", data=b"p", style=1)      # probe
+        _COLOR_MODE = "raw"
+        log.info("✅ Pyrofork colored buttons: ENABLED (raw mode)")
+    except Exception:
+        pass
+
+if _COLOR_MODE == "none":
     log.info("ℹ️  Pyrofork colored buttons: not available — using standard markup")
 
-# ── Style constants (Pyrofork / TDLib KeyboardButtonCallback.style) ───────────
-#   0 = default (gray)   1 = premium/blue   2 = danger/red
-#   3 = success/green    4 = warning/orange
+# ── Style constants ───────────────────────────────────────────────────────────
+#   0 = default (gray)   1 = blue   2 = red/orange   3 = green
 _CS_DEFAULT = 0
 _CS_BLUE    = 1   # heroes, info
 _CS_RED     = 2   # villains, cancel, danger
 _CS_GREEN   = 3   # buy, confirm, win
-_CS_ORANGE  = 4   # special move, transform, neutral
+_CS_ORANGE  = 2   # specials / transform (same slot as red on most clients)
 
 
-# ── Low-level button factories ────────────────────────────────────────────────
+# ── Button factory ────────────────────────────────────────────────────────────
 
-def _raw_btn(text: str, data: str, style: int = _CS_DEFAULT):
-    """Return a raw KeyboardButtonCallback with colour (Pyrofork only)."""
-    return _RawKBC(text=text, data=data.encode(), style=style)
-
-
-def _raw_markup(rows: list[list]) -> Any:
-    """Wrap a list-of-lists of raw buttons into a ReplyInlineMarkup."""
-    return _RawMarkup(rows=[_RawRow(buttons=r) for r in rows])
-
-
-def _hl_btn(text: str, data: str) -> InlineKeyboardButton:
-    """High-level (standard Pyrogram) button — fallback path."""
+def _make_btn(text: str, data: str, style: int = _CS_DEFAULT) -> InlineKeyboardButton:
+    """Return the right button object for the active color mode."""
+    if _COLOR_MODE == "hl":
+        # Pyrofork adds `style` directly to the high-level class
+        return InlineKeyboardButton(text, callback_data=data, style=style)
+    if _COLOR_MODE == "raw":
+        return _RawKBC(text=text, data=data.encode(), style=style)
+    # Plain Pyrogram — no color support
     return InlineKeyboardButton(text, callback_data=data)
 
 
-def _hl_markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+def _make_markup(rows: list[list]) -> InlineKeyboardMarkup | Any:
+    """Wrap rows of buttons into the correct markup type."""
+    if _COLOR_MODE == "raw":
+        from pyrogram.raw.types import KeyboardButtonRow, ReplyInlineMarkup
+        return ReplyInlineMarkup(rows=[KeyboardButtonRow(buttons=r) for r in rows])
+    # Both "hl" and "none" use standard InlineKeyboardMarkup
     return InlineKeyboardMarkup(rows)
 
 
-# ── Unified button builder ────────────────────────────────────────────────────
+# ── Unified keyboard builder ──────────────────────────────────────────────────
 
 class _KB:
     """Accumulates button rows and builds the correct markup type."""
@@ -113,29 +133,22 @@ class _KB:
         return self
 
     def build(self) -> InlineKeyboardMarkup | Any:
-        if _PYROFORK_COLORS:
-            return _raw_markup(self._rows)
-        # B() already stored InlineKeyboardButton objects — use them directly.
-        # Do NOT try to access .data — that field only exists on raw buttons.
-        return _hl_markup(self._rows)
+        return _make_markup(self._rows)
 
     @staticmethod
     def btn(text: str, data: str, style: int = _CS_DEFAULT):
-        """Return the appropriate button object for the active backend."""
-        if _PYROFORK_COLORS:
-            return _raw_btn(text, data, style)
-        return _hl_btn(text, data)
+        return _make_btn(text, data, style)
 
 
-# ── Convenience aliases ───────────────────────────────────────────────────────
+# ── Public aliases ────────────────────────────────────────────────────────────
 
 def B(text: str, data: str, style: int = _CS_DEFAULT):
-    """Shorthand for _KB.btn."""
-    return _KB.btn(text, data, style)
+    """Create a button with optional color style."""
+    return _make_btn(text, data, style)
 
 
 def markup(*rows: list) -> InlineKeyboardMarkup | Any:
-    """Build markup from pre-assembled rows of B() buttons."""
+    """Build markup directly from rows of B() buttons."""
     kb = _KB()
     for row in rows:
         kb.row(*row)
