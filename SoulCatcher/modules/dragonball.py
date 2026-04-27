@@ -115,13 +115,9 @@ class _KB:
     def build(self) -> InlineKeyboardMarkup | Any:
         if _PYROFORK_COLORS:
             return _raw_markup(self._rows)
-        # Convert raw buttons → high-level if colours were disabled at init
-        hl_rows = [
-            [InlineKeyboardButton(b.text, callback_data=b.data.decode())
-             for b in row]
-            for row in self._rows
-        ]
-        return _hl_markup(hl_rows)
+        # B() already stored InlineKeyboardButton objects — use them directly.
+        # Do NOT try to access .data — that field only exists on raw buttons.
+        return _hl_markup(self._rows)
 
     @staticmethod
     def btn(text: str, data: str, style: int = _CS_DEFAULT):
