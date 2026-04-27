@@ -1,74 +1,45 @@
 """SoulCatcher/modules/dragonball.py — Dragon Ball Fighting Game with Shop System.
 
-Bot API 9.4 Colored Buttons
-────────────────────────────
-Telegram Bot API 9.4 (Feb 9 2026) added a `style` field to InlineKeyboardButton:
-  • "primary" → Blue
-  • "success" → Green
-  • "danger"  → Red
+NOTE on coloured buttons (Bot API 9.4):
+  Coloured buttons require Pyrofork with a TL layer that exposes the `style`
+  field on KeyboardButtonCallback.  The current install (Pyrogram 2.3.69,
+  Layer 220) does NOT support it.
 
-Pyrogram's high-level InlineKeyboardButton doesn't expose this field yet, so we
-use raw MTProto types instead.  Every helper that used to return a pyrogram IKM/IKB
-now returns a raw types.ReplyInlineMarkup built from raw types.KeyboardButtonCallback
-objects that carry the `style` argument.
-
-NOTE: The `style` kwarg is only forwarded if the installed Pyrogram/Pyrofork build
-actually exposes it in KeyboardButtonCallback (i.e. TL layer that includes Bot API
-9.4).  If the field is absent the buttons still work — they just render without
-colour.  Upgrade to Pyrofork to get coloured buttons.
-
-Team colour mapping:
-  hero    → "primary"  (blue  — 🔵)
-  villain → "danger"   (red   — 🔴)
-  neutral → "success"  (green — 🟢)
-  action  → "primary"  (blue  — generic action)
-  special → "success"  (green — special move)
-  transform → "danger" (red   — power surge)
-  wish    → "primary"  (blue  — single wish rows)
+  Until you switch to a compatible Pyrofork build, this module uses the
+  standard high-level InlineKeyboardMarkup / InlineKeyboardButton so every
+  command actually works.  The `style` plumbing is kept as a commented-out
+  stub so you can re-enable it later without rewriting everything.
 """
 
 from __future__ import annotations
 
-import asyncio
-import inspect
 import logging
 import random
 from datetime import datetime
-from motor.motor_asyncio import AsyncIOMotorClient
 
-import SoulCatcher as _soul
-from pyrogram import filters, raw
-from pyrogram.raw import types as raw_types, functions as raw_functions
+from motor.motor_asyncio import AsyncIOMotorClient
+from pyrogram import filters
 from pyrogram.types import (
-    Message,
     CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
 
-from SoulCatcher.config import MONGO_URI, DB_NAME
+import SoulCatcher as _soul
+from SoulCatcher.config import DB_NAME, MONGO_URI
 from SoulCatcher.database import (
-    get_or_create_user,
-    get_balance,
     add_balance,
-    deduct_balance,
-    add_xp,
     add_to_harem,
+    add_xp,
+    deduct_balance,
+    get_balance,
+    get_or_create_user,
     get_random_character,
 )
 
 log = logging.getLogger("SoulCatcher.dragonball")
 
-# ── Does this build support the style kwarg? ──────────────────────────────────
-# Check once at import time so _raw_btn stays fast.
-_STYLE_SUPPORTED: bool = (
-    "style" in inspect.signature(raw_types.KeyboardButtonCallback.__init__).parameters
-)
-if not _STYLE_SUPPORTED:
-    log.warning(
-        "KeyboardButtonCallback has no 'style' field in this Pyrogram build "
-        "(Layer %s). Coloured buttons are disabled. Upgrade to Pyrofork for "
-        "Bot API 9.4 button colours.",
-        getattr(raw_types, "LAYER", "?"),
-    )
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 
@@ -95,7 +66,7 @@ def _col(name: str):
 
 # ── Fighter Catalogue ─────────────────────────────────────────────────────────
 
-FIGHTERS = {
+FIGHTERS: dict[str, dict] = {
     # ── HEROES ────────────────────────────────────────────────────────────────
     "goku": {
         "name": "Goku", "emoji": "🟡", "team": "hero",
@@ -371,13 +342,6 @@ FIGHTERS = {
 
 FREE_FIGHTER = "goku"
 
-# ── Team → Bot API 9.4 button style ──────────────────────────────────────────
-TEAM_STYLE: dict[str, str] = {
-    "hero":    "primary",
-    "villain": "danger",
-    "neutral": "success",
-}
-
 TEAM_COLOR: dict[str, str] = {
     "hero":    "🔵",
     "villain": "🔴",
@@ -386,17 +350,23 @@ TEAM_COLOR: dict[str, str] = {
 
 # ── Dragon Balls ──────────────────────────────────────────────────────────────
 
-DRAGON_BALLS  = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐", "⭐⭐⭐⭐⭐⭐", "⭐⭐⭐⭐⭐⭐⭐"]
-BALL_NAMES    = ["One-Star", "Two-Star", "Three-Star", "Four-Star", "Five-Star", "Six-Star", "Seven-Star"]
+DRAGON_BALLS = [
+    "⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐",
+    "⭐⭐⭐⭐⭐", "⭐⭐⭐⭐⭐⭐", "⭐⭐⭐⭐⭐⭐⭐",
+]
+BALL_NAMES = [
+    "One-Star", "Two-Star", "Three-Star", "Four-Star",
+    "Five-Star", "Six-Star", "Seven-Star",
+]
 TOTAL_BALLS   = 7
 WISH_COOLDOWN = 7 * 24 * 3600
 
 WISHES = {
-    "kakera":   {"label": "💰  10,000 Kakera",      "desc": "Receive 10,000 kakera instantly."},
-    "xp":       {"label": "⭐  2,000 XP",            "desc": "Gain 2,000 XP toward your level."},
-    "fighter":  {"label": "🎁  Free Random Fighter", "desc": "Get a random DB fighter for free."},
-    "immunity": {"label": "🛡  1-Week Immunity",     "desc": "Cannot be gbanned for 7 days."},
-    "reroll":   {"label": "🎲  Daily Reroll x2",     "desc": "Double kakera from your next daily."},
+    "kakera":   {"label": "💰  10,000 Kakera"},
+    "xp":       {"label": "⭐  2,000 XP"},
+    "fighter":  {"label": "🎁  Free Random Fighter"},
+    "immunity": {"label": "🛡  1-Week Immunity"},
+    "reroll":   {"label": "🎲  Daily Reroll x2"},
 }
 
 # ── Power Upgrade Tiers ───────────────────────────────────────────────────────
@@ -434,51 +404,139 @@ def _power_tier_name(pl: int) -> str:
 _active_fights: dict[str, dict] = {}
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  RAW BUTTON HELPERS  —  Bot API 9.4 colored InlineKeyboardButton
-# ═════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+#  KEYBOARD HELPERS  —  standard Pyrogram high-level types
+#  (raw types + style= dropped: Pyrogram 2.3.69 doesn't support them and
+#   passing raw ReplyInlineMarkup to send_message/reply causes a TypeError
+#   because Pyrogram tries to await markup.write(client) which returns bytes,
+#   not a coroutine.)
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _raw_btn(
-    text: str,
-    data: str,
-    style: str | None = None,
-) -> raw_types.KeyboardButtonCallback:
-    """
-    Build one raw callback inline button.
-
-    style: "primary" (blue) | "success" (green) | "danger" (red) | None (default)
-
-    The `style` kwarg is only forwarded when the current Pyrogram/Pyrofork build
-    exposes it in KeyboardButtonCallback (i.e. TL layer includes Bot API 9.4).
-    Older builds receive plain buttons without colour — no crash, no silent
-    swallowing of an unexpected kwarg.
-    """
-    kwargs: dict = {"text": text, "data": data.encode()}
-    if style and _STYLE_SUPPORTED:
-        kwargs["style"] = style
-    return raw_types.KeyboardButtonCallback(**kwargs)
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text, callback_data=data)
 
 
-def _raw_markup(
-    rows: list[list[raw_types.KeyboardButtonCallback]],
-) -> raw_types.ReplyInlineMarkup:
-    """Wrap a list-of-lists of raw buttons into a ReplyInlineMarkup."""
-    return raw_types.ReplyInlineMarkup(
-        rows=[raw_types.KeyboardButtonRow(buttons=row) for row in rows]
-    )
+def _markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(rows)
 
 
-def _team_style(team: str) -> str:
-    """Map fighter team to Bot API 9.4 button style string."""
-    return TEAM_STYLE.get(team, "primary")
+def _shop_keyboard(page: int = 0, uid: int = 0) -> InlineKeyboardMarkup:
+    keys     = list(FIGHTERS.keys())
+    per_page = 6
+    start    = page * per_page
+    chunk    = keys[start:start + per_page]
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(chunk), 2):
+        row = []
+        for key in chunk[i:i + 2]:
+            c         = FIGHTERS[key]
+            dot       = TEAM_COLOR.get(c["team"], "⚪")
+            price_str = "FREE" if c["price"] == 0 else f"{c['price']:,}💰"
+            row.append(_btn(
+                f"{dot} {c['name']} · {price_str}",
+                f"dbshop_view:{uid}:{key}:{page}",
+            ))
+        rows.append(row)
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(_btn("◀️ Prev", f"dbshop_page:{uid}:{page - 1}"))
+    if start + per_page < len(keys):
+        nav.append(_btn("Next ▶️", f"dbshop_page:{uid}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        _btn("🥋 My Fighters", f"dbshop_mine:{uid}"),
+        _btn("⚡ Power Up",    f"dbshop_pwrup:{uid}"),
+    ])
+    return _markup(rows)
 
 
-# ── DB Helpers ────────────────────────────────────────────────────────────────
+def _owned_pick_keyboard(
+    owned: list[str], fight_id: str, role: str, page: int = 0
+) -> InlineKeyboardMarkup:
+    per_page = 6
+    start    = page * per_page
+    chunk    = owned[start:start + per_page]
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(chunk), 2):
+        row = []
+        for key in chunk[i:i + 2]:
+            c   = FIGHTERS.get(key, {})
+            dot = TEAM_COLOR.get(c.get("team", "neutral"), "⚪")
+            row.append(_btn(
+                f"{dot} {c.get('name', key)}",
+                f"dbpick:{fight_id}:{role}:{key}",
+            ))
+        rows.append(row)
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(_btn("◀️", f"dbpick_page:{fight_id}:{role}:{page - 1}"))
+    if start + per_page < len(owned):
+        nav.append(_btn("▶️", f"dbpick_page:{fight_id}:{role}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    return _markup(rows)
+
+
+def _action_keyboard(
+    fight_id: str, uid: int, transformed: bool
+) -> InlineKeyboardMarkup:
+    rows = [
+        [_btn("⚔️  ──  A T T A C K  ──",  f"dbact:{fight_id}:{uid}:attack")],
+        [_btn("💥  ──  SPECIAL MOVE  ──",  f"dbact:{fight_id}:{uid}:special")],
+    ]
+    if not transformed:
+        rows.append([_btn(
+            "🌀  ══  T R A N S F O R M  ══",
+            f"dbact:{fight_id}:{uid}:transform",
+        )])
+    return _markup(rows)
+
+
+# ── Shared HP bar ─────────────────────────────────────────────────────────────
+
+def _hp_bar(hp: int, max_hp: int) -> str:
+    filled = max(0, min(10, int(hp / max(max_hp, 1) * 10)))
+    return "🟩" * filled + "⬛" * (10 - filled)
+
+
+# ── Safe send/edit helpers ────────────────────────────────────────────────────
+
+async def _safe_reply_video(msg: Message, url: str, caption: str, **kw) -> bool:
+    try:
+        await msg.reply_video(url, caption=caption, **kw)
+        return True
+    except Exception as exc:
+        log.debug("reply_video failed (%s): %s", url, exc)
+        return False
+
+
+async def _safe_edit_caption(msg, caption: str, **kw) -> bool:
+    try:
+        await msg.edit_caption(caption=caption, **kw)
+        return True
+    except Exception as exc:
+        log.debug("edit_caption failed: %s", exc)
+        return False
+
+
+async def _safe_edit_text(msg, text: str, **kw) -> bool:
+    try:
+        await msg.edit_text(text, **kw)
+        return True
+    except Exception as exc:
+        log.debug("edit_text failed: %s", exc)
+        return False
+
+
+# ── DB helpers ────────────────────────────────────────────────────────────────
 
 async def _get_owned(uid: int) -> list[str]:
     doc = await _col("db_owned_fighters").find_one({"user_id": uid})
     if not doc:
-        await _col("db_owned_fighters").insert_one({"user_id": uid, "fighters": [FREE_FIGHTER]})
+        await _col("db_owned_fighters").insert_one(
+            {"user_id": uid, "fighters": [FREE_FIGHTER]}
+        )
         return [FREE_FIGHTER]
     owned = doc.get("fighters", [FREE_FIGHTER])
     if FREE_FIGHTER not in owned:
@@ -513,130 +571,6 @@ async def _has_all_balls(uid: int) -> bool:
     return len(set(doc.get("balls", []))) >= TOTAL_BALLS
 
 
-# ── UI / Keyboard Helpers ─────────────────────────────────────────────────────
-
-def _hp_bar(hp: int, max_hp: int) -> str:
-    filled = max(0, min(10, int(hp / max(max_hp, 1) * 10)))
-    return "🟩" * filled + "⬛" * (10 - filled)
-
-
-def _shop_keyboard(page: int = 0, uid: int = 0) -> raw_types.ReplyInlineMarkup:
-    """
-    Shop grid — each fighter button is colored by team:
-      hero → primary (blue) | villain → danger (red) | neutral → success (green)
-    """
-    keys     = list(FIGHTERS.keys())
-    per_page = 6
-    start    = page * per_page
-    chunk    = keys[start:start + per_page]
-    rows     = []
-    for i in range(0, len(chunk), 2):
-        row = []
-        for key in chunk[i:i+2]:
-            c         = FIGHTERS[key]
-            style     = _team_style(c["team"])
-            price_str = "FREE" if c["price"] == 0 else f"{c['price']:,}💰"
-            row.append(_raw_btn(
-                f"{c['name']} · {price_str}",
-                f"dbshop_view:{uid}:{key}:{page}",
-                style=style,
-            ))
-        rows.append(row)
-    nav = []
-    if page > 0:
-        nav.append(_raw_btn("◀️ Prev", f"dbshop_page:{uid}:{page-1}"))
-    if start + per_page < len(keys):
-        nav.append(_raw_btn("Next ▶️", f"dbshop_page:{uid}:{page+1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([
-        _raw_btn("🥋 My Fighters", f"dbshop_mine:{uid}", style="primary"),
-        _raw_btn("⚡ Power Up",    f"dbshop_pwrup:{uid}", style="success"),
-    ])
-    return _raw_markup(rows)
-
-
-def _owned_pick_keyboard(
-    owned: list[str], fight_id: str, role: str, page: int = 0
-) -> raw_types.ReplyInlineMarkup:
-    """Pick keyboard — fighter buttons colored by their team."""
-    per_page = 6
-    start    = page * per_page
-    chunk    = owned[start:start + per_page]
-    rows     = []
-    for i in range(0, len(chunk), 2):
-        row = []
-        for key in chunk[i:i+2]:
-            c     = FIGHTERS.get(key, {})
-            style = _team_style(c.get("team", "neutral"))
-            row.append(_raw_btn(
-                c.get("name", key),
-                f"dbpick:{fight_id}:{role}:{key}",
-                style=style,
-            ))
-        rows.append(row)
-    nav = []
-    if page > 0:
-        nav.append(_raw_btn("◀️", f"dbpick_page:{fight_id}:{role}:{page-1}"))
-    if start + per_page < len(owned):
-        nav.append(_raw_btn("▶️", f"dbpick_page:{fight_id}:{role}:{page+1}"))
-    if nav:
-        rows.append(nav)
-    return _raw_markup(rows)
-
-
-def _action_keyboard(
-    fight_id: str, uid: int, transformed: bool
-) -> raw_types.ReplyInlineMarkup:
-    """
-    Combat buttons — colored by action type:
-      Attack    → primary (blue)
-      Special   → success (green)
-      Transform → danger  (red)
-    """
-    rows = [
-        [_raw_btn("⚔️  ──  A T T A C K  ──", f"dbact:{fight_id}:{uid}:attack",  style="primary")],
-        [_raw_btn("💥  ──  SPECIAL MOVE  ──", f"dbact:{fight_id}:{uid}:special", style="success")],
-    ]
-    if not transformed:
-        rows.append([_raw_btn(
-            "🌀  ══  T R A N S F O R M  ══",
-            f"dbact:{fight_id}:{uid}:transform",
-            style="danger",
-        )])
-    return _raw_markup(rows)
-
-
-# ── Safe send helpers ─────────────────────────────────────────────────────────
-
-async def _safe_reply_video(msg: Message, url: str, caption: str, **kwargs) -> bool:
-    """Try reply_video; return True on success, False on any error."""
-    try:
-        await msg.reply_video(url, caption=caption, **kwargs)
-        return True
-    except Exception as exc:
-        log.debug("reply_video failed (%s): %s", url, exc)
-        return False
-
-
-async def _safe_edit_caption(msg, caption: str, **kwargs) -> bool:
-    try:
-        await msg.edit_caption(caption=caption, **kwargs)
-        return True
-    except Exception as exc:
-        log.debug("edit_caption failed: %s", exc)
-        return False
-
-
-async def _safe_edit_text(msg, text: str, **kwargs) -> bool:
-    try:
-        await msg.edit_text(text, **kwargs)
-        return True
-    except Exception as exc:
-        log.debug("edit_text failed: %s", exc)
-        return False
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SHOP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -652,7 +586,6 @@ async def dbshop_cmd(_, m: Message):
     )
     bal   = await get_balance(uid)
     owned = await _get_owned(uid)
-
     await m.reply(
         f"🛒 **Dragon Ball Fighter Shop**\n\n"
         f"💰 Balance: `{bal:,}` kakera\n"
@@ -716,7 +649,6 @@ async def dbshop_view_cb(_, cq: CallbackQuery):
     if cq.from_user.id != uid:
         await cq.answer("Not your shop!", show_alert=True)
         return
-
     char = FIGHTERS.get(key)
     if not char:
         await cq.answer("Unknown fighter!", show_alert=True)
@@ -726,10 +658,11 @@ async def dbshop_view_cb(_, cq: CallbackQuery):
     bal       = await get_balance(uid)
     page      = int(page_str)
     dot       = TEAM_COLOR.get(char["team"], "⚪")
-    team_icon = {"hero": "🦸 Hero", "villain": "😈 Villain", "neutral": "⚖️ Neutral"}.get(char["team"], "")
+    team_icon = {
+        "hero": "🦸 Hero", "villain": "😈 Villain", "neutral": "⚖️ Neutral"
+    }.get(char["team"], "")
     price_str = "**FREE**" if char["price"] == 0 else f"`{char['price']:,}` kakera"
     already   = key in owned
-    style     = _team_style(char["team"])
 
     if already:
         status = "✅ **OWNED**"
@@ -738,20 +671,15 @@ async def dbshop_view_cb(_, cq: CallbackQuery):
     else:
         status = f"💰 Price: {price_str}\n❌ Not enough kakera"
 
-    rows = []
+    rows: list[list[InlineKeyboardButton]] = []
     if not already and char["price"] > 0:
-        rows.append([_raw_btn(
-            f"🛒  Buy {char['name']} — {char['price']:,} 💰",
+        rows.append([_btn(
+            f"🛒 Buy {char['name']} — {char['price']:,} 💰",
             f"dbbuy:{uid}:{key}:{page}",
-            style=style,
         )])
     elif not already:
-        rows.append([_raw_btn(
-            f"🎁  Claim {char['name']} FREE",
-            f"dbbuy:{uid}:{key}:{page}",
-            style="success",
-        )])
-    rows.append([_raw_btn(f"◀️ Back to Shop", f"dbshop_page:{uid}:{page}")])
+        rows.append([_btn(f"🎁 Claim {char['name']} FREE", f"dbbuy:{uid}:{key}:{page}")])
+    rows.append([_btn("◀️ Back to Shop", f"dbshop_page:{uid}:{page}")])
 
     text = (
         f"{dot} **{char['name']}**  {char['emoji']}\n"
@@ -761,13 +689,9 @@ async def dbshop_view_cb(_, cq: CallbackQuery):
         f"📖 _{char['desc']}_\n\n"
         f"{status}"
     )
-
-    video = char["videos"].get("idle")
-    edited = False
-    if video:
-        edited = await _safe_edit_caption(cq.message, text, reply_markup=_raw_markup(rows))
-    if not edited:
-        await _safe_edit_text(cq.message, text, reply_markup=_raw_markup(rows))
+    markup = _markup(rows)
+    if not await _safe_edit_caption(cq.message, text, reply_markup=markup):
+        await _safe_edit_text(cq.message, text, reply_markup=markup)
     await cq.answer()
 
 
@@ -778,17 +702,14 @@ async def dbbuy_cb(_, cq: CallbackQuery):
     if cq.from_user.id != uid:
         await cq.answer("Not your purchase!", show_alert=True)
         return
-
     char = FIGHTERS.get(key)
     if not char:
         await cq.answer("Unknown fighter!", show_alert=True)
         return
-
     owned = await _get_owned(uid)
     if key in owned:
         await cq.answer("You already own this fighter!", show_alert=True)
         return
-
     price = char["price"]
     if price > 0:
         bal = await get_balance(uid)
@@ -798,23 +719,15 @@ async def dbbuy_cb(_, cq: CallbackQuery):
             )
             return
         await deduct_balance(uid, price)
-
     await _add_owned(uid, key)
-    owned = await _get_owned(uid)
-    dot   = TEAM_COLOR.get(char["team"], "⚪")
-    style = _team_style(char["team"])
-
+    owned    = await _get_owned(uid)
+    dot      = TEAM_COLOR.get(char["team"], "⚪")
+    back_btn = _markup([[_btn("◀️ Back to Shop", f"dbshop_page:{uid}:{page_str}")]])
     await cq.answer(f"✅ {char['name']} is yours!", show_alert=True)
-
-    back_btn = _raw_markup([[
-        _raw_btn(f"◀️ Back to Shop", f"dbshop_page:{uid}:{page_str}", style=style)
-    ]])
-
     video = char["videos"].get("idle")
     if video:
         sent = await _safe_reply_video(
-            cq.message,
-            video,
+            cq.message, video,
             caption=(
                 f"🎉 {dot} **{char['emoji']} {char['name']} Purchased!**\n\n"
                 f"⚡ PL: `{char['base_power']:,}` | 💥 {char['signature']}\n"
@@ -824,7 +737,6 @@ async def dbbuy_cb(_, cq: CallbackQuery):
         )
         if sent:
             return
-
     await _safe_edit_text(
         cq.message,
         f"🎉 {dot} **{char['emoji']} {char['name']} Purchased!**\n\n"
@@ -840,8 +752,7 @@ async def dbbuy_cb(_, cq: CallbackQuery):
 async def mydb_cmd(_, m: Message):
     target = m.reply_to_message.from_user if m.reply_to_message else m.from_user
     owned  = await _get_owned(target.id)
-
-    lines = []
+    lines  = []
     for key in owned:
         c = FIGHTERS.get(key)
         if c:
@@ -849,13 +760,12 @@ async def mydb_cmd(_, m: Message):
             lines.append(
                 f"{dot} **{c['name']}** — `{c['base_power']:,}` PL | {c['signature']}"
             )
-
     await m.reply(
         f"🥋 **{target.first_name}'s Dragon Ball Fighters**\n\n"
         f"🔵 Hero  |  🔴 Villain  |  ⚪ Neutral\n\n"
         + ("\n".join(lines) if lines else "_No fighters yet — use /dbshop!_")
         + f"\n\n`{len(owned)}/{len(FIGHTERS)}` fighters owned\n"
-        f"💡 Buy more with `/dbshop`"
+          f"💡 Buy more with `/dbshop`"
     )
 
 
@@ -898,9 +808,7 @@ async def dbfight_cmd(_, m: Message):
         opponent.last_name or "",
     )
 
-    c_owned = await _get_owned(challenger.id)
-    o_owned = await _get_owned(opponent.id)  # noqa: F841 — used later in pick flow
-
+    c_owned  = await _get_owned(challenger.id)
     fight_id = f"{challenger.id}v{opponent.id}_{int(datetime.utcnow().timestamp())}"
 
     _active_fights[fight_id] = {
@@ -927,7 +835,6 @@ async def dbfight_cmd(_, m: Message):
         f"**{challenger.first_name}** — pick your fighter:"
     )
     pick_markup = _owned_pick_keyboard(c_owned, fight_id, "c")
-
     sent = await _safe_reply_video(m, goku_video, pick_caption, reply_markup=pick_markup)
     if not sent:
         await m.reply(pick_caption, reply_markup=pick_markup)
@@ -936,7 +843,6 @@ async def dbfight_cmd(_, m: Message):
 @_soul.app.on_callback_query(filters.regex(r"^dbpick_page:([^:]+):([co]):(\d+)$"))
 async def dbpick_page_cb(_, cq: CallbackQuery):
     _, fight_id, role, page_str = cq.data.split(":", 3)
-    page  = int(page_str)
     state = _active_fights.get(fight_id)
     if not state:
         await cq.answer("Fight expired!", show_alert=True)
@@ -947,7 +853,7 @@ async def dbpick_page_cb(_, cq: CallbackQuery):
         return
     owned = await _get_owned(pick_uid)
     await cq.message.edit_reply_markup(
-        reply_markup=_owned_pick_keyboard(owned, fight_id, role, page)
+        reply_markup=_owned_pick_keyboard(owned, fight_id, role, int(page_str))
     )
     await cq.answer()
 
@@ -973,7 +879,6 @@ async def dbpick_cb(_, cq: CallbackQuery):
     if key not in owned:
         await cq.answer("You don't own this fighter! Buy from /dbshop", show_alert=True)
         return
-
     char = FIGHTERS.get(key)
     if not char:
         await cq.answer("Unknown fighter!", show_alert=True)
@@ -987,21 +892,17 @@ async def dbpick_cb(_, cq: CallbackQuery):
         state["challenger_char"] = key
         state["challenger_hp"]   = char["hp"]
         state["state"]           = "picking_opponent"
-
         o_owned = await _get_owned(state["opponent_id"])
         await cq.answer(f"You picked {char['name']}!")
-
         video = char["videos"].get("idle")
         if video:
             await _safe_reply_video(
-                cq.message,
-                video,
+                cq.message, video,
                 caption=(
                     f"{dot} **{state['challenger_name']}** enters as "
                     f"**{char['emoji']} {char['name']}**!\nPL: `{power:,}`"
                 ),
             )
-
         caption = (
             f"✅ {dot} **{state['challenger_name']}** chose **{char['emoji']} {char['name']}**!\n"
             f"⚡ PL: `{power:,}` | 💥 {char['signature']}\n\n"
@@ -1026,21 +927,18 @@ async def dbpick_cb(_, cq: CallbackQuery):
         c_dot   = TEAM_COLOR.get(c_char["team"], "⚪")
 
         await cq.answer(f"You picked {char['name']}! FIGHT!")
-
         video = char["videos"].get("idle")
         if video:
             await _safe_reply_video(
-                cq.message,
-                video,
+                cq.message, video,
                 caption=(
                     f"{dot} **{state['opponent_name']}** enters as "
                     f"**{char['emoji']} {char['name']}**!\nPL: `{o_power:,}`"
                 ),
             )
 
-        c_bar = _hp_bar(state["challenger_hp"], c_char["hp"])
-        o_bar = _hp_bar(state["opponent_hp"],   char["hp"])
-
+        c_bar   = _hp_bar(state["challenger_hp"], c_char["hp"])
+        o_bar   = _hp_bar(state["opponent_hp"],   char["hp"])
         caption = (
             f"⚡ **ROUND 1 — FIGHT!** ⚡\n\n"
             f"{c_dot} {c_char['emoji']} **{state['challenger_name']}** ({c_char['name']}) `{c_power:,}`\n"
@@ -1073,7 +971,6 @@ async def dbact_cb(_, cq: CallbackQuery):
     if not state or state["state"] != "fighting":
         await cq.answer("Fight not found or already ended!", show_alert=True)
         return
-
     if state["turn"] != uid:
         await cq.answer("It's not your turn!", show_alert=True)
         return
@@ -1095,7 +992,7 @@ async def dbact_cb(_, cq: CallbackQuery):
     atk_upg = await _get_upgrades(uid)
     def_upg = await _get_upgrades(def_uid)
     atk_pow = atk_char["base_power"] + atk_upg.get("bonus_power", 0)
-    def_pow = def_char["base_power"] + def_upg.get("bonus_power", 0)
+    def_pow = def_char["base_power"]  + def_upg.get("bonus_power", 0)
     if atk_transformed:
         atk_pow = int(atk_pow * atk_char["transform_power"])
 
@@ -1135,17 +1032,18 @@ async def dbact_cb(_, cq: CallbackQuery):
     else:  # attack
         if random.random() < 0.15:
             narrative = (
-                f"💨 {atk_dot} **{atk_name}** attacks but {def_dot} **{def_name} DODGES!**"
+                f"💨 {atk_dot} **{atk_name}** attacks but "
+                f"{def_dot} **{def_name} DODGES!**"
             )
         else:
             mult   = random.uniform(0.8, 1.3)
             damage = int(atk_pow / max(def_pow, 1) * mult * random.uniform(10, 20))
             damage = max(3, min(damage, 30))
             narrative = (
-                f"⚔️ {atk_dot} **{atk_name}** attacks! `-{damage} HP` to {def_dot} {def_name}!"
+                f"⚔️ {atk_dot} **{atk_name}** attacks! "
+                f"`-{damage} HP` to {def_dot} {def_name}!"
             )
 
-    # Apply damage
     if is_challenger:
         state["opponent_hp"]   = max(0, state["opponent_hp"] - damage)
     else:
@@ -1155,7 +1053,6 @@ async def dbact_cb(_, cq: CallbackQuery):
         sent = await _safe_reply_video(cq.message, video_url, caption=narrative)
         if not sent and narrative:
             await cq.message.reply(narrative)
-    # If no video and we have narrative it will appear in the board caption below
 
     c_hp     = state["challenger_hp"]
     o_hp     = state["opponent_hp"]
@@ -1173,7 +1070,7 @@ async def dbact_cb(_, cq: CallbackQuery):
             outcome = "opponent_wins"
         else:
             outcome = "challenger_wins"
-        await _resolve_fight(cq, state, fight_id, outcome)
+        await _resolve_fight(cq, state, outcome)
         _active_fights.pop(fight_id, None)
         return
 
@@ -1181,8 +1078,8 @@ async def dbact_cb(_, cq: CallbackQuery):
     def_transformed = (
         state["opponent_transformed"] if is_challenger else state["challenger_transformed"]
     )
-    def_hp_now  = o_hp if is_challenger else c_hp
-    def_max_hp  = o_char_d["hp"] if is_challenger else c_char_d["hp"]
+    def_hp_now = o_hp if is_challenger else c_hp
+    def_max_hp = o_char_d["hp"] if is_challenger else c_char_d["hp"]
     if not def_transformed and def_hp_now < def_max_hp * 0.35 and random.random() < 0.65:
         if is_challenger:
             state["opponent_transformed"] = True
@@ -1200,22 +1097,20 @@ async def dbact_cb(_, cq: CallbackQuery):
         else:
             await cq.message.reply(t_caption)
 
-    # Swap turn
     state["turn"]  = def_uid
     state["round"] += 1
 
-    c_bar    = _hp_bar(c_hp, c_char_d["hp"])
-    o_bar    = _hp_bar(o_hp, o_char_d["hp"])
-    c_t      = "✨" if state["challenger_transformed"] else ""
-    o_t      = "✨" if state["opponent_transformed"]   else ""
-    next_uid = def_uid
-    next_t   = (
+    c_bar     = _hp_bar(c_hp, c_char_d["hp"])
+    o_bar     = _hp_bar(o_hp, o_char_d["hp"])
+    c_t       = "✨" if state["challenger_transformed"] else ""
+    o_t       = "✨" if state["opponent_transformed"]   else ""
+    next_uid  = def_uid
+    next_t    = (
         state["opponent_transformed"] if is_challenger else state["challenger_transformed"]
     )
     next_name = state["opponent_name"] if is_challenger else state["challenger_name"]
 
-    hit_line = f"\n💥 {narrative}" if narrative and not video_url else ""
-
+    hit_line      = f"\n💥 {narrative}" if narrative and not video_url else ""
     board_caption = (
         f"⚡ **ROUND {state['round']}** ⚡{hit_line}\n\n"
         f"{c_dot2} {c_char_d['emoji']} **{state['challenger_name']}** {c_t}({c_char_d['name']})\n"
@@ -1225,18 +1120,14 @@ async def dbact_cb(_, cq: CallbackQuery):
         f"⚔️ **{next_name}'s turn!**"
     )
     board_markup = _action_keyboard(fight_id, next_uid, next_t)
-
     if not await _safe_edit_caption(cq.message, board_caption, reply_markup=board_markup):
         await _safe_edit_text(cq.message, board_caption, reply_markup=board_markup)
-
     await cq.answer()
 
 
 # ── Resolve Fight ─────────────────────────────────────────────────────────────
 
-async def _resolve_fight(
-    cq: CallbackQuery, state: dict, fight_id: str, outcome: str
-):
+async def _resolve_fight(cq: CallbackQuery, state: dict, outcome: str):
     c_uid  = state["challenger_id"]
     o_uid  = state["opponent_id"]
     c_name = state["challenger_name"]
@@ -1282,7 +1173,6 @@ async def _resolve_fight(
     await add_xp(w_uid, xp_reward)
     await deduct_balance(l_uid, kakera_loss)
     await add_xp(l_uid, 30)
-
     await _col("db_fight_stats").update_one(
         {"user_id": w_uid}, {"$inc": {"wins": 1, "total": 1}}, upsert=True
     )
@@ -1308,7 +1198,6 @@ async def _resolve_fight(
             cq.message, lose_vid,
             caption=f"💀 {l_dot} **{l_name}** has been defeated!",
         )
-
     win_vid = w_char["videos"].get("win")
     if win_vid:
         await _safe_reply_video(
@@ -1350,19 +1239,16 @@ async def dbupgrade_cmd(_, m: Message):
         )
         return
 
-    next_t = UPGRADE_TIERS[cur]
-
+    next_t        = UPGRADE_TIERS[cur]
     tiers_display = "\n".join(
         f"{'✅' if i < cur else ('⏩' if i == cur else '🔒')} "
         f"**{t['label']}** — +{t['boost']:,} PL | `{t['cost']:,}` kakera"
         for i, t in enumerate(UPGRADE_TIERS)
     )
-
-    buttons = _raw_markup([
-        [_raw_btn(f"⚡  Spend {next_t['cost']:,} Kakera", f"dbupg:{uid}:{cur}", style="success")],
-        [_raw_btn("❌  Cancel",                           f"dbupg:{uid}:cancel", style="danger")],
+    buttons = _markup([
+        [_btn(f"⚡ Spend {next_t['cost']:,} Kakera", f"dbupg:{uid}:{cur}")],
+        [_btn("❌ Cancel",                            f"dbupg:{uid}:cancel")],
     ])
-
     await m.reply(
         f"⚡ **POWER UPGRADE SYSTEM** ⚡\n\n"
         f"💰 Balance: `{bal:,}` kakera\n"
@@ -1380,11 +1266,9 @@ async def dbupgrade_cmd(_, m: Message):
 async def dbupg_cb(_, cq: CallbackQuery):
     _, uid_str, tier_str = cq.data.split(":")
     uid = int(uid_str)
-
     if cq.from_user.id != uid:
         await cq.answer("Not your upgrade!", show_alert=True)
         return
-
     if tier_str == "cancel":
         await _safe_edit_text(cq.message, "❌ Upgrade cancelled.")
         await cq.answer()
@@ -1392,14 +1276,12 @@ async def dbupg_cb(_, cq: CallbackQuery):
 
     cur_tier  = int(tier_str)
     upg       = await _get_upgrades(uid)
-
     if upg.get("tier", 0) != cur_tier:
         await cq.answer("Re-run /dbupgrade", show_alert=True)
         return
 
     tier_data = UPGRADE_TIERS[cur_tier]
     bal       = await get_balance(uid)
-
     if bal < tier_data["cost"]:
         await cq.answer(
             f"❌ Need {tier_data['cost']:,} kakera, you have {bal:,}!", show_alert=True
@@ -1409,14 +1291,16 @@ async def dbupg_cb(_, cq: CallbackQuery):
     await deduct_balance(uid, tier_data["cost"])
     await _col("db_upgrades").update_one(
         {"user_id": uid},
-        {"$inc": {"tier": 1, "bonus_power": tier_data["boost"], "total_spent": tier_data["cost"]}},
+        {"$inc": {
+            "tier":        1,
+            "bonus_power": tier_data["boost"],
+            "total_spent": tier_data["cost"],
+        }},
         upsert=True,
     )
-
     upg       = await _get_upgrades(uid)
     new_bonus = upg["bonus_power"]
     maxed     = upg["tier"] >= len(UPGRADE_TIERS)
-
     await _safe_edit_text(
         cq.message,
         f"🌟 **POWER UP!** 🌟\n\n"
@@ -1475,7 +1359,7 @@ async def search_ball(_, m: Message):
         owned_now = set(doc.get("balls", [])) | {found}
         await m.reply(
             f"🐉 **Dragon Ball Found!**\n\n"
-            f"{DRAGON_BALLS[found-1]} **{BALL_NAMES[found-1]} Ball** (#{found})\n\n"
+            f"{DRAGON_BALLS[found - 1]} **{BALL_NAMES[found - 1]} Ball** (#{found})\n\n"
             f"📦 Collection: `{len(owned_now)}/7`\n"
             + (
                 "✨ **ALL 7! Use `/wish` now!**"
@@ -1492,21 +1376,18 @@ async def my_balls(_, m: Message):
     target = m.reply_to_message.from_user if m.reply_to_message else m.from_user
     doc    = await _get_user_balls(target.id)
     owned  = sorted(set(doc.get("balls", [])))
-
-    rows = []
+    rows   = []
     for i in range(1, 8):
         if i in owned:
-            rows.append(f"✅ {DRAGON_BALLS[i-1]} {BALL_NAMES[i-1]}")
+            rows.append(f"✅ {DRAGON_BALLS[i - 1]} {BALL_NAMES[i - 1]}")
         else:
-            rows.append(f"❌ _{BALL_NAMES[i-1]}_")
-
+            rows.append(f"❌ _{BALL_NAMES[i - 1]}_")
     total = doc.get("total_collected", 0)
     ready = (
         "✨ **ALL COLLECTED! Use `/wish`!**"
         if len(owned) >= 7
         else f"📦 `{len(owned)}/7` collected"
     )
-
     await m.reply(
         f"🐉 **{target.first_name}'s Dragon Balls**\n\n"
         + "\n".join(rows)
@@ -1521,7 +1402,6 @@ async def my_balls(_, m: Message):
 @_soul.app.on_message(filters.command("wish"))
 async def wish_cmd(_, m: Message):
     uid = m.from_user.id
-
     if not await _has_all_balls(uid):
         doc   = await _get_user_balls(uid)
         owned = len(set(doc.get("balls", [])))
@@ -1536,15 +1416,12 @@ async def wish_cmd(_, m: Message):
         if elapsed < WISH_COOLDOWN:
             days  = int((WISH_COOLDOWN - elapsed) // 86400)
             hours = int(((WISH_COOLDOWN - elapsed) % 86400) // 3600)
-            await m.reply(
-                f"⏳ Dragon Balls recharging for **{days}d {hours}h**."
-            )
+            await m.reply(f"⏳ Dragon Balls recharging for **{days}d {hours}h**.")
             return
 
-    _wish_styles = ["primary", "success", "danger", "primary", "success"]
-    buttons = _raw_markup([
-        [_raw_btn(v["label"], f"wish:{uid}:{k}", style=_wish_styles[i])]
-        for i, (k, v) in enumerate(WISHES.items())
+    buttons = _markup([
+        [_btn(v["label"], f"wish:{uid}:{k}")]
+        for k, v in WISHES.items()
     ])
     await m.reply(
         "🐉 **SHENRON AWAKENS!** 🐉\n\n"
@@ -1558,11 +1435,9 @@ async def wish_cmd(_, m: Message):
 async def wish_cb(_, cq: CallbackQuery):
     _, uid_str, wish_key = cq.data.split(":")
     uid = int(uid_str)
-
     if cq.from_user.id != uid:
         await cq.answer("This isn't your wish!", show_alert=True)
         return
-
     wish = WISHES.get(wish_key)
     if not wish:
         await cq.answer("Unknown wish.", show_alert=True)
@@ -1599,13 +1474,13 @@ async def wish_cb(_, cq: CallbackQuery):
     await _col("db_wishes").insert_one(
         {"user_id": uid, "wish": wish_key, "wished_at": datetime.utcnow()}
     )
-
     await _safe_edit_text(
         cq.message,
         f"🌟 **Wish Granted!**\n\n{result}\n\n"
         "*'Until we meet again...'* — Shenron 🐉\n\n"
         "_Dragon Balls return in 7 days._",
     )
+    await cq.answer()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1648,7 +1523,6 @@ async def dbtop_cmd(_, m: Message):
     fighters = (
         await _col("db_fight_stats").find({}).sort("wins", -1).limit(10).to_list(10)
     )
-
     if not fighters:
         await m.reply("🏆 No battles yet. Use `/dbfight` to start!")
         return
@@ -1665,7 +1539,6 @@ async def dbtop_cmd(_, m: Message):
             f"{medal} [User](tg://user?id={uid})\n"
             f"   🏆 `{w}W/{l}L` | ⚡ `+{bonus:,}` PL"
         )
-
     await m.reply(
         "⚡ **Dragon Ball Fight Leaderboard** ⚡\n\n" + "\n\n".join(lines),
         disable_web_page_preview=True,
@@ -1674,20 +1547,20 @@ async def dbtop_cmd(_, m: Message):
 
 @_soul.app.on_message(filters.command(["dbhelp", "dbcommands"]))
 async def dbhelp_cmd(_, m: Message):
-    uid = m.from_user.id
-    help_buttons = _raw_markup([
-        [_raw_btn("🛒  Open Shop",       f"dbshop_page:{uid}:0",  style="primary")],
+    uid          = m.from_user.id
+    help_buttons = _markup([
+        [_btn("🛒 Open Shop",        f"dbshop_page:{uid}:0")],
         [
-            _raw_btn("🔵 Hero Fighters",    f"dbshop_page:{uid}:0",  style="primary"),
-            _raw_btn("🔴 Villain Fighters", f"dbshop_page:{uid}:1",  style="danger"),
+            _btn("🔵 Hero Fighters",    f"dbshop_page:{uid}:0"),
+            _btn("🔴 Villain Fighters", f"dbshop_page:{uid}:1"),
         ],
         [
-            _raw_btn("⚪ Neutral Fighters", f"dbshop_page:{uid}:3",  style="success"),
-            _raw_btn("⚡ Power Up",         f"dbupg:{uid}:cancel",   style="success"),
+            _btn("⚪ Neutral Fighters", f"dbshop_page:{uid}:3"),
+            _btn("⚡ Power Up",         f"dbupg:{uid}:cancel"),
         ],
         [
-            _raw_btn("🥋 My Collection",    f"dbshop_mine:{uid}",    style="primary"),
-            _raw_btn("🐉 My Dragon Balls",  f"dbshop_mine:{uid}",    style="danger"),
+            _btn("🥋 My Collection",    f"dbshop_mine:{uid}"),
+            _btn("🐉 My Dragon Balls",  f"dbshop_mine:{uid}"),
         ],
     ])
     await m.reply(
